@@ -1284,7 +1284,7 @@ impl App {
                 }
                 let fi = x0 + (c.fade_in as f64 / v.spp()) as f32;
                 let fo = x1 - (c.fade_out as f64 / v.spp()) as f32;
-                let near_top = p.y < row.top() + CLIP_BAR + 4.0;
+                let near_top = p.y < row.top() + CLIP_BAR + 9.0;
                 let zone = if near_top && (p.x - fi).abs() <= 6.0 && x1 - x0 > 24.0 {
                     Zone::FadeIn
                 } else if near_top && (p.x - fo).abs() <= 6.0 && x1 - x0 > 24.0 {
@@ -1363,7 +1363,12 @@ impl App {
             best.1
         };
         if resp.drag_started() {
-            if let Some(p) = resp.interact_pointer_pos() {
+            // egui reports a drag only after the pointer has moved a few
+            // pixels, so hit-test where the button went down, not where the
+            // pointer is now; otherwise small targets (fade handles, clip
+            // edges, automation points) are missed and the clip moves instead.
+            let origin = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos());
+            if let Some(p) = origin {
                 let pos = v.s(p.x).max(0.0);
                 let env = env_hit(p, s);
                 if let Some((ti, pan, h)) = env {
