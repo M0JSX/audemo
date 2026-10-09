@@ -39,16 +39,18 @@ fn read_tags(rev: &MetadataRevision, meta: &mut crate::export::Metadata, total: 
             Some(StandardTagKey::Comment) => Some(Tag::Comment),
             Some(StandardTagKey::Copyright) => Some(Tag::Copyright),
             Some(StandardTagKey::TrackTotal) => {
-                *total = Some(t.value.to_string());
+                *total = Some(t.value.to_string().trim_matches(|c: char| c == '\0' || c.is_whitespace()).to_string());
                 None
             }
             Some(_) => None,
             None => Tag::from_key(&t.key),
         };
         if let Some(tag) = tag {
+            // RIFF INFO strings arrive with their NUL terminator.
             let v = t.value.to_string();
-            if !v.trim().is_empty() && meta.get(tag).is_empty() {
-                meta.set(tag, v.trim());
+            let v = v.trim_matches(|c: char| c == '\0' || c.is_whitespace());
+            if !v.is_empty() && meta.get(tag).is_empty() {
+                meta.set(tag, v);
             }
         }
     }
