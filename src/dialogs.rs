@@ -52,40 +52,65 @@ impl App {
         let mut keep = true;
         let mut next: Option<Dialog> = None;
         match dialog {
-            Dialog::NewFile { mut rate, mut channels, mut seconds } => {
-                centered(egui::Window::new("New Audio File")).show(ctx, |ui| {
+            Dialog::NewFile { mut name, mut rate, mut channels, mut bits, mut seconds, then_record } => {
+                let mut open = true;
+                centered(egui::Window::new("New Audio File").open(&mut open)).show(ctx, |ui| {
+                    ui.set_min_width(340.0);
                     egui::Grid::new("newfile").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                        ui.label("Sample rate");
-                        egui::ComboBox::from_id_source("nf_rate").selected_text(format!("{rate} Hz")).show_ui(ui, |ui| {
+                        ui.label("File Name:");
+                        ui.add(egui::TextEdit::singleline(&mut name).desired_width(220.0));
+                        ui.end_row();
+                        ui.label("Sample Rate:");
+                        egui::ComboBox::from_id_source("nf_rate").width(120.0).selected_text(format!("{rate}")).show_ui(ui, |ui| {
                             for r in SAMPLE_RATES {
-                                ui.selectable_value(&mut rate, r, format!("{r} Hz"));
+                                ui.selectable_value(&mut rate, r, format!("{r}"));
                             }
                         });
+                        ui.label(RichText::new("Hz").color(TEXT_DIM));
                         ui.end_row();
-                        ui.label("Channels");
-                        ui.horizontal(|ui| {
-                            ui.radio_value(&mut channels, 1, "Mono");
-                            ui.radio_value(&mut channels, 2, "Stereo");
+                        ui.label("Channels:");
+                        egui::ComboBox::from_id_source("nf_ch").width(120.0).selected_text(if channels == 1 { "Mono" } else { "Stereo" }).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut channels, 1, "Mono");
+                            ui.selectable_value(&mut channels, 2, "Stereo");
                         });
                         ui.end_row();
-                        ui.label("Initial length");
-                        ui.add(egui::DragValue::new(&mut seconds).speed(0.1).range(0.0..=3600.0).suffix(" s"));
+                        ui.label("Bit Depth:");
+                        let bits_label = |b: Option<u32>| match b {
+                            Some(16) => "16",
+                            Some(24) => "24",
+                            _ => "32 (float)",
+                        };
+                        egui::ComboBox::from_id_source("nf_bits").width(120.0).selected_text(bits_label(bits)).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut bits, Some(16), "16");
+                            ui.selectable_value(&mut bits, Some(24), "24");
+                            ui.selectable_value(&mut bits, None, "32 (float)");
+                        });
                         ui.end_row();
+                        if !then_record {
+                            ui.label("Initial Length:");
+                            ui.add(egui::DragValue::new(&mut seconds).speed(0.1).range(0.0..=3600.0).suffix(" s"));
+                            ui.end_row();
+                        }
                     });
-                    ui.label(RichText::new("Leave the length at 0 to record or paste into an empty file.").color(TEXT_DIM).size(11.0));
+                    if then_record {
+                        ui.label(RichText::new("Recording starts as soon as you click OK. Input is converted to this format when you stop.").color(TEXT_DIM).size(11.0));
+                    }
                     ui.add_space(6.0);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.button("Cancel").clicked() {
                             keep = false;
                         }
-                        if ui.add(egui::Button::new(RichText::new("  OK  ").color(Color32::WHITE))).clicked() {
-                            self.create_new(rate, channels, seconds);
+                        if ui.button("  OK  ").clicked() {
+                            self.create_new(&name, rate, channels, bits, if then_record { 0.0 } else { seconds });
+                            if then_record {
+                                self.actions.push(Action::Record);
+                            }
                             keep = false;
                         }
                     });
                 });
-                if keep {
-                    next = Some(Dialog::NewFile { rate, channels, seconds });
+                if open && keep {
+                    next = Some(Dialog::NewFile { name, rate, channels, bits, seconds, then_record });
                 }
             }
             Dialog::Export { mut format, mut dither, path, selection } => {

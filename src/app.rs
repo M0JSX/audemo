@@ -343,7 +343,8 @@ pub struct EffectDialog {
 
 pub enum Dialog {
     Effect(EffectDialog),
-    NewFile { rate: u32, channels: usize, seconds: f32 },
+    /// New Audio File; `then_record` starts recording into it on OK.
+    NewFile { name: String, rate: u32, channels: usize, bits: Option<u32>, seconds: f32, then_record: bool },
     Export { format: WavFormat, dither: bool, path: Option<PathBuf>, selection: bool },
     Preferences { input: Option<String>, output: Option<String>, inputs: Vec<String>, outputs: Vec<String> },
     MixPaste { mode: usize, clip_db: f32, orig_db: f32 },
@@ -483,6 +484,8 @@ pub struct App {
     /// (document id, position) of a paused playback.
     pub paused: Option<(u64, f64)>,
     pub free_cache: std::cell::Cell<Option<(Instant, Option<u64>)>>,
+    #[cfg(any(target_os = "macos", audemo_check_menu))]
+    pub native_menu: Option<crate::macmenu::NativeMenu>,
     pub tool: Tool,
     pub looping: bool,
     pub follow: bool,
@@ -547,6 +550,8 @@ impl App {
             browser_selected: None,
             paused: None,
             free_cache: std::cell::Cell::new(None),
+            #[cfg(any(target_os = "macos", audemo_check_menu))]
+            native_menu: None,
             tool: Tool::Selection,
             looping: false,
             follow: true,
@@ -563,6 +568,8 @@ impl App {
         if !open.is_empty() {
             app.actions.push(Action::OpenPaths(open));
         }
+        #[cfg(any(target_os = "macos", audemo_check_menu))]
+        app.init_native_menu();
         app
     }
 
@@ -634,6 +641,8 @@ impl App {
     // ---------------------------------------------------------------- frame
 
     pub fn frame(&mut self, ctx: &egui::Context) {
+        #[cfg(any(target_os = "macos", audemo_check_menu))]
+        self.poll_native_menu();
         self.poll_loads();
         self.poll_job();
         self.handle_dropped_files(ctx);
@@ -1264,6 +1273,12 @@ impl App {
             self.stop_recording();
             return;
         }
+        // Like Audition, recording needs a file: ask for its format first.
+        if self.doc().is_none() {
+            let name = format!("Untitled {}", self.docs.len() + 1);
+            self.dialog = Some(Dialog::NewFile { name, rate: 48000, channels: 2, bits: None, seconds: 0.0, then_record: true });
+            return;
+        }
         self.engine.stop();
         let (rate, channels) = match self.engine.start_recording() {
             Ok(f) => f,
@@ -1277,15 +1292,7 @@ impl App {
                 return;
             }
         };
-        // Like Audition, recording needs a file: make one if none is open.
-        if self.doc().is_none() {
-            let id = self.new_id();
-            let n = self.docs.len() + 1;
-            let ch = channels.clamp(1, 2);
-            let mut doc = Document::new(id, format!("Recording {n}"), None, vec![Vec::new(); ch], rate, None, "New Recording");
-            doc.dirty = true;
-            self.add_doc(doc);
-        }
+        let _ = channels;
         let d = self.doc_mut().unwrap();
         let range = d.sel_range().unwrap_or((d.cursor, d.cursor));
         d.sel = None;
@@ -1384,7 +1391,8 @@ impl App {
         match action {
             Action::New => {
                 let (rate, channels) = self.doc().map(|d| (d.sample_rate, d.n_ch())).unwrap_or((48000, 2));
-                self.dialog = Some(Dialog::NewFile { rate, channels, seconds: 0.0 });
+                let name = format!("Untitled {}", self.docs.len() + 1);
+                self.dialog = Some(Dialog::NewFile { name, rate, channels, bits: None, seconds: 0.0, then_record: false });
             }
             Action::Open => {
                 let picked = rfd::FileDialog::new()
@@ -1868,11 +1876,12 @@ impl App {
         }
     }
 
-    pub fn create_new(&mut self, rate: u32, channels: usize, seconds: f32) {
+    pub fn create_new(&mut self, name: &str, rate: u32, channels: usize, bits: Option<u32>, seconds: f32) {
         let id = self.new_id();
-        let n = self.docs.len() + 1;
         let len = (seconds.max(0.0) as f64 * rate as f64) as usize;
-        let doc = Document::new(id, format!("Untitled {n}"), None, vec![vec![0.0; len]; channels.max(1)], rate, None, "New File");
+        let name = if name.trim().is_empty() { format!("Untitled {}", self.docs.len() + 1) } else { name.trim().to_string() };
+        let mut doc = Document::new(id, name, None, vec![vec![0.0; len]; channels.max(1)], rate, bits, "New Audio File");
+        doc.dirty = true;
         self.add_doc(doc);
     }
 }

@@ -51,6 +51,11 @@ fn time_field(ui: &mut Ui, id: egui::Id, samples: f64, sr: u32, enabled: bool) -
 
 impl App {
     pub fn menu_bar(&mut self, ctx: &egui::Context) {
+        // macOS gets the native menu bar at the top of the screen instead.
+        #[cfg(any(target_os = "macos", audemo_check_menu))]
+        if self.native_menu_active() {
+            return;
+        }
         let has_doc = self.doc().is_some();
         let has_sel = self.doc().and_then(|d| d.sel_range()).is_some();
         let can_undo = self.doc().map(|d| !d.undo.is_empty()).unwrap_or(false);

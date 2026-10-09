@@ -1,6 +1,6 @@
 [package]
 name = "audemo"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.80"
 description = "Audemo: a cross-platform waveform audio editor with a built-in effects suite"
@@ -25,6 +25,13 @@ rfd = "0.14.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Native menu bar at the top of the screen on macOS.
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = "0.15"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(audemo_check_menu)'] }
 
 [profile.release]
 opt-level = 3

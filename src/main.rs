@@ -7,6 +7,8 @@ mod dsp;
 mod editor;
 mod engine;
 mod io;
+#[cfg(any(target_os = "macos", audemo_check_menu))]
+mod macmenu;
 mod panels;
 mod prefs;
 mod theme;
