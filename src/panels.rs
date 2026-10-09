@@ -40,7 +40,7 @@ fn time_field(ui: &mut Ui, id: egui::Id, samples: f64, sr: u32, enabled: bool) -
     }
     let resp = ui.add_enabled(
         enabled,
-        egui::TextEdit::singleline(&mut text).id(id).desired_width(78.0).font(egui::TextStyle::Monospace).text_color(HOT).frame(has_focus),
+        egui::TextEdit::singleline(&mut text).id(id).desired_width(92.0).clip_text(false).font(egui::TextStyle::Monospace).text_color(HOT).frame(has_focus),
     );
     ui.data_mut(|d| d.insert_temp(id, text.clone()));
     if resp.lost_focus() {
@@ -493,7 +493,7 @@ impl App {
         let (sa, sb) = doc.sel_range().unwrap_or((doc.cursor, doc.cursor));
         let mut new_sel: Option<(f64, f64)> = None;
         let mut new_view: Option<(f64, f64)> = None;
-        egui::Grid::new("selview").num_columns(4).spacing([6.0, 4.0]).show(ui, |ui| {
+        egui::Grid::new("selview").num_columns(4).min_col_width(60.0).spacing([10.0, 4.0]).show(ui, |ui| {
             ui.label("");
             for h in ["Start", "End", "Duration"] {
                 ui.label(RichText::new(h).color(TEXT_DIM).size(11.0));
