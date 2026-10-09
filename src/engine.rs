@@ -16,7 +16,7 @@ pub const PREVIEW_TAG: u64 = u64::MAX;
 pub const BROWSER_TAG: u64 = u64::MAX - 1;
 
 /// Frames summarised per live-recording peak block.
-pub const REC_BLOCK: usize = 256;
+pub const REC_BLOCK: usize = 64;
 
 /// Frames per readiness block of a [`StreamBuf`].
 pub const STREAM_BLOCK: usize = 1024;
@@ -125,11 +125,52 @@ pub struct RecShared {
     chunks: Vec<Vec<f32>>,
     chunk_len: usize,
     samples: usize,
-    /// (min, max) per channel for every REC_BLOCK frames, for live drawing.
-    pub blocks: Vec<[(f32, f32); 2]>,
-    acc: [(f32, f32); 2],
-    acc_frames: usize,
     pub peaks: [f32; 2],
+}
+
+/// The UI thread's de-interleaved copy of the recording so far (first two
+/// channels), with a min/max summary per REC_BLOCK frames. It is topped up
+/// once per frame, so the live waveform is drawn from the real samples.
+#[derive(Default)]
+pub struct RecView {
+    pub chans: Vec<Vec<f32>>,
+    blocks: Vec<Vec<(f32, f32)>>,
+    /// Interleaved samples already copied.
+    taken: usize,
+}
+
+impl RecView {
+    pub fn frames(&self) -> usize {
+        self.chans.first().map(|c| c.len()).unwrap_or(0)
+    }
+
+    /// Exact (min, max) of channel `c` over frames [a, b).
+    pub fn min_max(&self, c: usize, a: usize, b: usize) -> (f32, f32) {
+        let c = c.min(self.chans.len().saturating_sub(1));
+        let (ch, bl) = (&self.chans[c], &self.blocks[c]);
+        let b = b.min(ch.len());
+        let fold = |acc: (f32, f32), v: f32| (acc.0.min(v), acc.1.max(v));
+        let mut m = (f32::MAX, f32::MIN);
+        if a >= b {
+            return (0.0, 0.0);
+        }
+        let first_full = a.div_ceil(REC_BLOCK);
+        let last_full = b / REC_BLOCK;
+        if last_full > first_full + 1 {
+            m = ch[a..first_full * REC_BLOCK].iter().copied().fold(m, fold);
+            m = bl[first_full..last_full.min(bl.len())].iter().fold(m, |m, &(lo, hi)| (m.0.min(lo), m.1.max(hi)));
+            m = ch[(last_full.min(bl.len()) * REC_BLOCK)..b].iter().copied().fold(m, fold);
+        } else {
+            m = ch[a..b].iter().copied().fold(m, fold);
+        }
+        m
+    }
+
+    fn reset(&mut self, n: usize) {
+        self.chans = vec![Vec::new(); n];
+        self.blocks = vec![Vec::new(); n];
+        self.taken = 0;
+    }
 }
 
 struct Recording {
@@ -137,6 +178,7 @@ struct Recording {
     shared: Arc<Mutex<RecShared>>,
     channels: usize,
     rate: u32,
+    view: RecView,
 }
 
 pub struct Engine {
@@ -382,17 +424,49 @@ impl Engine {
     }
 
     pub fn recorded_frames(&self) -> usize {
-        match &self.rec {
-            Some(r) => r.shared.lock().map(|s| s.samples / r.channels.max(1)).unwrap_or(0),
-            None => 0,
+        self.rec.as_ref().map(|r| r.view.frames()).unwrap_or(0)
+    }
+
+    /// Copy newly recorded audio into the UI-side view. Call once per frame.
+    pub fn poll_recording(&mut self) {
+        let Some(r) = &mut self.rec else { return };
+        let n_ch = r.channels.max(1);
+        let keep = n_ch.min(2);
+        let Ok(s) = r.shared.lock() else { return };
+        let v = &mut r.view;
+        let total = s.samples - s.samples % n_ch;
+        let mut i = v.taken;
+        while i < total {
+            let chunk = &s.chunks[i / s.chunk_len];
+            let off = i % s.chunk_len;
+            let n = (chunk.len() - off).min(total - i);
+            for frame in chunk[off..off + n].chunks_exact(n_ch) {
+                for c in 0..keep {
+                    v.chans[c].push(frame[c]);
+                }
+            }
+            i += n - n % n_ch;
+            if n % n_ch != 0 {
+                // A frame straddles two chunks (only if chunk_len % n_ch != 0).
+                break;
+            }
+        }
+        v.taken = i;
+        drop(s);
+        let frames = v.frames();
+        for c in 0..keep {
+            let done = v.blocks[c].len();
+            for bi in done..frames / REC_BLOCK {
+                let seg = &v.chans[c][bi * REC_BLOCK..(bi + 1) * REC_BLOCK];
+                let m = seg.iter().fold((f32::MAX, f32::MIN), |m, &x| (m.0.min(x), m.1.max(x)));
+                v.blocks[c].push(m);
+            }
         }
     }
 
-    /// Run `f` over the live peak blocks of the current recording.
-    pub fn with_rec_blocks<R>(&self, f: impl FnOnce(&[[(f32, f32); 2]]) -> R) -> Option<R> {
-        let r = self.rec.as_ref()?;
-        let s = r.shared.lock().ok()?;
-        Some(f(&s.blocks))
+    /// The recording so far, for live drawing.
+    pub fn rec_view(&self) -> Option<&RecView> {
+        self.rec.as_ref().map(|r| &r.view).filter(|v| !v.chans.is_empty())
     }
 
     /// Start recording from the chosen input; returns (rate, channels).
@@ -404,15 +478,12 @@ impl Engine {
         let supported = device.default_input_config().map_err(|e| e.to_string())?;
         let fmt = supported.sample_format();
         let cfg: cpal::StreamConfig = supported.into();
-        // One-second chunks; the first is allocated up front.
-        let chunk_len = (cfg.sample_rate.0 as usize * cfg.channels.max(1) as usize).max(4096);
+        // One-second chunks (a whole number of frames); the first is allocated up front.
+        let chunk_len = cfg.sample_rate.0.max(4096) as usize * cfg.channels.max(1) as usize;
         let shared = Arc::new(Mutex::new(RecShared {
             chunks: vec![Vec::with_capacity(chunk_len)],
             chunk_len,
             samples: 0,
-            blocks: Vec::new(),
-            acc: [(f32::MAX, f32::MIN); 2],
-            acc_frames: 0,
             peaks: [0.0; 2],
         }));
         let s = shared.clone();
@@ -425,26 +496,22 @@ impl Engine {
         }?;
         stream.play().map_err(|e| e.to_string())?;
         let (rate, channels) = (cfg.sample_rate.0, cfg.channels as usize);
-        self.rec = Some(Recording { _stream: stream, shared, channels, rate });
+        let mut view = RecView::default();
+        view.reset(channels.clamp(1, 2));
+        self.rec = Some(Recording { _stream: stream, shared, channels, rate, view });
         Ok((rate, channels))
     }
 
     /// Stop recording and return de-interleaved audio (max two channels).
     pub fn stop_recording(&mut self) -> Option<(Vec<Vec<f32>>, u32)> {
+        let rec = self.rec.as_mut()?;
+        // Stop the input first, then collect whatever arrived since the last frame.
+        rec._stream.pause().ok();
+        self.poll_recording();
         let rec = self.rec.take()?;
         let rate = rec.rate;
-        let n_ch = rec.channels.max(1);
         drop(rec._stream);
-        let chunks = std::mem::take(&mut rec.shared.lock().ok()?.chunks);
-        let data: Vec<f32> = chunks.concat();
-        let keep = n_ch.min(2);
-        let mut out = vec![Vec::with_capacity(data.len() / n_ch); keep];
-        for frame in data.chunks(n_ch) {
-            for (c, o) in out.iter_mut().enumerate() {
-                o.push(frame.get(c).copied().unwrap_or(0.0));
-            }
-        }
-        Some((out, rate))
+        Some((rec.view.chans, rate))
     }
 }
 
@@ -556,9 +623,6 @@ where
                 for frame in input.chunks(channels) {
                     for c in 0..2 {
                         let v: f32 = cpal::Sample::to_sample::<f32>(frame[c.min(frame.len() - 1)]);
-                        let a = &mut s.acc[c];
-                        a.0 = a.0.min(v);
-                        a.1 = a.1.max(v);
                         s.peaks[c] = s.peaks[c].max(v.abs());
                     }
                     for &smp in frame {
@@ -570,17 +634,31 @@ where
                         s.chunks.last_mut().unwrap().push(v);
                         s.samples += 1;
                     }
-                    s.acc_frames += 1;
-                    if s.acc_frames == REC_BLOCK {
-                        let blk = s.acc;
-                        s.blocks.push(blk);
-                        s.acc = [(f32::MAX, f32::MIN); 2];
-                        s.acc_frames = 0;
-                    }
                 }
             },
             |e| eprintln!("audio input error: {e}"),
             None,
         )
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rec_view_min_max_matches_scan() {
+        let mut v = RecView::default();
+        v.reset(1);
+        let n = 10_000;
+        v.chans[0] = (0..n).map(|i| ((i as f32 * 0.37).sin() * (i as f32 / n as f32))).collect();
+        for bi in 0..n / REC_BLOCK {
+            let seg = &v.chans[0][bi * REC_BLOCK..(bi + 1) * REC_BLOCK];
+            v.blocks[0].push(seg.iter().fold((f32::MAX, f32::MIN), |m, &x| (m.0.min(x), m.1.max(x))));
+        }
+        for &(a, b) in &[(0, 1), (3, 70), (63, 129), (100, 9_999), (5, 10_000), (640, 704), (9_990, 12_000)] {
+            let want = v.chans[0][a..b.min(n)].iter().fold((f32::MAX, f32::MIN), |m, &x| (m.0.min(x), m.1.max(x)));
+            assert_eq!(v.min_max(0, a, b), want, "{a}..{b}");
+        }
+    }
 }

@@ -688,6 +688,7 @@ impl App {
 
     /// Keep the target file's live length and view in step with the input.
     fn track_recording(&mut self) {
+        self.engine.poll_recording();
         let Some(t) = &self.rec_target else { return };
         let Some((rate, _)) = self.engine.recording_format() else { return };
         let frames = self.engine.recorded_frames();

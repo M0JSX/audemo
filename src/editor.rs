@@ -292,7 +292,8 @@ impl App {
             if t.doc_id == doc.id {
                 let a = t.range.0 as f64;
                 let head = a + doc.pending as f64;
-                let bs = crate::engine::REC_BLOCK as f64 * sr / in_rate as f64;
+                // Input frames per document sample.
+                let ratio = in_rate as f64 / sr;
                 let x0 = v.x(a).max(lanes.left());
                 let x1 = v.x(head).min(lanes.right());
                 for c in 0..n_ch {
@@ -303,31 +304,45 @@ impl App {
                     draw_grid(&painter, Rect::from_x_y_ranges(x0..=x1.max(x0), r.y_range()), doc.amp_zoom);
                 }
                 let amp_zoom = doc.amp_zoom;
-                self.engine.with_rec_blocks(|blocks| {
+                if let Some(rv) = self.engine.rec_view() {
+                    let frames = rv.frames();
+                    let spp_in = v.spp() * ratio;
                     let mut shapes = Vec::new();
-                    let cols = (x1 - x0).max(0.0) as usize;
                     for c in 0..n_ch {
                         let r = lane_rect(wave_area, c);
                         let mid = r.center().y;
                         let amp = (r.height() * 0.5 - 1.0) * amp_zoom;
-                        let bc = c.min(1);
-                        for i in 0..cols {
-                            let x = x0 + i as f32;
-                            let s0 = (v.s(x) - a) / bs;
-                            let s1 = (v.s(x + 1.0) - a) / bs;
-                            let b0 = s0.floor().max(0.0) as usize;
-                            let b1 = (s1.ceil() as usize).max(b0 + 1).min(blocks.len());
-                            if b0 >= b1 {
-                                continue;
+                        let y = |val: f32| (mid - val * amp).clamp(r.top(), r.bottom());
+                        if spp_in >= 1.0 {
+                            // One min/max column per pixel, from the real samples. Each
+                            // column also takes in the previous column's last sample so
+                            // neighbouring columns join up instead of stepping.
+                            let mut x = x0.floor();
+                            while x < x1 {
+                                let f0 = (v.s(x) - a) * ratio;
+                                let f1 = f0 + spp_in;
+                                if f1 > 0.0 && (f0 as usize) < frames {
+                                    let ia = (f0.max(0.0) as usize).saturating_sub(1);
+                                    let ib = (f1.ceil() as usize).min(frames).max(ia + 1);
+                                    let (lo, hi) = rv.min_max(c, ia, ib);
+                                    let (y0, y1) = (y(hi), y(lo));
+                                    shapes.push(Shape::line_segment([pos2(x + 0.5, y0), pos2(x + 0.5, y1.max(y0 + 1.0))], Stroke::new(1.0_f32, WAVE)));
+                                }
+                                x += 1.0;
                             }
-                            let (lo, hi) = blocks[b0..b1].iter().fold((f32::MAX, f32::MIN), |(lo, hi), b| (lo.min(b[bc].0), hi.max(b[bc].1)));
-                            let y0 = (mid - hi * amp).clamp(r.top(), r.bottom());
-                            let y1 = (mid - lo * amp).clamp(r.top(), r.bottom()).max(y0 + 1.0);
-                            shapes.push(Shape::line_segment([pos2(x + 0.5, y0), pos2(x + 0.5, y1)], Stroke::new(1.0_f32, WAVE)));
+                        } else {
+                            // Zoomed in past one sample per pixel: draw the samples as a line.
+                            let ch = &rv.chans[c.min(rv.chans.len() - 1)];
+                            let fa = ((v.start - a) * ratio).floor().max(0.0) as usize;
+                            let fb = (((v.end - a) * ratio).ceil() as usize + 1).min(frames);
+                            if fb > fa + 1 {
+                                let pts: Vec<Pos2> = (fa..fb).map(|i| pos2(v.x(a + i as f64 / ratio), y(ch[i]))).collect();
+                                shapes.push(Shape::line(pts, Stroke::new(1.3_f32, WAVE)));
+                            }
                         }
                     }
-                    painter.extend(shapes);
-                });
+                    painter.with_clip_rect(Rect::from_x_y_ranges(x0..=x1.max(x0), wave_area.y_range())).extend(shapes);
+                }
                 let hx = v.x(head);
                 if hx >= lanes.left() && hx <= lanes.right() {
                     painter.line_segment([pos2(hx, ruler.top()), pos2(hx, lanes.bottom())], Stroke::new(1.5_f32, RECORD));
