@@ -15,7 +15,9 @@ use crate::theme::*;
 const SHORTCUTS: &[(&str, &str)] = &[
     ("Play / stop", "Space"),
     ("Record (Stop or Space ends it)", "Shift+Space"),
-    ("Open / New / Save / Save As", "Ctrl+O / Ctrl+N / Ctrl+S / Ctrl+Shift+S"),
+    ("Open / Save / Save As", "Ctrl+O / Ctrl+S / Ctrl+Shift+S"),
+    ("New multitrack session / new audio file", "Ctrl+N / Ctrl+Shift+N"),
+    ("Waveform / Multitrack editor", "9 / 0"),
     ("Undo / Redo", "Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y)"),
     ("Cut / Copy / Paste", "Ctrl+X / Ctrl+C / Ctrl+V"),
     ("Copy to New / Paste to New", "Alt+Shift+C / Ctrl+Alt+V"),
@@ -36,6 +38,12 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Spectral display", "Shift+D"),
     ("Capture noise print", "Shift+P"),
     ("Toggle effect preview", "Space (with an effect open)"),
+    ("Multitrack: add audio track", "Alt+A"),
+    ("Multitrack: split clip at playhead", "Ctrl+K"),
+    ("Multitrack: move / trim / fade a clip", "Drag the clip / its edges / its yellow handles"),
+    ("Multitrack: snap off while dragging", "Hold Alt"),
+    ("Multitrack: scroll tracks", "Wheel over the track headers, or Alt+wheel"),
+    ("Multitrack: open a clip's file", "Double-click the clip"),
 ];
 
 fn centered(w: egui::Window<'_>) -> egui::Window<'_> {
@@ -348,7 +356,13 @@ impl App {
                 }
             }
             Dialog::ConfirmQuit => {
-                let unsaved: Vec<String> = self.docs.iter().filter(|d| d.dirty).map(|d| d.name.clone()).collect();
+                let unsaved: Vec<String> = self
+                    .sessions
+                    .iter()
+                    .filter(|s| s.dirty)
+                    .map(|s| format!("{} (session)", s.name))
+                    .chain(self.docs.iter().filter(|d| d.dirty).map(|d| d.name.clone()))
+                    .collect();
                 centered(egui::Window::new("Quit Audemo?")).show(ctx, |ui| {
                     ui.label("These files have unsaved changes:");
                     for n in &unsaved {
@@ -368,6 +382,76 @@ impl App {
                 });
                 if keep {
                     next = Some(Dialog::ConfirmQuit);
+                }
+            }
+            Dialog::NewSession { mut name, mut rate, mut tracks } => {
+                let mut open = true;
+                let mut create = false;
+                centered(egui::Window::new("New Multitrack Session").open(&mut open)).show(ctx, |ui| {
+                    ui.set_min_width(340.0);
+                    egui::Grid::new("newsession").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                        ui.label("Session Name:");
+                        ui.add(egui::TextEdit::singleline(&mut name).desired_width(220.0));
+                        ui.end_row();
+                        ui.label("Sample Rate:");
+                        egui::ComboBox::from_id_source("ns_rate").width(120.0).selected_text(format!("{rate} Hz")).show_ui(ui, |ui| {
+                            for r in SAMPLE_RATES {
+                                ui.selectable_value(&mut rate, r, format!("{r} Hz"));
+                            }
+                        });
+                        ui.end_row();
+                        ui.label("Tracks:");
+                        ui.add(egui::DragValue::new(&mut tracks).range(1..=64));
+                        ui.end_row();
+                        ui.label("Master:");
+                        ui.label(RichText::new("Stereo").color(TEXT_DIM));
+                        ui.end_row();
+                    });
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("    OK    ").clicked() {
+                            create = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                });
+                if create {
+                    let n = if name.trim().is_empty() { "Untitled Session".to_string() } else { name.trim().to_string() };
+                    self.create_session(n, rate, tracks);
+                } else if keep && open {
+                    next = Some(Dialog::NewSession { name, rate, tracks });
+                }
+            }
+            Dialog::ConfirmCloseSession { session } => {
+                let name = self.sessions.get(session).map(|s| s.name.clone()).unwrap_or_default();
+                centered(egui::Window::new("Save changes?")).show(ctx, |ui| {
+                    ui.label(format!("Save changes to the session \"{name}\" before closing?"));
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Save").clicked() {
+                            self.active_session = Some(session);
+                            self.save_session(false);
+                            if !self.sessions.get(session).map(|s| s.dirty).unwrap_or(true) {
+                                self.actions.push(Action::MtCloseSession(session));
+                            }
+                            keep = false;
+                        }
+                        if ui.button("Don't Save").clicked() {
+                            if let Some(s) = self.sessions.get_mut(session) {
+                                s.dirty = false;
+                            }
+                            self.actions.push(Action::MtCloseSession(session));
+                            keep = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                });
+                if keep {
+                    next = Some(Dialog::ConfirmCloseSession { session });
                 }
             }
             Dialog::AmplitudeStats { title, rx, stats } => {

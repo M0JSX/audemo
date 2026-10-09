@@ -63,15 +63,20 @@ impl LiveRack {
         let shared = Arc::new(Mutex::new((1u64, settings.clone())));
         let cancel = Arc::new(AtomicBool::new(false));
         let error = Arc::new(Mutex::new(None));
-        let job = Renderer {
-            effects,
-            audio: audio.clone(),
-            sr: sample_rate,
-            np: noise_print,
+        let src = audio.clone();
+        let n_ch = audio.len();
+        let job = StreamRenderer {
             sb: sb.clone(),
             shared: shared.clone(),
             cancel: cancel.clone(),
             error: error.clone(),
+            sr: sample_rate,
+            preroll: sample_rate as usize * 3 / 2,
+            xfade: (sample_rate as usize / 200).max(16), // 5 ms
+            render: Box::new(move |set: &RackSettings, a, b| {
+                let input: Vec<Vec<f32>> = src.iter().map(|c| c[a..b].to_vec()).collect();
+                run_rack(&effects, &set.slots, input, sample_rate, n_ch, noise_print.as_ref(), set.mix, set.in_db, set.out_db)
+            }),
         };
         std::thread::Builder::new()
             .name("audemo-live-rack".into())
@@ -97,33 +102,40 @@ impl LiveRack {
     }
 }
 
-struct Renderer {
-    effects: Arc<Vec<EffectDef>>,
-    audio: Buffer,
-    sr: u32,
-    np: Option<NoiseProfile>,
-    sb: Arc<StreamBuf>,
-    shared: Arc<Mutex<(u64, RackSettings)>>,
-    cancel: Arc<AtomicBool>,
-    error: Arc<Mutex<Option<String>>>,
+/// Renders `[start, end)` of some audio for settings `S`.
+pub type RenderFn<S> = Box<dyn Fn(&S, usize, usize) -> Result<Vec<Vec<f32>>, String> + Send>;
+
+/// Keeps a [`StreamBuf`] filled just ahead of its playhead, re-rendering
+/// whenever the settings version changes. `preroll` frames before each chunk
+/// are rendered and discarded (for stateful effects); `xfade` frames after it
+/// are cross-faded into the next chunk.
+pub struct StreamRenderer<S> {
+    pub sb: Arc<StreamBuf>,
+    pub shared: Arc<Mutex<(u64, S)>>,
+    pub cancel: Arc<AtomicBool>,
+    pub error: Arc<Mutex<Option<String>>>,
+    pub sr: u32,
+    pub preroll: usize,
+    pub xfade: usize,
+    pub render: RenderFn<S>,
 }
 
-impl Renderer {
-    fn run(self) {
+impl<S: Clone> StreamRenderer<S> {
+    pub fn run(self) {
         let len = self.sb.len;
         if len == 0 {
             return;
         }
         let sr = self.sr as usize;
-        let preroll = sr * 3 / 2;
-        let xfade = (sr / 200).max(16); // 5 ms
+        let preroll = self.preroll;
+        let xfade = self.xfade;
         let first_chunk = align_up(sr / 5);
         let max_chunk = align_up(sr * 2);
         let lead = align_up(sr / 10);
         let max_ahead = sr * 30;
 
         let mut version = 0u64;
-        let mut settings: Option<RackSettings> = None;
+        let mut settings: Option<S> = None;
         let mut next = 0usize; // next frame to render (block aligned)
         let mut gen_start = 0usize; // where this pass started
         let mut done = 0usize; // frames rendered this pass
@@ -185,11 +197,8 @@ impl Renderer {
             let b = (a + chunk).min(hi);
             let pre_start = a.saturating_sub(preroll);
             let x_end = (b + xfade).min(len);
-            let input: Vec<Vec<f32>> = self.audio.iter().map(|c| c[pre_start..x_end].to_vec()).collect();
             let set = settings.as_ref().unwrap();
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_rack(&self.effects, &set.slots, input, self.sr, self.audio.len(), self.np.as_ref(), set.mix, set.in_db, set.out_db)
-            }))
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.render)(set, pre_start, x_end)))
             .unwrap_or_else(|_| Err("an effect failed unexpectedly".into()));
             let mut out = match r {
                 Ok(o) => o,
@@ -207,7 +216,7 @@ impl Renderer {
             }
             let (s0, s1) = (a - pre_start, b - pre_start);
             let mut seg: Vec<Vec<f32>> = out.iter().map(|c| c[s0..s1].to_vec()).collect();
-            if let Some((ts, t)) = &tail {
+            if let Some((ts, t)) = tail.as_ref().filter(|(_, t)| !t.is_empty() && !t[0].is_empty()) {
                 if *ts == a {
                     for (c, ch) in seg.iter_mut().enumerate() {
                         let tc = &t[c.min(t.len() - 1)];

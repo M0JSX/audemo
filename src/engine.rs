@@ -107,6 +107,10 @@ impl StreamBuf {
 pub struct Shared {
     buffer: Buffer,
     stream: Option<Arc<StreamBuf>>,
+    /// A multitrack session, mixed live in the callback.
+    mix: Option<Arc<crate::session::MixState>>,
+    /// Bumped whenever `mix` is replaced, so the callback refreshes its window.
+    mix_gen: u64,
     src_rate: f64,
     pos: f64,
     start: f64,
@@ -243,6 +247,8 @@ impl Engine {
         let shared = Arc::new(Mutex::new(Shared {
             buffer: Arc::new(Vec::new()),
             stream: None,
+            mix: None,
+            mix_gen: 0,
             src_rate: 48000.0,
             pos: 0.0,
             start: 0.0,
@@ -316,6 +322,7 @@ impl Engine {
                 sb.set_pos(start);
             }
             s.stream = stream;
+            s.mix = None;
             s.buffer = buffer;
             s.src_rate = rate as f64;
             s.start = start.clamp(0.0, len);
@@ -324,6 +331,46 @@ impl Engine {
             s.looping = looping;
             s.tag = tag;
             s.playing = s.end > s.start;
+        }
+    }
+
+    /// Play a multitrack session, mixed live from `state`.
+    pub fn play_mix(&self, state: Arc<crate::session::MixState>, start: f64, end: f64, looping: bool, tag: u64) {
+        let old = if let Ok(mut s) = self.shared.lock() {
+            s.src_rate = state.sample_rate as f64;
+            s.start = start.max(0.0);
+            s.end = end.max(s.start);
+            s.pos = s.start;
+            s.looping = looping;
+            s.tag = tag;
+            s.playing = s.end > s.start;
+            s.stream = None;
+            s.mix_gen += 1;
+            s.mix.replace(state)
+        } else {
+            None
+        };
+        // Release the old state here, not in the audio callback.
+        drop(old);
+    }
+
+    /// Swap in an edited session while it plays.
+    pub fn set_mix(&self, state: Arc<crate::session::MixState>) {
+        let old = match self.shared.lock() {
+            Ok(mut s) if s.mix.is_some() => {
+                s.end = s.end.max(s.pos);
+                s.mix_gen += 1;
+                s.mix.replace(state)
+            }
+            _ => None,
+        };
+        drop(old);
+    }
+
+    /// Change the end of the range being played (a session grew).
+    pub fn set_end(&self, end: f64) {
+        if let Ok(mut s) = self.shared.lock() {
+            s.end = end.max(s.start);
         }
     }
 
@@ -349,6 +396,7 @@ impl Engine {
         if let Ok(mut s) = self.shared.lock() {
             let len = buffer.first().map(|c| c.len()).unwrap_or(0) as f64;
             s.stream = None;
+            s.mix = None;
             s.buffer = buffer;
             s.src_rate = rate as f64;
             s.start = start.clamp(0.0, len);
@@ -525,6 +573,10 @@ where
 {
     let channels = cfg.channels as usize;
     let out_rate = cfg.sample_rate.0 as f64;
+    // Mix window for multitrack playback: frames [win.0, win.1) of the session.
+    let mut scratch: Vec<Vec<f32>> = vec![Vec::with_capacity(8192), Vec::with_capacity(8192)];
+    let mut win = (0usize, 0usize);
+    let mut win_version = u64::MAX;
     device
         .build_output_stream(
             cfg,
@@ -541,9 +593,14 @@ where
                 let step = st.src_rate / out_rate;
                 let mut pk = [0.0f32; 2];
                 let stream = st.stream.clone();
-                let n_src = match &stream {
-                    Some(sb) => sb.n_ch,
-                    None => st.buffer.len(),
+                if st.mix_gen != win_version {
+                    win = (0, 0);
+                    win_version = st.mix_gen;
+                }
+                let n_src = match (&stream, &st.mix) {
+                    (Some(sb), _) => sb.n_ch,
+                    (None, Some(_)) => 2,
+                    (None, None) => st.buffer.len(),
                 };
                 for frame in data.chunks_mut(channels) {
                     if st.playing && n_src > 0 {
@@ -556,11 +613,22 @@ where
                                 continue;
                             }
                         }
+                        if let Some(m) = &st.mix {
+                            if i0 < win.0 || i0 + 1 >= win.1 {
+                                let len = 4096;
+                                crate::session::mix_into(m, i0, i0 + len, &mut scratch);
+                                win = (i0, i0 + len);
+                            }
+                        }
                         for (c, out) in frame.iter_mut().enumerate() {
                             let (a, b) = match &stream {
                                 Some(sb) => {
                                     let a = sb.sample(c, i0);
                                     (a, if sb.is_ready(i0 + 1) { sb.sample(c, i0 + 1) } else { a })
+                                }
+                                None if st.mix.is_some() => {
+                                    let ch = &scratch[c.min(1)];
+                                    (ch[i0 - win.0], ch[i0 + 1 - win.0])
                                 }
                                 None => {
                                     let ch = &st.buffer[c.min(n_src - 1)];

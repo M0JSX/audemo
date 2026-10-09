@@ -347,6 +347,17 @@ pub enum LoadIntent {
     Open,
     Append(u64),
     Audition,
+    /// Open the file and place it on a multitrack session track.
+    MtInsert { session_id: u64, track: usize, at: usize },
+    /// Load a source referenced by a session file.
+    SessionSource { session_id: u64, source_id: u64 },
+}
+
+/// Which editor fills the centre of the window.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    Waveform,
+    Multitrack,
 }
 
 pub struct EffectDialog {
@@ -378,6 +389,8 @@ pub enum Dialog {
     Message { title: String, text: String },
     ConfirmClose { doc: usize },
     ConfirmQuit,
+    NewSession { name: String, rate: u32, tracks: usize },
+    ConfirmCloseSession { session: usize },
     AmplitudeStats { title: String, rx: Option<Receiver<crate::dsp::analysis::AmplitudeStats>>, stats: Option<crate::dsp::analysis::AmplitudeStats> },
 }
 
@@ -386,6 +399,8 @@ pub enum JobKind {
     Edit { doc_id: u64, range: (usize, usize), active: Vec<bool>, new_rate: Option<u32>, select: bool },
     /// Render an effect preview.
     Preview { params: Params },
+    /// Open the result as a new file (e.g. a multitrack mixdown).
+    NewDoc { name: String, rate: u32 },
 }
 
 pub struct Job {
@@ -454,6 +469,23 @@ pub enum Action {
     Nudge(f64),
     ClearHistory,
     AmplitudeStatistics,
+    SetMode(Mode),
+    NewSession,
+    MtAddTrack,
+    MtDeleteTrack,
+    MtSplit,
+    MtInsertFiles,
+    /// Place an open file on the selected track at the cursor.
+    MtInsertDoc(u64),
+    /// Mix the session (true = time selection only) to a new file.
+    MtMixdown(bool),
+    MtCloseSession(usize),
+    /// Open the file behind a clip in the Waveform editor.
+    MtEditSource(u64),
+    /// Files dropped on the window while in the Multitrack editor.
+    MtDropFiles(Vec<PathBuf>),
+    /// An open file dragged onto a track.
+    MtInsertAt { session_id: u64, doc_id: u64, track: usize, at: usize },
 }
 
 pub const FAVORITES: &[(&str, &str, &str)] = &[
@@ -526,6 +558,10 @@ pub struct App {
     pub fade_drag: Option<(bool, usize)>,
     pub play_origin: usize,
     pub allow_quit: bool,
+    pub mode: Mode,
+    pub sessions: Vec<crate::session::Session>,
+    pub active_session: Option<usize>,
+    pub mt: crate::mt_ui::MtState,
 }
 
 impl App {
@@ -595,6 +631,10 @@ impl App {
             fade_drag: None,
             play_origin: 0,
             allow_quit: false,
+            mode: Mode::Waveform,
+            sessions: Vec::new(),
+            active_session: None,
+            mt: Default::default(),
         };
         if !open.is_empty() {
             app.actions.push(Action::OpenPaths(open));
@@ -640,12 +680,12 @@ impl App {
         matches!(self.job, Some(Job { kind: JobKind::Edit { .. }, .. }))
     }
 
-    fn add_doc(&mut self, doc: Document) {
+    pub(crate) fn add_doc(&mut self, doc: Document) {
         self.docs.push(doc);
         self.active = Some(self.docs.len() - 1);
     }
 
-    fn new_id(&mut self) -> u64 {
+    pub(crate) fn new_id(&mut self) -> u64 {
         self.next_id += 1;
         self.next_id
     }
@@ -683,6 +723,7 @@ impl App {
         self.track_recording();
         self.maybe_render_preview();
         self.sync_live_rack();
+        self.sync_sessions();
         self.poll_analysis();
     }
 
@@ -720,7 +761,7 @@ impl App {
         } else {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
-        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_quit && self.docs.iter().any(|d| d.dirty) {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_quit && (self.docs.iter().any(|d| d.dirty) || self.sessions.iter().any(|s| s.dirty)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.dialog = Some(Dialog::ConfirmQuit);
         }
@@ -729,7 +770,7 @@ impl App {
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
         if !dropped.is_empty() {
-            self.actions.push(Action::OpenPaths(dropped));
+            self.actions.push(if self.mode == Mode::Multitrack { Action::MtDropFiles(dropped) } else { Action::OpenPaths(dropped) });
         }
     }
 
@@ -741,7 +782,8 @@ impl App {
         ctx.input_mut(|i| {
             // Longer modifier combos first: egui matches extra Shift loosely.
             if i.consume_shortcut(&KS::new(cs, Key::S)) { acts.push(Action::SaveAs); }
-            if i.consume_shortcut(&KS::new(cmd, Key::N)) { acts.push(Action::New); }
+            if i.consume_shortcut(&KS::new(cs, Key::N)) { acts.push(Action::New); }
+            if i.consume_shortcut(&KS::new(cmd, Key::N)) { acts.push(Action::NewSession); }
             if i.consume_shortcut(&KS::new(cmd, Key::O)) { acts.push(Action::Open); }
             if i.consume_shortcut(&KS::new(cmd, Key::S)) { acts.push(Action::Save); }
             if i.consume_shortcut(&KS::new(cmd, Key::Q)) { acts.push(Action::Quit); }
@@ -764,6 +806,10 @@ impl App {
                 if i.consume_shortcut(&KS::new(cmd, Key::V)) { acts.push(Action::Paste); }
                 if i.consume_shortcut(&KS::new(cmd, Key::A)) { acts.push(Action::SelectAll); }
                 if i.consume_shortcut(&KS::new(cmd, Key::T)) { acts.push(Action::Crop); }
+                if i.consume_shortcut(&KS::new(cmd, Key::K)) { acts.push(Action::MtSplit); }
+                if i.consume_key(M::ALT, Key::A) { acts.push(Action::MtAddTrack); }
+                if i.consume_key(M::NONE, Key::Num9) { acts.push(Action::SetMode(Mode::Waveform)); }
+                if i.consume_key(M::NONE, Key::Num0) { acts.push(Action::SetMode(Mode::Multitrack)); }
                 if i.consume_shortcut(&KS::new(cmd, Key::W)) { acts.push(Action::Close(usize::MAX)); }
                 if i.consume_key(M::SHIFT, Key::Space) { acts.push(Action::Record); }
                 if i.consume_key(M::SHIFT, Key::P) { acts.push(Action::CaptureNoise); }
@@ -869,6 +915,13 @@ impl App {
                     if !matches!(intent, LoadIntent::Audition) {
                         self.dialog = Some(Dialog::Message { title: "Couldn't open file".into(), text: format!("{}\n\n{e}", path.display()) });
                     }
+                    if let LoadIntent::SessionSource { session_id, source_id } = intent {
+                        if let Some(s) = self.sessions.iter_mut().find(|s| s.id == session_id) {
+                            if let Some(src) = s.sources.get(&source_id) {
+                                self.mt.missing.push(format!("{} ({})", src.name, path.display()));
+                            }
+                        }
+                    }
                     continue;
                 }
             };
@@ -896,6 +949,14 @@ impl App {
                         self.set_status(format!("Appended {name}"));
                     }
                 }
+                LoadIntent::MtInsert { session_id, track, at } => {
+                    let doc_id = self.open_or_find_doc(&path, dec);
+                    self.mt_insert_doc(session_id, track, at, doc_id);
+                }
+                LoadIntent::SessionSource { session_id, source_id } => {
+                    let doc_id = self.open_or_find_doc(&path, dec);
+                    self.mt_link_source(session_id, source_id, doc_id);
+                }
                 LoadIntent::Audition => {
                     if self.browser_selected.as_deref() == Some(path.as_path()) {
                         let len = dec.channels[0].len() as f64;
@@ -906,7 +967,7 @@ impl App {
         }
     }
 
-    fn load_async(&mut self, p: PathBuf, intent: LoadIntent) {
+    pub(crate) fn load_async(&mut self, p: PathBuf, intent: LoadIntent) {
         let (tx, rx) = channel();
         let path = p.clone();
         std::thread::spawn(move || {
@@ -920,6 +981,10 @@ impl App {
 
     fn open_paths(&mut self, paths: Vec<PathBuf>) {
         for p in paths {
+            if p.extension().map(|e| e.eq_ignore_ascii_case(crate::session::SESSION_EXT)).unwrap_or(false) {
+                self.open_session(&p);
+                continue;
+            }
             if let Some(i) = self.docs.iter().position(|d| d.path.as_deref() == Some(p.as_path())) {
                 self.active = Some(i);
                 continue;
@@ -977,6 +1042,17 @@ impl App {
                     }
                 }
             }
+            JobKind::NewDoc { name, rate } => match res {
+                Ok(out) => {
+                    let id = self.new_id();
+                    let mut doc = Document::new(id, name.clone(), None, out, rate, None, "Mixdown");
+                    doc.dirty = true;
+                    self.add_doc(doc);
+                    self.mode = Mode::Waveform;
+                    self.set_status(format!("{name} created in {:.2} s", job.started.elapsed().as_secs_f32()));
+                }
+                Err(e) => self.dialog = Some(Dialog::Message { title: job.label.clone(), text: e }),
+            },
             JobKind::Edit { doc_id, range, active, new_rate, select } => {
                 let out = match res {
                     Ok(o) => o,
@@ -1424,6 +1500,7 @@ impl App {
     // ---------------------------------------------------------------- dispatcher
 
     pub fn perform(&mut self, action: Action, ctx: &egui::Context) {
+        let action = action;
         let editing = !matches!(
             action,
             Action::New
@@ -1442,6 +1519,7 @@ impl App {
             self.set_status("Please wait for the current effect to finish.");
             return;
         }
+        let Some(action) = self.mt_perform(action, ctx) else { return };
         match action {
             Action::New => {
                 let (rate, channels) = self.doc().map(|d| (d.sample_rate, d.n_ch())).unwrap_or((48000, 2));
@@ -1449,8 +1527,10 @@ impl App {
                 self.dialog = Some(Dialog::NewFile { name, rate, channels, bits: None, seconds: 0.0, then_record: false });
             }
             Action::Open => {
+                let mut exts: Vec<&str> = io::OPEN_EXTENSIONS.to_vec();
+                exts.push(crate::session::SESSION_EXT);
                 let picked = rfd::FileDialog::new()
-                    .add_filter("Audio files", io::OPEN_EXTENSIONS)
+                    .add_filter("Audio files and sessions", &exts)
                     .add_filter("All files", &["*"])
                     .pick_files();
                 if let Some(p) = picked {
@@ -1478,7 +1558,7 @@ impl App {
                 }
             }
             Action::Quit => {
-                if self.docs.iter().any(|d| d.dirty) && !self.allow_quit {
+                if (self.docs.iter().any(|d| d.dirty) || self.sessions.iter().any(|s| s.dirty)) && !self.allow_quit {
                     self.dialog = Some(Dialog::ConfirmQuit);
                 } else {
                     self.allow_quit = true;
@@ -1919,6 +1999,19 @@ impl App {
                 }
                 self.set_status("History cleared.");
             }
+            // Handled by `mt_perform`.
+            Action::SetMode(_)
+            | Action::NewSession
+            | Action::MtAddTrack
+            | Action::MtDeleteTrack
+            | Action::MtSplit
+            | Action::MtInsertFiles
+            | Action::MtInsertDoc(_)
+            | Action::MtMixdown(_)
+            | Action::MtCloseSession(_)
+            | Action::MtEditSource(_)
+            | Action::MtDropFiles(_)
+            | Action::MtInsertAt { .. } => {}
             Action::Audition(p) => {
                 self.browser_selected = Some(p.clone());
                 if self.engine.is_playing_tag(BROWSER_TAG) {

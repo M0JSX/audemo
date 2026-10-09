@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, FontId, Layout, Rect, RichText, Rounding, Sense, Stroke, Ui};
 
-use crate::app::{Action, App, Dialog, Panel, Tool, FAVORITES};
+use crate::app::{Action, App, Dialog, Mode, Panel, Tool, FAVORITES};
 use crate::dsp::effects::Category;
 use crate::dsp::util::{format_time, parse_time};
 use crate::engine::PREVIEW_TAG;
@@ -56,11 +56,12 @@ impl App {
         if self.native_menu_active() {
             return;
         }
-        let has_doc = self.doc().is_some();
-        let has_sel = self.doc().and_then(|d| d.sel_range()).is_some();
-        let can_undo = self.doc().map(|d| !d.undo.is_empty()).unwrap_or(false);
-        let can_redo = self.doc().map(|d| !d.redo.is_empty()).unwrap_or(false);
-        let has_clip = self.clipboard.is_some();
+        let in_mt = self.mode == Mode::Multitrack && self.session().is_some();
+        let has_doc = self.doc().is_some() || in_mt;
+        let has_sel = if in_mt { self.session().map(|s| !s.selected_clips.is_empty()).unwrap_or(false) } else { self.doc().and_then(|d| d.sel_range()).is_some() };
+        let can_undo = if in_mt { self.session().map(|s| !s.undo.is_empty()).unwrap_or(false) } else { self.doc().map(|d| !d.undo.is_empty()).unwrap_or(false) };
+        let can_redo = if in_mt { self.session().map(|s| !s.redo.is_empty()).unwrap_or(false) } else { self.doc().map(|d| !d.redo.is_empty()).unwrap_or(false) };
+        let has_clip = if in_mt { self.mt.clipboard.is_some() } else { self.clipboard.is_some() };
         let effects = self.effects.clone();
         let recent = self.prefs.recent.clone();
         let last = self.last_effect.as_ref().map(|(i, _)| effects[*i].name);
@@ -70,7 +71,8 @@ impl App {
                 egui::menu::bar(ui, |ui| {
                     ui.menu_button("File", |ui| {
                         ui.menu_button("New", |ui| {
-                            if item(ui, "Audio File…", "Ctrl+N", true) { self.actions.push(Action::New); }
+                            if item(ui, "Multitrack Session…", "Ctrl+N", true) { self.actions.push(Action::NewSession); }
+                            if item(ui, "Audio File…", "Ctrl+Shift+N", true) { self.actions.push(Action::New); }
                         });
                         if item(ui, "Open…", "Ctrl+O", true) { self.actions.push(Action::Open); }
                         ui.menu_button("Open Append", |ui| {
@@ -151,6 +153,25 @@ impl App {
                             if item(ui, "Audio Hardware…", "", true) { self.actions.push(Action::Preferences); }
                         });
                     });
+                    ui.menu_button("Multitrack", |ui| {
+                        let has_session = self.session().is_some();
+                        let in_mt = has_session && self.mode == Mode::Multitrack;
+                        let has_time_sel = self.session().and_then(|s| s.sel_range()).is_some();
+                        if item(ui, "Add Audio Track", "Alt+A", has_session) { self.actions.push(Action::MtAddTrack); }
+                        if item(ui, "Delete Selected Track", "", has_session) { self.actions.push(Action::MtDeleteTrack); }
+                        ui.separator();
+                        if item(ui, "Insert Files…", "", has_session) { self.actions.push(Action::MtInsertFiles); }
+                        if let Some(id) = self.doc().map(|d| d.id) {
+                            let name = self.doc().map(|d| d.name.clone()).unwrap_or_default();
+                            if item(ui, &format!("Insert \"{name}\" at Cursor"), "", has_session) { self.actions.push(Action::MtInsertDoc(id)); }
+                        }
+                        if item(ui, "Split Clip at Playhead", "Ctrl+K", in_mt) { self.actions.push(Action::MtSplit); }
+                        ui.separator();
+                        ui.menu_button("Mixdown Session to New File", |ui| {
+                            if item(ui, "Entire Session", "", has_session) { self.actions.push(Action::MtMixdown(false)); }
+                            if item(ui, "Time Selection", "", has_time_sel) { self.actions.push(Action::MtMixdown(true)); }
+                        });
+                    });
                     ui.menu_button("Effects", |ui| {
                         if item(ui, "Show Effects Rack", "", true) { self.show_panel(Panel::EffectsRack); }
                         ui.separator();
@@ -180,6 +201,9 @@ impl App {
                         }
                     });
                     ui.menu_button("View", |ui| {
+                        if item(ui, "Waveform Editor", "9", true) { self.actions.push(Action::SetMode(Mode::Waveform)); }
+                        if item(ui, "Multitrack Editor", "0", true) { self.actions.push(Action::SetMode(Mode::Multitrack)); }
+                        ui.separator();
                         if item(ui, "Zoom In (Time)", "=", has_doc) { self.actions.push(Action::ZoomIn); }
                         if item(ui, "Zoom Out (Time)", "-", has_doc) { self.actions.push(Action::ZoomOut); }
                         if item(ui, "Zoom Out Full (All Axes)", "\\", has_doc) { self.actions.push(Action::ZoomFull); }
@@ -244,18 +268,25 @@ impl App {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
-                    mode_button(ui, Icon::Waveform, "Waveform", true, true, "Waveform Editor");
-                    mode_button(ui, Icon::Multitrack, "Multitrack", false, false, "Multitrack sessions arrive in a later release");
+                    let mt = self.mode == Mode::Multitrack;
+                    if mode_button(ui, Icon::Waveform, "Waveform", !mt, true, "Waveform Editor (9)").clicked() {
+                        self.actions.push(Action::SetMode(Mode::Waveform));
+                    }
+                    if mode_button(ui, Icon::Multitrack, "Multitrack", mt, true, "Multitrack Editor (0)").clicked() {
+                        self.actions.push(Action::SetMode(Mode::Multitrack));
+                    }
                     ui.add_space(6.0);
                     ui.separator();
                     if icon_button(ui, Icon::Spectral, self.show_spectral, "Show Spectral Frequency Display (Shift+D)").clicked() {
                         self.show_spectral = !self.show_spectral;
                     }
                     ui.separator();
-                    let later_mt = "Multitrack tool: arrives with Multitrack sessions";
-                    for (icon, tip) in [(Icon::Move, later_mt), (Icon::Razor, later_mt), (Icon::Slip, later_mt)] {
-                        icon_button_sized(ui, icon, false, tip, vec2(24.0, 22.0), false);
+                    let mt_tip = "In the Multitrack editor: drag a clip to move it, its edges to trim, its yellow handles to fade";
+                    icon_button_sized(ui, Icon::Move, mt, mt_tip, vec2(24.0, 22.0), false);
+                    if icon_button_sized(ui, Icon::Razor, false, "Split clips at the playhead (Ctrl+K)", vec2(24.0, 22.0), mt).clicked() {
+                        self.actions.push(Action::MtSplit);
                     }
+                    icon_button_sized(ui, Icon::Slip, false, "Slip editing arrives in a later release", vec2(24.0, 22.0), false);
                     if icon_button(ui, Icon::Selection, self.tool == Tool::Selection, "Time Selection Tool (T)").clicked() {
                         self.tool = Tool::Selection;
                     }
@@ -384,14 +415,20 @@ impl App {
             if icon_button_sized(ui, Icon::FolderOpen, false, "Open File (Ctrl+O)", vec2(22.0, 20.0), true).clicked() {
                 self.actions.push(Action::Open);
             }
-            if icon_button_sized(ui, Icon::NewFile, false, "New Audio File (Ctrl+N)", vec2(22.0, 20.0), true).clicked() {
+            if icon_button_sized(ui, Icon::NewFile, false, "New Audio File (Ctrl+Shift+N)", vec2(22.0, 20.0), true).clicked() {
                 self.actions.push(Action::New);
+            }
+            if icon_button_sized(ui, Icon::Multitrack, false, "New Multitrack Session (Ctrl+N)", vec2(22.0, 20.0), true).clicked() {
+                self.actions.push(Action::NewSession);
             }
             if icon_button_sized(ui, Icon::CloseFile, false, "Close File (Ctrl+W)", vec2(22.0, 20.0), has_doc).clicked() {
                 self.actions.push(Action::Close(usize::MAX));
             }
         });
         let mut switch = None;
+        let mut switch_session = None;
+        let mut select = None;
+        let mut insert: Option<u64> = None;
         egui::Frame::none().fill(BG_LIST).show(ui, |ui| {
             ui.set_min_height(ui.available_height());
             egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
@@ -400,15 +437,50 @@ impl App {
                         ui.label(RichText::new(h).color(TEXT_DIM).size(11.5));
                     }
                     ui.end_row();
+                    for (i, s) in self.sessions.iter().enumerate() {
+                        let active = Some(i) == self.active_session && self.mode == Mode::Multitrack;
+                        ui.horizontal(|ui| {
+                            let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                            draw_icon(ui.painter(), r.shrink(1.0), Icon::Multitrack, if active { HOT } else { Color32::from_rgb(0x4d, 0xa3, 0xff) });
+                            let name = RichText::new(&s.name).color(if active { HOT } else { TEXT });
+                            if ui.selectable_label(active, if active { name.strong() } else { name }).clicked() {
+                                switch_session = Some(i);
+                            }
+                        });
+                        ui.label(if s.dirty { "*" } else { "" });
+                        ui.label(format_time(s.end() as f64, s.sample_rate));
+                        ui.label(format!("{} Hz", s.sample_rate));
+                        ui.label(format!("{} tracks", s.tracks.len()));
+                        ui.label("");
+                        ui.label("Session");
+                        ui.end_row();
+                    }
                     for (i, d) in self.docs.iter().enumerate() {
                         let active = Some(i) == self.active;
                         ui.horizontal(|ui| {
                             let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
                             draw_icon(ui.painter(), r.shrink(1.0), Icon::Waveform, if active { HOT } else { WAVE });
                             let name = RichText::new(&d.name).color(if active { HOT } else { TEXT });
-                            if ui.selectable_label(active, if active { name.strong() } else { name }).clicked() {
+                            let id = d.id;
+                            let resp = ui.dnd_drag_source(egui::Id::new(("file_drag", id)), crate::mt_ui::DocDrag(id), |ui| {
+                                ui.selectable_label(active, if active { name.strong() } else { name })
+                            });
+                            if resp.inner.clicked() {
+                                select = Some(i);
+                            }
+                            if resp.inner.double_clicked() {
                                 switch = Some(i);
                             }
+                            resp.inner.context_menu(|ui| {
+                                if ui.button("Insert into Multitrack at Cursor").clicked() {
+                                    insert = Some(id);
+                                    ui.close_menu();
+                                }
+                                if ui.button("Open in Waveform Editor").clicked() {
+                                    switch = Some(i);
+                                    ui.close_menu();
+                                }
+                            });
                         });
                         ui.label(if d.dirty { "*" } else { "" });
                         ui.label(format_time(d.len() as f64, d.sample_rate));
@@ -421,8 +493,20 @@ impl App {
                 });
             });
         });
+        if let Some(i) = select {
+            // A single click selects; it only changes the view in the Waveform editor.
+            self.active = Some(i);
+        }
         if let Some(i) = switch {
             self.active = Some(i);
+            self.mode = Mode::Waveform;
+        }
+        if let Some(i) = switch_session {
+            self.active_session = Some(i);
+            self.mode = Mode::Multitrack;
+        }
+        if let Some(id) = insert {
+            self.actions.push(Action::MtInsertDoc(id));
         }
     }
 
@@ -575,18 +659,23 @@ impl App {
     }
 
     fn history(&mut self, ui: &mut Ui) {
-        let Some(doc) = self.doc() else {
-            ui.label(RichText::new("No history").color(TEXT_DIM));
-            return;
+        // The Multitrack editor shows the session's history.
+        let (origin, undo, redo): (String, Vec<String>, Vec<String>) = match (self.mode, self.session(), self.doc()) {
+            (Mode::Multitrack, Some(s), _) => ("New Session".into(), s.undo.iter().map(|u| u.label.clone()).collect(), s.redo.iter().map(|u| u.label.clone()).collect()),
+            (_, _, Some(d)) => (d.origin.clone(), d.undo.iter().map(|u| u.label.clone()).collect(), d.redo.iter().map(|u| u.label.clone()).collect()),
+            _ => {
+                ui.label(RichText::new("No history").color(TEXT_DIM));
+                return;
+            }
         };
-        let current = doc.undo.len();
-        let undos = doc.undo.len();
-        let mut entries: Vec<(usize, String, bool)> = vec![(0, doc.origin.clone(), false)];
-        for (i, s) in doc.undo.iter().enumerate() {
-            entries.push((i + 1, s.label.clone(), false));
+        let current = undo.len();
+        let undos = undo.len();
+        let mut entries: Vec<(usize, String, bool)> = vec![(0, origin, false)];
+        for (i, l) in undo.into_iter().enumerate() {
+            entries.push((i + 1, l, false));
         }
-        for (k, s) in doc.redo.iter().rev().enumerate() {
-            entries.push((current + 1 + k, s.label.clone(), true));
+        for (k, l) in redo.into_iter().rev().enumerate() {
+            entries.push((current + 1 + k, l, true));
         }
         let mut jump = None;
         let mut clear = false;
@@ -635,10 +724,12 @@ impl App {
             .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 1.0;
-                    let sr = self.doc().map(|d| d.sample_rate).unwrap_or(48000);
+                    let mt_info = self.transport_info();
+                    let sr = mt_info.map(|i| i.1).or(self.doc().map(|d| d.sample_rate)).unwrap_or(48000);
                     let recording = self.engine.is_recording();
-                    let pos = match (&self.rec_target, self.doc()) {
-                        (Some(t), Some(d)) if recording && t.doc_id == d.id => (t.range.0 + d.pending) as f64,
+                    let pos = match (&self.rec_target, self.doc(), mt_info) {
+                        (_, _, Some(i)) => i.0,
+                        (Some(t), Some(d), _) if recording && t.doc_id == d.id => (t.range.0 + d.pending) as f64,
                         _ => self.display_pos(),
                     };
                     let (r, _) = ui.allocate_exact_size(vec2(150.0, 30.0), Sense::hover());
@@ -646,7 +737,10 @@ impl App {
                     ui.painter().text(r.left_center() + vec2(2.0, 0.0), Align2::LEFT_CENTER, format_time(pos, sr), FontId::monospace(24.0), col);
 
                     let st = self.engine.status();
-                    let playing = st.playing && self.doc().map(|d| d.id == st.tag).unwrap_or(false);
+                    let playing = match mt_info {
+                        Some(i) => i.2,
+                        None => st.playing && self.doc().map(|d| d.id == st.tag).unwrap_or(false),
+                    };
                     let zoom_w = 6.0 * 25.0;
                     let group_w = 9.0 * 25.0;
                     ui.add_space(((ui.available_width() - group_w - zoom_w) / 2.0).max(10.0));

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use muda::accelerator::{Accelerator, Code, Modifiers};
 use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 
-use crate::app::{Action, App, Dialog, Panel, FAVORITES};
+use crate::app::{Action, App, Dialog, Mode, Panel, FAVORITES};
 use crate::dsp::effects::Category;
 
 pub struct NativeMenu {
@@ -48,7 +48,8 @@ impl NativeMenu {
 
         let file = Submenu::new("File", true);
         let new = Submenu::new("New", true);
-        let _ = new.append(&item("new", "Audio File…", acc(false, Code::KeyN)));
+        let _ = new.append(&item("new_session", "Multitrack Session…", acc(false, Code::KeyN)));
+        let _ = new.append(&item("new", "Audio File…", acc(true, Code::KeyN)));
         let _ = file.append(&new);
         let _ = file.append(&item("open", "Open…", acc(false, Code::KeyO)));
         let append = Submenu::new("Open Append", true);
@@ -106,6 +107,19 @@ impl NativeMenu {
         let _ = edit.append(&marker);
         let _ = edit.append(&item("convert", "Convert Sample Type…", None));
 
+        let multitrack = Submenu::new("Multitrack", true);
+        let _ = multitrack.append(&item("mt_add_track", "Add Audio Track", acc_mods(Modifiers::ALT, Code::KeyA)));
+        let _ = multitrack.append(&item("mt_delete_track", "Delete Selected Track", None));
+        let _ = multitrack.append(&sep());
+        let _ = multitrack.append(&item("mt_insert", "Insert Files…", None));
+        let _ = multitrack.append(&item("mt_insert_doc", "Insert Current File at Cursor", None));
+        let _ = multitrack.append(&item("mt_split", "Split Clip at Playhead", acc(false, Code::KeyK)));
+        let _ = multitrack.append(&sep());
+        let mixdown = Submenu::new("Mixdown Session to New File", true);
+        let _ = mixdown.append(&item("mt_mix_all", "Entire Session", None));
+        let _ = mixdown.append(&item("mt_mix_sel", "Time Selection", None));
+        let _ = multitrack.append(&mixdown);
+
         let effects = Submenu::new("Effects", true);
         let _ = effects.append(&item("show_rack", "Show Effects Rack", None));
         let _ = effects.append(&sep());
@@ -135,6 +149,9 @@ impl NativeMenu {
         }
 
         let view = Submenu::new("View", true);
+        let _ = view.append(&item("mode_wave", "Waveform Editor", None));
+        let _ = view.append(&item("mode_mt", "Multitrack Editor", None));
+        let _ = view.append(&sep());
         let _ = view.append(&item("zoom_in", "Zoom In (Time)", None));
         let _ = view.append(&item("zoom_out", "Zoom Out (Time)", None));
         let _ = view.append(&item("zoom_full", "Zoom Out Full (All Axes)", None));
@@ -163,7 +180,7 @@ impl NativeMenu {
         let help = Submenu::new("Help", true);
         let _ = help.append(&item("shortcuts", "Keyboard Shortcuts", None));
 
-        for sub in [&app_menu, &file, &edit, &effects, &favorites, &view, &window, &help] {
+        for sub in [&app_menu, &file, &edit, &multitrack, &effects, &favorites, &view, &window, &help] {
             menu.append(sub).ok()?;
         }
         menu.init_for_nsapp();
@@ -268,6 +285,19 @@ impl App {
             "prefs" => Action::Preferences,
             "quit" => Action::Quit,
             "new" => Action::New,
+            "new_session" => Action::NewSession,
+            "mt_add_track" => Action::MtAddTrack,
+            "mt_delete_track" => Action::MtDeleteTrack,
+            "mt_insert" => Action::MtInsertFiles,
+            "mt_insert_doc" => match self.doc() {
+                Some(d) => Action::MtInsertDoc(d.id),
+                None => return,
+            },
+            "mt_split" => Action::MtSplit,
+            "mt_mix_all" => Action::MtMixdown(false),
+            "mt_mix_sel" => Action::MtMixdown(true),
+            "mode_wave" => Action::SetMode(Mode::Waveform),
+            "mode_mt" => Action::SetMode(Mode::Multitrack),
             "open" => Action::Open,
             "append" => Action::OpenAppend,
             "close" => Action::Close(usize::MAX),

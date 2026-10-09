@@ -11,8 +11,10 @@ mod io;
 mod liverack;
 #[cfg(any(target_os = "macos", audemo_check_menu))]
 mod macmenu;
+mod mt_ui;
 mod panels;
 mod prefs;
+mod session;
 mod theme;
 mod workspace;
 

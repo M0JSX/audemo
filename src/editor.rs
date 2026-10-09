@@ -14,7 +14,7 @@ const LEFT_W: f32 = 30.0;
 const RIGHT_W: f32 = 64.0;
 const SPEC_FFT: usize = 1024;
 
-const RULER_STEPS: [f64; 22] = [
+pub(crate) const RULER_STEPS: [f64; 22] = [
     0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0,
     600.0, 1800.0,
 ];
@@ -39,7 +39,7 @@ impl View {
     }
 }
 
-fn ruler_label(t: f64, step: f64) -> String {
+pub(crate) fn ruler_label(t: f64, step: f64) -> String {
     let neg = t < 0.0;
     let t = t.abs();
     let m = (t / 60.0).floor() as u64;
@@ -60,6 +60,10 @@ fn ruler_label(t: f64, step: f64) -> String {
 
 impl App {
     pub fn editor_ui(&mut self, ui: &mut Ui) {
+        if self.mode == crate::app::Mode::Multitrack {
+            self.multitrack_ui(ui);
+            return;
+        }
         let Some(di) = self.active.filter(|&i| i < self.docs.len()) else {
             self.welcome_ui(ui);
             return;
