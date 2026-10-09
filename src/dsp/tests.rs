@@ -94,7 +94,7 @@ fn biquad_lowpass_attenuates() {
 #[test]
 fn every_effect_runs_with_defaults_and_presets() {
     let reg = registry();
-    assert!(reg.len() >= 35, "only {} effects", reg.len());
+    assert!(reg.len() >= 50, "only {} effects", reg.len());
     let l = sine(440.0, 1.0, 0.5);
     let r: Vec<f32> = sine(660.0, 1.0, 0.4);
     let input = vec![l, r];
@@ -126,7 +126,7 @@ fn mono_input_rejected_by_stereo_effects_only() {
         let res = e.run(&mono, &ctx(1), &e.default_params());
         if e.stereo_only {
             assert!(res.is_err(), "{}", e.id);
-        } else if e.id != "noise_reduction" {
+        } else if e.id != "noise_reduction" && e.id != "match_loudness" {
             assert!(res.is_ok(), "{}: {:?}", e.id, res.err());
         }
     }
@@ -340,3 +340,128 @@ fn remap_mono_stereo() {
     assert_eq!(back[0], vec![1.0, 0.5]);
 }
 
+
+#[test]
+fn lufs_of_stereo_1k_sine() {
+    // A 1 kHz stereo sine at -20 dBFS peak... BS.1770: 0 dBFS 1 kHz sine on both channels reads ~ +0.0 LUFS - 3.01 + 3.01.
+    let a = db_to_lin(-20.0);
+    let x = sine(1000.0, 5.0, a);
+    let l = super::loudness::integrated_lufs(&[x.clone(), x.clone()], SR).unwrap();
+    // Mono-equivalent sine RMS is -23.01 dB; K-weighting at 1 kHz ~ +0.7 dB; -0.691 offset; two channels +3.01.
+    assert!((l - (-20.0)).abs() < 0.3, "got {l}");
+    let m = super::loudness::integrated_lufs(&[x.clone()], SR).unwrap();
+    assert!((l - m - 3.01).abs() < 0.05);
+    assert!(super::loudness::integrated_lufs(&[vec![0.0; 44100]], SR).is_none());
+}
+
+#[test]
+fn true_peak_sees_intersample_overs() {
+    // fs/4 sine phased so samples land at +-0.707 of the true peak.
+    let n = 4000;
+    let x: Vec<f32> = (0..n).map(|i| (std::f32::consts::FRAC_PI_2 * i as f32 + std::f32::consts::FRAC_PI_4).sin()).collect();
+    let sp = lin_to_db(peak(&[x.clone()]));
+    let tp = super::loudness::true_peak_db(&[x]);
+    assert!((sp + 3.01).abs() < 0.05, "{sp}");
+    assert!(tp > -0.3 && tp < 0.3, "{tp}");
+}
+
+#[test]
+fn match_loudness_hits_target() {
+    let reg = registry();
+    let e = &reg[find(&reg, "match_loudness")];
+    let x = sine(440.0, 4.0, 0.05);
+    let p = e.preset_params("Podcast (-16 LUFS)").unwrap();
+    let out = e.run(&[x.clone(), x], &ctx(2), &p).unwrap();
+    let l = super::loudness::integrated_lufs(&out, SR).unwrap();
+    assert!((l + 16.0).abs() < 0.5, "got {l}");
+    assert!(super::loudness::true_peak_db(&out) < -0.4);
+}
+
+#[test]
+fn amplitude_stats_basic() {
+    let x = sine(1000.0, 2.0, 0.5);
+    let st = super::analysis::amplitude_stats(&[x], SR);
+    let c = &st.channels[0];
+    assert!((c.peak_db - lin_to_db(0.5) as f64).abs() < 0.05);
+    assert!((c.total_rms_db - (lin_to_db(0.5) as f64 - 3.01)).abs() < 0.05);
+    assert!(c.dc_offset_pct.abs() < 0.01);
+    assert_eq!(c.clipped, 0);
+    assert!((st.duration_s - 2.0).abs() < 1e-6);
+}
+
+#[test]
+fn spectrum_and_correlation() {
+    let x = sine(1000.0, 0.5, 1.0);
+    let s = super::analysis::spectrum_at(&x, 10000, 4096);
+    let bin = (1000.0 / SR as f32 * 4096.0).round() as usize;
+    let (pk, _) = s.iter().enumerate().fold((0, -999.0f32), |m, (i, &v)| if v > m.1 { (i, v) } else { m });
+    assert!((pk as i64 - bin as i64).abs() <= 1);
+    assert!(s[pk] > -1.5 && s[pk] < 0.5, "{}", s[pk]);
+    let neg: Vec<f32> = x.iter().map(|v| -v).collect();
+    assert!((super::analysis::correlation(&x, &x) - 1.0).abs() < 1e-4);
+    assert!((super::analysis::correlation(&x, &neg) + 1.0).abs() < 1e-4);
+}
+
+#[test]
+fn notch_removes_tone() {
+    let reg = registry();
+    let e = &reg[find(&reg, "notch_filter")];
+    let x: Vec<f32> = sine(1000.0, 1.0, 0.5).iter().zip(sine(300.0, 1.0, 0.5)).map(|(a, b)| a + b).collect();
+    let out = e.run(&[x], &ctx(1), &e.default_params()).unwrap();
+    let tail = &out[0][22050..];
+    assert!(tone_level(tail, 1000.0) < 0.02, "{}", tone_level(tail, 1000.0));
+    assert!(tone_level(tail, 300.0) > 0.45);
+}
+
+#[test]
+fn delete_silence_shortens() {
+    let reg = registry();
+    let e = &reg[find(&reg, "delete_silence")];
+    let mut x = sine(440.0, 0.5, 0.5);
+    x.extend(vec![0.0; 2 * SR as usize]);
+    x.extend(sine(440.0, 0.5, 0.5));
+    let out = e.run(&[x.clone()], &ctx(1), &e.default_params()).unwrap();
+    let expected = SR as f32 * (1.0 + 0.25);
+    assert!((out[0].len() as f32 - expected).abs() < SR as f32 * 0.03, "{} vs {expected}", out[0].len());
+}
+
+#[test]
+fn auto_phase_realigns_channels() {
+    let reg = registry();
+    let e = &reg[find(&reg, "auto_phase")];
+    let mut state = 12345u32;
+    let l: Vec<f32> = (0..SR as usize).map(|_| { state = state.wrapping_mul(1664525).wrapping_add(1013904223); (state >> 8) as f32 / 16777216.0 - 0.5 }).collect();
+    let d = 37;
+    let mut r = vec![0.0; d];
+    r.extend_from_slice(&l[..l.len() - d]);
+    let r: Vec<f32> = r.iter().map(|v| -v).collect();
+    let out = e.run(&[l, r], &ctx(2), &e.default_params()).unwrap();
+    let c = super::analysis::correlation(&out[0][1000..40000], &out[1][1000..40000]);
+    assert!(c > 0.99, "{c}");
+}
+
+#[test]
+fn dtmf_has_both_tones() {
+    let reg = registry();
+    let e = &reg[find(&reg, "gen_dtmf")];
+    let mut p = e.default_params();
+    p.set("digits", Value::S("5".into()));
+    let out = e.run(&[], &ctx(1), &p).unwrap();
+    assert_eq!(out[0].len(), (0.2 * SR as f32).round() as usize);
+    let tone = &out[0][..4410];
+    assert!(tone_level(tone, 770.0) > 0.2 && tone_level(tone, 1336.0) > 0.2);
+    assert!(tone_level(tone, 697.0) < 0.1);
+}
+
+#[test]
+fn graphic_eq_response_matches() {
+    let reg = registry();
+    let e = &reg[find(&reg, "graphic_eq30")];
+    let mut p = e.default_params();
+    p.set("b16", Value::F(-12.0)); // 1 kHz
+    let out = e.run(&[sine(1000.0, 1.0, 0.5)], &ctx(1), &p).unwrap();
+    let got = lin_to_db(tone_level(&out[0][22050..], 1000.0) / 0.5);
+    let want = (e.response.unwrap())(&p, SR as f32, 1000.0);
+    assert!((got - want).abs() < 0.3, "{got} vs {want}");
+    assert!(want < -11.0);
+}

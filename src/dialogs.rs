@@ -370,6 +370,9 @@ impl App {
                     next = Some(Dialog::ConfirmQuit);
                 }
             }
+            Dialog::AmplitudeStats { title, rx, stats } => {
+                next = self.amp_stats_dialog(ctx, title, rx, stats);
+            }
             Dialog::Effect(_) => unreachable!(),
         }
         if self.dialog.is_none() {
@@ -452,18 +455,22 @@ impl App {
                 }
                 ui.separator();
                 ui.horizontal(|ui| {
-                    let label = if d.previewing { "Stop Preview" } else { "Preview" };
-                    if ui.add(egui::Button::new(label).min_size(vec2(118.0, 26.0))).on_hover_text("Loop the processed selection (Space)").clicked() {
-                        toggle_preview = true;
-                    }
-                    if ui.checkbox(&mut d.bypass, "Bypass").on_hover_text("Hear the unprocessed audio while previewing").changed() {
-                        bypass_changed = true;
+                    if rack_mode {
+                        ui.label(RichText::new("Changes are heard live while the rack's master power is on.").color(TEXT_DIM).size(11.0));
+                    } else {
+                        let label = if d.previewing { "Stop Preview" } else { "Preview" };
+                        if ui.add(egui::Button::new(label).min_size(vec2(118.0, 26.0))).on_hover_text("Loop the processed selection (Space)").clicked() {
+                            toggle_preview = true;
+                        }
+                        if ui.checkbox(&mut d.bypass, "Bypass").on_hover_text("Hear the unprocessed audio while previewing").changed() {
+                            bypass_changed = true;
+                        }
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.button("Close").clicked() {
                             close = true;
                         }
-                        let label = if rack_mode { "  Save to Rack  " } else { "    Apply    " };
+                        let label = if rack_mode { "     OK     " } else { "    Apply    " };
                         if ui.add(egui::Button::new(RichText::new(label).color(Color32::WHITE)).min_size(vec2(90.0, 26.0))).clicked() {
                             apply = true;
                         }
@@ -471,6 +478,7 @@ impl App {
                 });
                 ui.label(RichText::new(scope.clone()).color(TEXT_DIM).size(11.0));
             });
+        let live_update = if rack_mode && d.params != before { d.rack_slot.map(|s| (s, d.params.clone())) } else { None };
         if d.params != before {
             d.last_change = Instant::now();
             if def.presets.iter().all(|(n, _)| def.preset_params(n).as_ref() != Some(&d.params)) && d.params != def.default_params() {
@@ -507,10 +515,54 @@ impl App {
         } else if !open || close {
             self.close_effect_dialog();
         }
+        if let Some((slot, p)) = live_update {
+            if let Some(s) = self.rack.get_mut(slot) {
+                s.params = p;
+            }
+            self.rack_touched();
+        }
     }
 }
 
+/// Graphic EQs: a row of vertical faders, one per band, like a hardware EQ.
+fn graphic_eq_faders(ui: &mut Ui, def: &EffectDef, params: &mut Params) {
+    let bands: Vec<_> = def.params.iter().filter(|p| p.key.starts_with('b')).collect();
+    let w = ((ui.available_width() - 8.0) / bands.len() as f32).clamp(16.0, 40.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for pd in bands {
+            ui.allocate_ui(vec2(w, 190.0), |ui| {
+                ui.vertical_centered(|ui| {
+                    let mut v = params.f(pd.key);
+                    ui.label(RichText::new(format!("{v:+.0}")).font(FontId::monospace(9.0)).color(HOT));
+                    let r = ui.add(egui::Slider::new(&mut v, -20.0..=20.0).vertical().show_value(false));
+                    if r.changed() {
+                        params.set(pd.key, Value::F(v.round()));
+                    }
+                    if r.double_clicked() {
+                        params.set(pd.key, Value::F(0.0));
+                    }
+                    let short = pd.label.replace(" kHz", "k").replace(" Hz", "");
+                    ui.label(RichText::new(short).font(FontId::proportional(9.0)).color(TEXT_DIM));
+                });
+            });
+        }
+    });
+    ui.add_space(6.0);
+    egui::Grid::new(("geq_master", def.id)).num_columns(2).show(ui, |ui| {
+        ui.label("Master gain");
+        let mut v = params.f("master");
+        if ui.add(egui::Slider::new(&mut v, -20.0..=20.0).suffix(" dB")).changed() {
+            params.set("master", Value::F(v));
+        }
+        ui.end_row();
+    });
+}
+
 fn param_grid(ui: &mut Ui, def: &EffectDef, params: &mut Params, _sr: u32) {
+    if def.id.starts_with("graphic_eq") {
+        return graphic_eq_faders(ui, def, params);
+    }
     let mut group = "";
     egui::Grid::new(("params", def.id)).num_columns(2).spacing([14.0, 6.0]).show(ui, |ui| {
         for pd in &def.params {
@@ -552,6 +604,12 @@ fn param_grid(ui: &mut Ui, def: &EffectDef, params: &mut Params, _sr: u32) {
                     let mut b = params.b(pd.key);
                     if ui.checkbox(&mut b, "").changed() {
                         params.set(pd.key, Value::B(b));
+                    }
+                }
+                Kind::Text { .. } => {
+                    let mut t = params.s(pd.key);
+                    if ui.add(egui::TextEdit::singleline(&mut t).desired_width(220.0)).changed() {
+                        params.set(pd.key, Value::S(t));
                     }
                 }
             }

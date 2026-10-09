@@ -12,7 +12,8 @@ use crate::dsp::params::Params;
 use crate::dsp::peaks::PeakCache;
 use crate::dsp::resample::{remap_channels, resample_channels};
 use crate::dsp::util::{db_to_lin, format_time, slice_range};
-use crate::engine::{Buffer, Engine, BROWSER_TAG, PREVIEW_TAG};
+use crate::engine::{Buffer, Engine, StreamBuf, BROWSER_TAG, PREVIEW_TAG};
+use crate::liverack::{LiveRack, RackSettings};
 use crate::io::{self, WavFormat};
 use crate::prefs::Prefs;
 
@@ -284,12 +285,31 @@ pub enum Panel {
     Markers,
     Properties,
     History,
+    MatchLoudness,
+    Levels,
+    FrequencyAnalysis,
+    PhaseMeter,
 }
 
 impl Panel {
     pub const TOP: [Panel; 2] = [Panel::Files, Panel::Favorites];
     pub const MIDDLE: [Panel; 4] = [Panel::MediaBrowser, Panel::EffectsRack, Panel::Markers, Panel::Properties];
-    pub const BOTTOM: [Panel; 1] = [Panel::History];
+    pub const BOTTOM: [Panel; 2] = [Panel::History, Panel::MatchLoudness];
+    pub const METERS: [Panel; 3] = [Panel::Levels, Panel::FrequencyAnalysis, Panel::PhaseMeter];
+    /// Every panel, in Window-menu order.
+    pub const ALL: [Panel; 11] = [
+        Panel::EffectsRack,
+        Panel::Favorites,
+        Panel::Files,
+        Panel::FrequencyAnalysis,
+        Panel::History,
+        Panel::Levels,
+        Panel::Markers,
+        Panel::MatchLoudness,
+        Panel::MediaBrowser,
+        Panel::PhaseMeter,
+        Panel::Properties,
+    ];
     pub fn name(self) -> &'static str {
         match self {
             Panel::Files => "Files",
@@ -299,6 +319,10 @@ impl Panel {
             Panel::Markers => "Markers",
             Panel::Properties => "Properties",
             Panel::History => "History",
+            Panel::MatchLoudness => "Match Loudness",
+            Panel::Levels => "Levels",
+            Panel::FrequencyAnalysis => "Frequency Analysis",
+            Panel::PhaseMeter => "Phase Meter",
         }
     }
 }
@@ -354,6 +378,7 @@ pub enum Dialog {
     Message { title: String, text: String },
     ConfirmClose { doc: usize },
     ConfirmQuit,
+    AmplitudeStats { title: String, rx: Option<Receiver<crate::dsp::analysis::AmplitudeStats>>, stats: Option<crate::dsp::analysis::AmplitudeStats> },
 }
 
 pub enum JobKind {
@@ -361,8 +386,6 @@ pub enum JobKind {
     Edit { doc_id: u64, range: (usize, usize), active: Vec<bool>, new_rate: Option<u32>, select: bool },
     /// Render an effect preview.
     Preview { params: Params },
-    /// Render the Effects Rack chain for preview.
-    RackPreview { version: u64 },
 }
 
 pub struct Job {
@@ -430,6 +453,7 @@ pub enum Action {
     /// Move the playhead by this many seconds (Rewind / Fast Forward).
     Nudge(f64),
     ClearHistory,
+    AmplitudeStatistics,
 }
 
 pub const FAVORITES: &[(&str, &str, &str)] = &[
@@ -465,16 +489,20 @@ pub struct App {
     pub show_meters: bool,
     pub tab_top: Panel,
     pub tab_mid: Panel,
+    pub tab_bot: Panel,
+    pub tab_meter: Panel,
+    pub analysis: crate::analysis_ui::AnalysisState,
     pub prefs: Prefs,
     pub rack: Vec<RackSlot>,
     pub rack_mix: f32,
     pub rack_in_db: f32,
     pub rack_out_db: f32,
-    pub rack_previewing: bool,
+    /// Master power: transport playback is heard through the rack.
+    pub rack_on: bool,
+    pub live: Option<LiveRack>,
     /// Effects Rack "Process": false = selection only, true = entire file.
     pub rack_entire: bool,
     pub rack_version: u64,
-    pub rack_rendered: u64,
     pub rack_changed: Instant,
     pub last_effect: Option<(usize, Params)>,
     pub rec_target: Option<RecTarget>,
@@ -533,15 +561,18 @@ impl App {
             show_meters: true,
             tab_top: Panel::Files,
             tab_mid: Panel::EffectsRack,
+            tab_bot: Panel::History,
+            tab_meter: Panel::Levels,
+            analysis: Default::default(),
             prefs,
             rack: Vec::new(),
             rack_mix: 100.0,
             rack_in_db: 0.0,
             rack_out_db: 0.0,
-            rack_previewing: false,
+            rack_on: false,
+            live: None,
             rack_entire: false,
             rack_version: 1,
-            rack_rendered: 0,
             rack_changed: Instant::now(),
             last_effect: None,
             rec_target: None,
@@ -651,7 +682,8 @@ impl App {
         self.follow_playhead();
         self.track_recording();
         self.maybe_render_preview();
-        self.maybe_render_rack_preview();
+        self.sync_live_rack();
+        self.poll_analysis();
     }
 
     /// Keep the target file's live length and view in step with the input.
@@ -682,7 +714,7 @@ impl App {
         let st = self.engine.status();
         if st.playing || self.job.is_some() || self.engine.is_recording() || !self.loads.is_empty() || self.meter_db.iter().any(|d| *d > -100.0) {
             ctx.request_repaint();
-        } else if self.rack_previewing || matches!(self.dialog, Some(Dialog::Effect(ref d)) if d.previewing) {
+        } else if matches!(self.dialog, Some(Dialog::Effect(ref d)) if d.previewing) {
             ctx.request_repaint();
         } else {
             ctx.request_repaint_after(Duration::from_millis(250));
@@ -897,7 +929,7 @@ impl App {
 
     // ---------------------------------------------------------------- jobs
 
-    fn spawn_job(&mut self, label: String, kind: JobKind, f: impl FnOnce() -> Result<Vec<Vec<f32>>, String> + Send + 'static) {
+    pub(crate) fn spawn_job(&mut self, label: String, kind: JobKind, f: impl FnOnce() -> Result<Vec<Vec<f32>>, String> + Send + 'static) {
         let (tx, rx) = channel();
         std::thread::spawn(move || {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
@@ -941,27 +973,6 @@ impl App {
                             d.error = Some(e);
                             d.rendered = Some(params);
                         }
-                    }
-                }
-            }
-            JobKind::RackPreview { version } => {
-                self.rack_rendered = version;
-                match res {
-                    Ok(out) if self.rack_previewing => {
-                        let sr = self.doc().map(|d| d.sample_rate).unwrap_or(48000);
-                        let len = out.first().map(|c| c.len()).unwrap_or(0) as f64;
-                        let buf: Buffer = Arc::new(out);
-                        if self.engine.is_playing_tag(PREVIEW_TAG) {
-                            self.engine.replace_buffer(buf, sr, 0.0, len);
-                        } else {
-                            self.engine.play(buf, sr, 0.0, len, true, PREVIEW_TAG);
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        self.rack_previewing = false;
-                        self.engine.stop();
-                        self.set_status(format!("Effects Rack: {e}"));
                     }
                 }
             }
@@ -1025,28 +1036,62 @@ impl App {
         Some((slots, (a, b), Vec::new(), doc.sample_rate, doc.n_ch()))
     }
 
-    fn maybe_render_rack_preview(&mut self) {
-        if !self.rack_previewing || self.job.is_some() || self.rack_rendered == self.rack_version {
-            return;
+    fn rack_settings(&self) -> RackSettings {
+        RackSettings {
+            slots: self.rack.iter().filter(|s| s.on).map(|s| (s.idx, s.params.clone())).collect(),
+            mix: self.rack_mix,
+            in_db: self.rack_in_db,
+            out_db: self.rack_out_db,
         }
-        if self.rack_changed.elapsed() < Duration::from_millis(220) {
-            return;
-        }
-        if matches!(self.dialog, Some(Dialog::Effect(ref d)) if d.previewing) {
-            return;
-        }
-        let Some((slots, (a, b), _, sr, n_ch)) = self.rack_inputs() else {
-            self.rack_previewing = false;
+    }
+
+    /// The rendered stream for document `id`, when the rack is live for it.
+    pub fn live_stream(&self, id: u64) -> Option<Arc<StreamBuf>> {
+        self.live.as_ref().filter(|l| l.doc_id == id).map(|l| l.sb.clone())
+    }
+
+    /// Keep the real-time rack renderer in step with the power switch, the
+    /// active file and the rack settings.
+    fn sync_live_rack(&mut self) {
+        let settings = self.rack_settings();
+        let want = self.rack_on && !settings.slots.is_empty() && !self.engine.is_recording();
+        let target = self.doc().filter(|d| d.len() > 0).map(|d| (d.id, d.audio.clone(), d.sample_rate, d.cursor));
+        let st = self.engine.status();
+        let Some((id, audio, sr, cursor)) = target.filter(|_| want) else {
+            if self.live.take().is_some() && self.engine.has_stream() {
+                self.engine.set_stream(None);
+            }
             return;
         };
-        let b = b.min(a + sr as usize * 20);
-        let input = slice_range(&self.doc().unwrap().audio, a, b);
-        let (effects, np) = (self.effects.clone(), self.noise_print.clone());
-        let (mix, gi, go) = (self.rack_mix, self.rack_in_db, self.rack_out_db);
-        let version = self.rack_version;
-        self.spawn_job("Rack preview".into(), JobKind::RackPreview { version }, move || {
-            run_rack(&effects, &slots, input, sr, n_ch, np.as_ref(), mix, gi, go)
-        });
+        let stale = match &self.live {
+            Some(l) => l.doc_id != id || !Arc::ptr_eq(&l.audio, &audio),
+            None => true,
+        };
+        if stale {
+            let pos = if st.playing && st.tag == id { st.pos as usize } else { cursor };
+            let live = LiveRack::start(self.effects.clone(), audio, sr, self.noise_print.clone(), settings, id, pos);
+            let sb = live.sb.clone();
+            self.live = Some(live);
+            if st.playing && st.tag == id {
+                self.engine.set_stream(Some(sb));
+            } else if self.engine.has_stream() {
+                self.engine.set_stream(None);
+            }
+        } else if let Some(l) = &mut self.live {
+            l.update(settings);
+            if !(st.playing && st.tag == id) {
+                // Pre-render from wherever playback will start.
+                l.sb.set_pos(cursor as f64);
+            }
+        }
+        if let Some(e) = self.live.as_ref().and_then(|l| l.take_error()) {
+            self.rack_on = false;
+            self.live = None;
+            if self.engine.has_stream() {
+                self.engine.set_stream(None);
+            }
+            self.set_status(format!("Effects Rack turned off: {e}"));
+        }
     }
 
     pub fn rack_touched(&mut self) {
@@ -1070,11 +1115,9 @@ impl App {
             self.set_status("The file is empty.");
             return;
         }
-        self.rack_previewing = false;
-        if self.engine.is_playing_tag(PREVIEW_TAG) {
-            self.engine.stop();
-        }
-        if matches!(self.job, Some(Job { kind: JobKind::RackPreview { .. } | JobKind::Preview { .. }, .. })) {
+        self.rack_on = false;
+        self.engine.stop();
+        if matches!(self.job, Some(Job { kind: JobKind::Preview { .. }, .. })) {
             self.job = None;
         }
         let doc = self.doc().unwrap();
@@ -1207,7 +1250,8 @@ impl App {
                 let end = doc.sel_range().filter(|(a, b)| pos >= *a as f64 && pos < *b as f64).map(|s| s.1).unwrap_or(len);
                 let start = doc.sel_range().map(|s| s.0).filter(|&a| (a as f64) <= pos).unwrap_or(0);
                 self.paused = None;
-                self.engine.play(buf, sr, start as f64, end as f64, self.looping, id);
+                let stream = self.live_stream(id);
+                self.engine.play_ex(buf, stream, sr, start as f64, end as f64, self.looping, id);
                 self.engine.seek(pos);
                 return;
             }
@@ -1225,7 +1269,8 @@ impl App {
         let loop_start = doc.sel_range().map(|s| s.0).filter(|&a| a <= start).unwrap_or(start);
         let (buf, sr, id) = (doc.audio.clone(), doc.sample_rate, doc.id);
         self.play_origin = start;
-        self.engine.play(buf, sr, loop_start as f64, end as f64, self.looping, id);
+        let stream = self.live_stream(id);
+        self.engine.play_ex(buf, stream, sr, loop_start as f64, end as f64, self.looping, id);
         if start != loop_start {
             self.engine.seek(start as f64);
         }
@@ -1857,6 +1902,7 @@ impl App {
                     }
                 }
             }
+            Action::AmplitudeStatistics => self.open_amplitude_stats(),
             Action::ClearHistory => {
                 if let Some(d) = self.doc_mut() {
                     d.undo.clear();

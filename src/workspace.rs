@@ -8,7 +8,7 @@ use eframe::egui::{self, Align, Color32, Layout, RichText, Ui};
 use crate::app::{Action, App, Dialog, EffectDialog, RackSlot, FAVORITES, RACK_SLOTS};
 use crate::dsp::effects::Category;
 use crate::dsp::util::{format_time, lin_to_db, peak_ch, rms_ch};
-use crate::engine::{BROWSER_TAG, PREVIEW_TAG};
+use crate::engine::BROWSER_TAG;
 use crate::io::OPEN_EXTENSIONS;
 use crate::theme::*;
 
@@ -351,15 +351,10 @@ impl App {
                 if ui.add_enabled(has_doc && any_on, egui::Button::new("Apply")).on_hover_text("Process the audio with every enabled effect").clicked() {
                     self.actions.push(Action::ApplyRack);
                 }
-                let label = if self.rack_previewing { "Stop" } else { "Preview" };
-                if ui.add_enabled(has_doc, egui::Button::new(label)).on_hover_text("Loop the audio through the rack").clicked() {
-                    self.rack_previewing = !self.rack_previewing;
-                    if self.rack_previewing {
-                        self.rack_rendered = 0;
-                        self.rack_changed = Instant::now().checked_sub(std::time::Duration::from_millis(500)).unwrap_or_else(Instant::now);
-                    } else if self.engine.is_playing_tag(PREVIEW_TAG) {
-                        self.engine.stop();
-                    }
+                ui.add_space(4.0);
+                let tip = if self.rack_on { "Master power: on — playback is heard through the rack" } else { "Master power: off — turn on to hear the rack while playing" };
+                if icon_button_sized(ui, Icon::Power, self.rack_on, tip, egui::vec2(22.0, 22.0), has_doc).clicked() {
+                    self.rack_on = !self.rack_on;
                 }
             });
         });

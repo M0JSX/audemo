@@ -3,6 +3,7 @@
 //! The audio callback only ever `try_lock`s the shared state, so a busy UI
 //! thread produces a moment of silence rather than a glitchy stall.
 
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -17,8 +18,95 @@ pub const BROWSER_TAG: u64 = u64::MAX - 1;
 /// Frames summarised per live-recording peak block.
 pub const REC_BLOCK: usize = 256;
 
+/// Frames per readiness block of a [`StreamBuf`].
+pub const STREAM_BLOCK: usize = 1024;
+
+/// Audio rendered on the fly (the real-time Effects Rack). A renderer thread
+/// writes whole blocks and flags them ready; the audio callback reads them
+/// without locking and holds its position if it reaches an unready block.
+pub struct StreamBuf {
+    pub len: usize,
+    pub n_ch: usize,
+    data: Vec<Vec<AtomicU32>>,
+    ready: Vec<AtomicBool>,
+    play_pos: AtomicU64,
+    region: [AtomicUsize; 2],
+    looping: AtomicBool,
+}
+
+impl StreamBuf {
+    pub fn new(len: usize, n_ch: usize, pos: usize) -> Arc<Self> {
+        let n_ch = n_ch.max(1);
+        Arc::new(StreamBuf {
+            len,
+            n_ch,
+            data: (0..n_ch).map(|_| (0..len).map(|_| AtomicU32::new(0)).collect()).collect(),
+            ready: (0..len.div_ceil(STREAM_BLOCK)).map(|_| AtomicBool::new(false)).collect(),
+            play_pos: AtomicU64::new((pos as f64).to_bits()),
+            region: [AtomicUsize::new(0), AtomicUsize::new(len)],
+            looping: AtomicBool::new(false),
+        })
+    }
+
+    /// Write `chans` starting at block-aligned frame `start` and mark the
+    /// blocks it fully covers (or that end at the buffer's end) ready.
+    pub fn write(&self, start: usize, chans: &[Vec<f32>]) {
+        let n = chans.first().map(|c| c.len()).unwrap_or(0).min(self.len.saturating_sub(start));
+        for (c, dst) in self.data.iter().enumerate() {
+            let src = &chans[c.min(chans.len() - 1)];
+            for i in 0..n {
+                dst[start + i].store(src[i].to_bits(), Ordering::Relaxed);
+            }
+        }
+        let end = start + n;
+        let mut b = start / STREAM_BLOCK;
+        while b * STREAM_BLOCK < end {
+            let block_end = ((b + 1) * STREAM_BLOCK).min(self.len);
+            if b * STREAM_BLOCK >= start && block_end <= end {
+                self.ready[b].store(true, Ordering::Release);
+            }
+            b += 1;
+        }
+    }
+
+    pub fn is_ready(&self, frame: usize) -> bool {
+        frame < self.len && self.ready[frame / STREAM_BLOCK].load(Ordering::Acquire)
+    }
+
+    #[inline]
+    fn sample(&self, c: usize, i: usize) -> f32 {
+        f32::from_bits(self.data[c.min(self.n_ch - 1)][i].load(Ordering::Relaxed))
+    }
+
+    #[cfg(test)]
+    pub fn sample_for_test(&self, c: usize, i: usize) -> f32 {
+        self.sample(c, i)
+    }
+
+    /// Where playback currently is (or was last asked to be).
+    pub fn pos(&self) -> f64 {
+        f64::from_bits(self.play_pos.load(Ordering::Relaxed))
+    }
+
+    pub fn set_pos(&self, pos: f64) {
+        self.play_pos.store(pos.to_bits(), Ordering::Relaxed);
+    }
+
+    /// (start, end, looping) of the range being played.
+    pub fn region(&self) -> (usize, usize, bool) {
+        (self.region[0].load(Ordering::Relaxed), self.region[1].load(Ordering::Relaxed), self.looping.load(Ordering::Relaxed))
+    }
+
+    fn set_region(&self, start: f64, end: f64, looping: bool) {
+        self.region[0].store(start.max(0.0) as usize, Ordering::Relaxed);
+        self.region[1].store((end.max(0.0) as usize).min(self.len), Ordering::Relaxed);
+        self.looping.store(looping, Ordering::Relaxed);
+    }
+}
+
 pub struct Shared {
     buffer: Buffer,
+    stream: Option<Arc<StreamBuf>>,
     src_rate: f64,
     pos: f64,
     start: f64,
@@ -112,6 +200,7 @@ impl Engine {
     pub fn new(output: Option<String>, input: Option<String>) -> Self {
         let shared = Arc::new(Mutex::new(Shared {
             buffer: Arc::new(Vec::new()),
+            stream: None,
             src_rate: 48000.0,
             pos: 0.0,
             start: 0.0,
@@ -172,8 +261,19 @@ impl Engine {
     }
 
     pub fn play(&self, buffer: Buffer, rate: u32, start: f64, end: f64, looping: bool, tag: u64) {
+        self.play_ex(buffer, None, rate, start, end, looping, tag);
+    }
+
+    /// Play `buffer`, or — when `stream` is given — the stream rendered from it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn play_ex(&self, buffer: Buffer, stream: Option<Arc<StreamBuf>>, rate: u32, start: f64, end: f64, looping: bool, tag: u64) {
         if let Ok(mut s) = self.shared.lock() {
             let len = buffer.first().map(|c| c.len()).unwrap_or(0) as f64;
+            if let Some(sb) = &stream {
+                sb.set_region(start, end, looping);
+                sb.set_pos(start);
+            }
+            s.stream = stream;
             s.buffer = buffer;
             s.src_rate = rate as f64;
             s.start = start.clamp(0.0, len);
@@ -185,10 +285,28 @@ impl Engine {
         }
     }
 
+    /// Switch the playing source between the plain buffer (None) and a
+    /// rendered stream, keeping the position.
+    pub fn set_stream(&self, stream: Option<Arc<StreamBuf>>) {
+        if let Ok(mut s) = self.shared.lock() {
+            if let Some(sb) = &stream {
+                sb.set_region(s.start, s.end, s.looping);
+                sb.set_pos(s.pos);
+            }
+            s.stream = stream;
+        }
+    }
+
+    /// Whether the engine is currently playing through a stream.
+    pub fn has_stream(&self) -> bool {
+        self.shared.lock().map(|s| s.stream.is_some()).unwrap_or(false)
+    }
+
     /// Swap in new audio (e.g. a re-rendered preview) without restarting.
     pub fn replace_buffer(&self, buffer: Buffer, rate: u32, start: f64, end: f64) {
         if let Ok(mut s) = self.shared.lock() {
             let len = buffer.first().map(|c| c.len()).unwrap_or(0) as f64;
+            s.stream = None;
             s.buffer = buffer;
             s.src_rate = rate as f64;
             s.start = start.clamp(0.0, len);
@@ -208,12 +326,18 @@ impl Engine {
     pub fn set_looping(&self, looping: bool) {
         if let Ok(mut s) = self.shared.lock() {
             s.looping = looping;
+            if let Some(sb) = &s.stream {
+                sb.set_region(s.start, s.end, looping);
+            }
         }
     }
 
     pub fn seek(&self, pos: f64) {
         if let Ok(mut s) = self.shared.lock() {
             s.pos = pos.clamp(s.start, s.end.max(s.start));
+            if let Some(sb) = &s.stream {
+                sb.set_pos(s.pos);
+            }
         }
     }
 
@@ -349,15 +473,34 @@ where
                 let st: &mut Shared = &mut guard;
                 let step = st.src_rate / out_rate;
                 let mut pk = [0.0f32; 2];
-                let n_src = st.buffer.len();
+                let stream = st.stream.clone();
+                let n_src = match &stream {
+                    Some(sb) => sb.n_ch,
+                    None => st.buffer.len(),
+                };
                 for frame in data.chunks_mut(channels) {
                     if st.playing && n_src > 0 {
                         let i0 = st.pos.floor() as usize;
                         let fr = (st.pos - i0 as f64) as f32;
+                        if let Some(sb) = &stream {
+                            if !sb.is_ready(i0) {
+                                // Not rendered yet: hold here rather than skip.
+                                frame.iter_mut().for_each(|s| *s = silence);
+                                continue;
+                            }
+                        }
                         for (c, out) in frame.iter_mut().enumerate() {
-                            let ch = &st.buffer[c.min(n_src - 1)];
-                            let a = ch.get(i0).copied().unwrap_or(0.0);
-                            let b = ch.get(i0 + 1).copied().unwrap_or(a);
+                            let (a, b) = match &stream {
+                                Some(sb) => {
+                                    let a = sb.sample(c, i0);
+                                    (a, if sb.is_ready(i0 + 1) { sb.sample(c, i0 + 1) } else { a })
+                                }
+                                None => {
+                                    let ch = &st.buffer[c.min(n_src - 1)];
+                                    let a = ch.get(i0).copied().unwrap_or(0.0);
+                                    (a, ch.get(i0 + 1).copied().unwrap_or(a))
+                                }
+                            };
                             let v = (a + (b - a) * fr) * st.volume;
                             if c < 2 {
                                 pk[c] = pk[c].max(v.abs());
@@ -376,6 +519,9 @@ where
                     } else {
                         frame.iter_mut().for_each(|s| *s = silence);
                     }
+                }
+                if let Some(sb) = &stream {
+                    sb.set_pos(st.pos);
                 }
                 if channels == 1 || n_src == 1 {
                     pk[1] = pk[0];

@@ -195,11 +195,9 @@ impl App {
                             if item(ui, "Reset to Default", "", true) { self.reset_workspace(); }
                         });
                         ui.separator();
-                        for panel in [Panel::EffectsRack, Panel::Favorites, Panel::Files, Panel::History] {
-                            if item(ui, panel.name(), "", true) { self.show_panel(panel); }
-                        }
-                        ui.checkbox(&mut self.show_meters, "Levels");
-                        for panel in [Panel::Markers, Panel::MediaBrowser, Panel::Properties] {
+                        if item(ui, "Amplitude Statistics…", "", has_doc) { self.actions.push(Action::AmplitudeStatistics); }
+                        ui.separator();
+                        for panel in Panel::ALL {
                             if item(ui, panel.name(), "", true) { self.show_panel(panel); }
                         }
                         ui.checkbox(&mut self.show_bottom, "Selection/View");
@@ -215,11 +213,18 @@ impl App {
     }
 
     pub fn show_panel(&mut self, panel: Panel) {
+        if Panel::METERS.contains(&panel) {
+            self.show_meters = true;
+            self.tab_meter = panel;
+            return;
+        }
         self.show_left = true;
         if Panel::TOP.contains(&panel) {
             self.tab_top = panel;
         } else if Panel::MIDDLE.contains(&panel) {
             self.tab_mid = panel;
+        } else if Panel::BOTTOM.contains(&panel) {
+            self.tab_bot = panel;
         }
     }
 
@@ -229,6 +234,8 @@ impl App {
         self.show_meters = true;
         self.tab_top = Panel::Files;
         self.tab_mid = Panel::EffectsRack;
+        self.tab_bot = Panel::History;
+        self.tab_meter = Panel::Levels;
     }
 
     pub fn toolbar(&mut self, ctx: &egui::Context) {
@@ -348,9 +355,13 @@ impl App {
                     .height_range(80.0..=480.0)
                     .frame(panel_frame())
                     .show_inside(ui, |ui| {
-                        let mut tab = Panel::History;
+                        let mut tab = self.tab_bot;
                         tab_strip(ui, &Panel::BOTTOM, &mut tab);
-                        self.history(ui);
+                        self.tab_bot = tab;
+                        match tab {
+                            Panel::MatchLoudness => self.match_loudness_panel(ui),
+                            _ => self.history(ui),
+                        }
                     });
                 egui::CentralPanel::default().frame(panel_frame()).show_inside(ui, |ui| {
                     let mut tab = self.tab_mid;
@@ -455,15 +466,15 @@ impl App {
         }
     }
 
-    /// Bottom strip: Levels meter and the Selection/View panel.
+    /// Bottom strip: Levels / Frequency Analysis / Phase Meter and the Selection/View panel.
     pub fn bottom_row(&mut self, ctx: &egui::Context) {
         if !self.show_meters && !self.show_bottom {
             return;
         }
         egui::TopBottomPanel::bottom("bottom_row")
             .resizable(true)
-            .default_height(112.0)
-            .height_range(64.0..=260.0)
+            .default_height(150.0)
+            .height_range(64.0..=420.0)
             .frame(egui::Frame::none().fill(BG_DEEP).inner_margin(egui::Margin::same(2.0)))
             .show(ctx, |ui| {
                 if self.show_bottom {
@@ -480,9 +491,15 @@ impl App {
                 }
                 if self.show_meters {
                     egui::CentralPanel::default().frame(panel_frame()).show_inside(ui, |ui| {
-                        let mut tab = 0usize;
-                        tab_strip_named(ui, &[if self.engine.is_recording() { "Levels (Input)" } else { "Levels" }], &mut tab);
-                        self.levels(ui);
+                        let names = [if self.engine.is_recording() { "Levels (Input)" } else { "Levels" }, "Frequency Analysis", "Phase Meter"];
+                        let mut tab = Panel::METERS.iter().position(|p| *p == self.tab_meter).unwrap_or(0);
+                        tab_strip_named(ui, &names, &mut tab);
+                        self.tab_meter = Panel::METERS[tab];
+                        match self.tab_meter {
+                            Panel::FrequencyAnalysis => self.frequency_analysis(ui),
+                            Panel::PhaseMeter => self.phase_meter(ui),
+                            _ => self.levels(ui),
+                        }
                     });
                 }
             });

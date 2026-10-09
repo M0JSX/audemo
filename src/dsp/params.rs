@@ -5,6 +5,7 @@ pub enum Value {
     F(f32),
     C(usize),
     B(bool),
+    S(String),
 }
 
 #[derive(Clone, Debug)]
@@ -23,6 +24,9 @@ pub enum Kind {
     },
     Toggle {
         default: bool,
+    },
+    Text {
+        default: &'static str,
     },
 }
 
@@ -57,6 +61,7 @@ impl ParamDef {
             Kind::Float { default, .. } => Value::F(*default),
             Kind::Choice { default, .. } => Value::C(*default),
             Kind::Toggle { default } => Value::B(*default),
+            Kind::Text { default } => Value::S(default.to_string()),
         }
     }
 }
@@ -98,6 +103,10 @@ pub fn toggle(key: &'static str, label: &'static str, default: bool) -> ParamDef
     ParamDef { key, label, kind: Kind::Toggle { default }, group: "" }
 }
 
+pub fn text(key: &'static str, label: &'static str, default: &'static str) -> ParamDef {
+    ParamDef { key, label, kind: Kind::Text { default }, group: "" }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Params {
     pub values: Vec<(&'static str, Value)>,
@@ -117,7 +126,7 @@ impl Params {
             Some(Value::F(v)) => *v,
             Some(Value::C(c)) => *c as f32,
             Some(Value::B(b)) => *b as u8 as f32,
-            None => 0.0,
+            Some(Value::S(_)) | None => 0.0,
         }
     }
 
@@ -134,6 +143,13 @@ impl Params {
             Some(Value::B(b)) => *b,
             Some(Value::F(v)) => *v != 0.0,
             _ => false,
+        }
+    }
+
+    pub fn s(&self, key: &str) -> String {
+        match self.get(key) {
+            Some(Value::S(s)) => s.clone(),
+            _ => String::new(),
         }
     }
 

@@ -13,7 +13,7 @@ The interface uses Adobe's open-source Source Sans 3 and Source Code Pro typefac
 
 - **Open** WAV, AIFF, FLAC, MP3, OGG/Vorbis, M4A/AAC, ALAC, CAF and MKV/WebM audio (drag files onto the window, or pass them on the command line).
 - **Save** WAV as 16-bit, 24-bit or 32-bit integer, or 32-bit float, with optional TPDF dither.
-- **Workspace** laid out like Audition's default: Files / Favorites, then Media Browser / Effects Rack / Markers / Properties, then History down the left; the Editor in the centre with its transport bar; Levels and Selection/View along the bottom. Panel groups resize, and Window > Workspace > Reset to Default restores the layout.
+- **Workspace** laid out like Audition's default: Files / Favorites, then Media Browser / Effects Rack / Markers / Properties, then History down the left; the Editor in the centre with its transport bar; Levels / Frequency Analysis / Phase Meter and Selection/View along the bottom; History / Match Loudness at the bottom left. Panel groups resize, and Window > Workspace > Reset to Default restores the layout.
 - **Waveform editor** with an overview/zoom navigator, time ruler, per-channel lanes, amplitude ruler in dB, sample-level zoom and channel enable toggles (edit L or R only).
 - **Spectral frequency display** (Shift+D) shown under the waveform.
 - **Edit**: cut, copy, paste, paste to new, delete, crop, select all, convert sample rate and channel count.
@@ -23,27 +23,29 @@ The interface uses Adobe's open-source Source Sans 3 and Source Code Pro typefac
 - **Playback** through the system output (WASAPI, CoreAudio, ALSA/PulseAudio/PipeWire), looping, monitor volume, peak meters with hold and clip indicator.
 - **Recording** (Shift+Space) with the waveform drawn live as it records; Stop or Space ends it. Records into the selection or at the cursor, or into a new file if none is open.
 - **Audio Hardware preferences** (Edit > Preferences) for choosing input and output devices; remembered between sessions along with recent files.
-- **Effects Rack**: chain up to 16 effects with power switches, reordering, input/output gain and dry/wet mix, loop preview, then apply in one step.
+- **Real-time Effects Rack**: chain up to 16 effects with power switches, reordering, input/output gain and dry/wet mix. With the rack's master power on, normal playback (Space, looping, seeking) is heard through the chain as you adjust it; Apply renders it into the file.
+- **Analysis**: Frequency Analysis (live FFT at the playhead, 1k–32k sizes, scan-selection average, hover readout), Phase Meter (goniometer and correlation), and Window > Amplitude Statistics (peak, true peak, RMS, clipping, DC offset, integrated loudness and loudness range).
+- **Match Loudness** panel: measure integrated loudness (ITU-R BS.1770 / EBU R128), true peak and LRA for open files and match them to EBU R128, ATSC A/85, podcast or streaming targets in one run.
 - **Media Browser** to navigate folders, audition files with Auto-Play and double-click to open; **Favorites** panel; **Properties** panel with peak and RMS.
 - **File and Edit menus** with Open Append, Open Recent, Close All, Save Selection As, Save All, Copy to New, Mix Paste (insert / overlap / overwrite / modulate) and Repeat Previous Command.
 - **Effect windows** with presets, live looping preview (Space) and bypass, plus a draggable frequency-response curve for the EQs and filters.
 - **Favorites** menu for one-click common jobs.
 
-## Effects (39)
+## Effects (57)
 
 | Menu | Effects |
 |---|---|
 | Effects | Invert, Reverse, Silence |
-| Amplitude and Compression | Amplify, Normalize, Fade In, Fade Out, Dynamics Processing, Hard Limiter, Noise Gate, Speech Volume Leveler |
-| Delay and Echo | Delay, Echo (with ping-pong), Analog Delay (tape / tube / BBD) |
-| Filter and EQ | Parametric Equalizer (5 bands + cut filters), Graphic Equalizer (10 bands), Scientific Filter (Butterworth LP/HP/BP/BS, up to 8-pole) |
-| Modulation | Chorus, Flanger, Phaser |
-| Noise Reduction / Restoration | Capture Noise Print, Noise Reduction (process), Adaptive Noise Reduction, DeHummer (50/60 Hz + harmonics), Click/Pop Eliminator, DeClipper |
+| Amplitude and Compression | Amplify, Normalize, Fade In, Fade Out, Dynamics Processing, Hard Limiter, Single-band Compressor, Tube-modeled Compressor, Multiband Compressor, DeEsser, DC Offset Correction, Match Loudness, Noise Gate, Speech Volume Leveler |
+| Delay and Echo | Delay, Echo (with ping-pong), Analog Delay (tape / tube / BBD), Multitap Delay |
+| Filter and EQ | Parametric Equalizer (5 bands + cut filters), Graphic Equalizer (10, 20 and 30 bands), Notch Filter, Scientific Filter (Butterworth LP/HP/BP/BS, up to 8-pole) |
+| Modulation | Chorus, Flanger, Chorus/Flanger, Phaser |
+| Noise Reduction / Restoration | Capture Noise Print, Noise Reduction (process), Adaptive Noise Reduction, DeHummer (50/60 Hz + harmonics), Click/Pop Eliminator, DeClipper, Hiss Reduction, Delete Silence |
 | Reverb | Studio Reverb (algorithmic), Full Reverb (convolution with a synthesised impulse response) |
-| Special | Distortion (soft/hard/tube/foldback/bit-crush), Vocal Enhancer |
-| Stereo Imagery | Channel Mixer, Stereo Expander, Centre Channel Extractor, Pan |
+| Special | Distortion (soft/hard/tube/foldback/bit-crush), Doppler Shifter, Guitar Suite, Mastering, Vocal Enhancer |
+| Stereo Imagery | Channel Mixer, Stereo Expander, Centre Channel Extractor, Automatic Phase Correction, Pan |
 | Time and Pitch | Stretch and Pitch (phase vocoder with phase locking), Pitch Shifter, Varispeed |
-| Generate | Tones (sine/square/triangle/saw, sweeps), Noise (white/pink/brown), Silence |
+| Generate | Tones (sine/square/triangle/saw, sweeps), Noise (white/pink/brown), DTMF Tones, Silence |
 
 All processing is 32-bit float. Effects run on a background thread, so the window stays responsive on long files.
 
@@ -135,6 +137,8 @@ src/
   editor.rs      waveform / spectral editor, selection, fades, gain HUD
   panels.rs      menus, toolbar, docked panel layout, transport, levels, status bar
   workspace.rs   Favorites, Media Browser, Effects Rack and Properties panels
+  analysis_ui.rs Frequency Analysis, Phase Meter, Match Loudness, Amplitude Statistics
+  liverack.rs    real-time Effects Rack renderer
   prefs.rs       saved preferences (audio devices, recent files)
   dialogs.rs     effect windows (presets, preview, EQ curve) and other dialogs
   engine.rs      cpal playback and recording
@@ -143,7 +147,8 @@ src/
 assets/          app icon, macOS Info.plist, Linux .desktop file, WiX installer source
 scripts/         macOS and Linux packaging scripts
   dsp/           dependency-free DSP: FFT, biquads, STFT, resampler,
-                 peak cache, spectrogram and every effect (+ tests)
+                 peak cache, spectrogram, loudness (BS.1770), analysis
+                 and every effect (+ tests)
 ```
 
 Adding an effect means writing one `fn(&[Vec<f32>], &Ctx, &Params) -> Result<Vec<Vec<f32>>, String>`
@@ -153,7 +158,7 @@ preview are generated from that definition.
 ## Roadmap to Audition parity
 
 1. ~~Recording fixes, Audio Hardware preferences, Audition workspace layout~~ (done)
-2. Real-time Effects Rack, remaining Audition effects, Match Loudness, analysis panels
+2. ~~Real-time Effects Rack, remaining Audition effects, Match Loudness, analysis panels~~ (done)
 3. Multitrack sessions: tracks, clips, automation, Mixer, mixdown
 4. Spectral selection/healing tools, Diagnostics panel, batch processing
 5. MP3/FLAC/AAC export, metadata, VST3/AU plug-in hosting

@@ -91,7 +91,7 @@ const COMBS: [usize; 8] = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617];
 const ALLPASSES: [usize; 4] = [556, 441, 341, 225];
 const SPREAD: usize = 23;
 
-fn studio_reverb(i: &[Vec<f32>], c: &Ctx, p: &Params) -> Res {
+pub(super) fn studio_reverb(i: &[Vec<f32>], c: &Ctx, p: &Params) -> Res {
     let sr = c.sample_rate as f32;
     let scale = sr / 44100.0;
     let feedback = p.f("room") / 100.0 * 0.28 + 0.7;

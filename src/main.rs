@@ -1,12 +1,14 @@
 // Hide the console window on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod analysis_ui;
 mod app;
 mod dialogs;
 mod dsp;
 mod editor;
 mod engine;
 mod io;
+mod liverack;
 #[cfg(any(target_os = "macos", audemo_check_menu))]
 mod macmenu;
 mod panels;

@@ -26,6 +26,11 @@ pub struct Biquad {
 }
 
 impl Biquad {
+    /// Build from normalised coefficients (a0 = 1).
+    pub fn from_coeffs(b0: f64, b1: f64, b2: f64, a1: f64, a2: f64) -> Self {
+        Biquad { b0, b1, b2, a1, a2, z1: 0.0, z2: 0.0 }
+    }
+
     pub fn identity() -> Self {
         Biquad { b0: 1.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0, z1: 0.0, z2: 0.0 }
     }

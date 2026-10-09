@@ -88,7 +88,7 @@ pub fn defs() -> Vec<EffectDef> {
     ]
 }
 
-fn chorus(i: &[Vec<f32>], c: &Ctx, p: &Params) -> Res {
+pub(super) fn chorus(i: &[Vec<f32>], c: &Ctx, p: &Params) -> Res {
     let sr = c.sample_rate as f32;
     let voices = [2usize, 3, 4, 5, 6, 8][p.c("voices").min(5)];
     let base = p.f("delay") * 0.001 * sr;
@@ -125,7 +125,7 @@ fn chorus(i: &[Vec<f32>], c: &Ctx, p: &Params) -> Res {
         .collect())
 }
 
-fn flanger(i: &[Vec<f32>], c: &Ctx, p: &Params) -> Res {
+pub(super) fn flanger(i: &[Vec<f32>], c: &Ctx, p: &Params) -> Res {
     let sr = c.sample_rate as f32;
     let base = p.f("delay") * 0.001 * sr;
     let depth = p.f("depth") * 0.001 * sr;

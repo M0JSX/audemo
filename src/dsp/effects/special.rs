@@ -40,7 +40,7 @@ pub fn defs() -> Vec<EffectDef> {
     ]
 }
 
-fn shape(kind: usize, x: f32) -> f32 {
+pub(super) fn shape(kind: usize, x: f32) -> f32 {
     match kind {
         1 => x.clamp(-1.0, 1.0),
         2 => {

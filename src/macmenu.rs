@@ -150,10 +150,11 @@ impl NativeMenu {
         let _ = workspace.append(&item("reset_ws", "Reset \"Default\" to Saved Layout", None));
         let _ = window.append(&workspace);
         let _ = window.append(&sep());
-        for p in [Panel::EffectsRack, Panel::Favorites, Panel::Files, Panel::History, Panel::Markers, Panel::MediaBrowser, Panel::Properties] {
+        let _ = window.append(&item("amp_stats", "Amplitude Statistics…", None));
+        let _ = window.append(&sep());
+        for p in Panel::ALL {
             let _ = window.append(&item(&format!("panel:{}", p.name()), p.name(), None));
         }
-        let _ = window.append(&item("levels", "Levels", None));
         let _ = window.append(&item("selview", "Selection/View", None));
         let _ = window.append(&sep());
         let _ = window.append(&PredefinedMenuItem::minimize(None));
@@ -212,7 +213,7 @@ impl App {
             return;
         }
         if let Some(name) = id.strip_prefix("panel:") {
-            for p in [Panel::EffectsRack, Panel::Favorites, Panel::Files, Panel::History, Panel::Markers, Panel::MediaBrowser, Panel::Properties] {
+            for p in Panel::ALL {
                 if p.name() == name {
                     self.show_panel(p);
                 }
@@ -259,10 +260,7 @@ impl App {
                 self.reset_workspace();
                 return;
             }
-            "levels" => {
-                self.show_meters = !self.show_meters;
-                return;
-            }
+            "amp_stats" => Action::AmplitudeStatistics,
             "selview" => {
                 self.show_bottom = !self.show_bottom;
                 return;

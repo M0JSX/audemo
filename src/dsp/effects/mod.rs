@@ -6,6 +6,7 @@ mod delay;
 mod filter;
 mod generate;
 mod modulation;
+mod more;
 mod restoration;
 mod reverb;
 mod special;
@@ -194,6 +195,7 @@ pub fn registry() -> Vec<EffectDef> {
     v.extend(stereo::defs());
     v.extend(timepitch::defs());
     v.extend(generate::defs());
+    v.extend(more::defs());
     v
 }
 

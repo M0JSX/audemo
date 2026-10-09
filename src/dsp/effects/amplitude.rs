@@ -272,10 +272,15 @@ pub fn compress(
 }
 
 fn hard_limiter(i: &[Vec<f32>], c: &Ctx, p: &Params) -> Res {
-    let ceiling = db_to_lin(p.f("ceiling"));
-    let boost = db_to_lin(p.f("boost"));
-    let la = ms_to_samples(p.f("lookahead"), c.sample_rate).max(1);
-    let rel = smooth_coeff(p.f("release"), c.sample_rate);
+    Ok(limit(i, c.sample_rate, p.f("ceiling"), p.f("boost"), p.f("lookahead"), p.f("release")))
+}
+
+/// Look-ahead brick-wall limiter shared by several effects.
+pub(super) fn limit(i: &[Vec<f32>], sr: u32, ceiling_db: f32, boost_db: f32, lookahead_ms: f32, release_ms: f32) -> Vec<Vec<f32>> {
+    let ceiling = db_to_lin(ceiling_db);
+    let boost = db_to_lin(boost_db);
+    let la = ms_to_samples(lookahead_ms, sr).max(1);
+    let rel = smooth_coeff(release_ms, sr);
     let len = len_of(i);
     // Required gain per sample.
     let req: Vec<f32> = (0..len)
@@ -323,7 +328,7 @@ fn hard_limiter(i: &[Vec<f32>], c: &Ctx, p: &Params) -> Res {
             o[n] = v.clamp(-ceiling, ceiling);
         }
     }
-    Ok(out)
+    out
 }
 
 fn noise_gate(i: &[Vec<f32>], c: &Ctx, p: &Params) -> Res {

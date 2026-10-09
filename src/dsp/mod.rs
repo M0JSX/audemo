@@ -12,9 +12,11 @@
 
 #![allow(dead_code)]
 
+pub mod analysis;
 pub mod biquad;
 pub mod effects;
 pub mod fft;
+pub mod loudness;
 pub mod params;
 pub mod peaks;
 pub mod resample;
