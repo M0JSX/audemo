@@ -9,6 +9,7 @@ use std::sync::Arc;
 use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, CursorIcon, FontId, Layout, Rect, RichText, Rounding, Sense, Shape, Stroke, Ui};
 
 use crate::app::{Action, App, Dialog, Document, JobKind, LoadIntent, Mode};
+use crate::dsp::effects::fade_shape;
 use crate::dsp::peaks::PeakCache;
 use crate::dsp::resample::{remap_channels, resample_channels};
 use crate::dsp::util::{db_to_lin, format_time};
@@ -50,8 +51,10 @@ pub enum MtDrag {
     Move { grabbed: u64, grab: f64, track0: usize, items: Vec<(u64, usize, usize)> },
     TrimStart(u64),
     TrimEnd(u64),
-    FadeIn(u64),
-    FadeOut(u64),
+    /// Fade handle: sideways sets the length, up/down bends the curve
+    /// (from `curve0` at `y0`), Ctrl/Cmd makes it a cosine fade.
+    FadeIn { id: u64, y0: f32, curve0: f32 },
+    FadeOut { id: u64, y0: f32, curve0: f32 },
     Select(usize),
     /// An automation point: (track, pan envelope?, point index).
     EnvPoint(usize, bool, usize),
@@ -1199,7 +1202,7 @@ impl App {
                     (0..=n)
                         .map(|k| {
                             let f = k as f32 / n as f32;
-                            let g = if up { (std::f32::consts::FRAC_PI_2 * f).sin() } else { (std::f32::consts::FRAC_PI_2 * (1.0 - f)).sin() };
+                            let g = if up { fade_shape(f, cb.fade_in_curve, cb.fade_in_cos) } else { fade_shape(1.0 - f, ca.fade_out_curve, ca.fade_out_cos) };
                             pos2(area.left() + f * area.width(), area.bottom() - g * area.height())
                         })
                         .collect()
@@ -1411,8 +1414,8 @@ impl App {
                             }
                             Zone::Left => MtDrag::TrimStart(id),
                             Zone::Right => MtDrag::TrimEnd(id),
-                            Zone::FadeIn => MtDrag::FadeIn(id),
-                            Zone::FadeOut => MtDrag::FadeOut(id),
+                            Zone::FadeIn => MtDrag::FadeIn { id, y0: p.y, curve0: s.clip(id).map(|c| c.fade_in_curve).unwrap_or(0.0) },
+                            Zone::FadeOut => MtDrag::FadeOut { id, y0: p.y, curve0: s.clip(id).map(|c| c.fade_out_curve).unwrap_or(0.0) },
                         });
                     }
                     Some((ti, None)) => {
@@ -1467,17 +1470,39 @@ impl App {
                         let x = snap(pos, s, Some(id)) as usize;
                         s.trim_end(id, x);
                     }
-                    MtDrag::FadeIn(id) | MtDrag::FadeOut(id) => {
-                        let fade_in = matches!(drag, MtDrag::FadeIn(_));
+                    MtDrag::FadeIn { id, y0, curve0 } | MtDrag::FadeOut { id, y0, curve0 } => {
+                        let fade_in = matches!(drag, MtDrag::FadeIn { .. });
                         let id = *id;
+                        // Up bends the curve up (fast rise), down bends it down.
+                        let curve = (curve0 + (y0 - p.y) / 80.0).clamp(-1.0, 1.0);
+                        let curve = if curve.abs() < 0.04 { 0.0 } else { curve };
+                        let cosine = mods.command || mods.ctrl;
+                        let mut readout = None;
                         if let Some(c) = s.clip_mut(id) {
                             if fade_in {
                                 c.fade_in = (pos as i64 - c.start as i64).clamp(0, (c.len - c.fade_out) as i64) as usize;
+                                c.fade_in_curve = curve;
+                                c.fade_in_cos = cosine;
+                                readout = Some(c.fade_in);
                             } else {
                                 c.fade_out = (c.end() as i64 - pos as i64).clamp(0, (c.len - c.fade_in) as i64) as usize;
+                                c.fade_out_curve = curve;
+                                c.fade_out_cos = cosine;
+                                readout = Some(c.fade_out);
                             }
                         }
                         s.touch();
+                        if let Some(len) = readout {
+                            let shape = if cosine {
+                                "Cosine".to_string()
+                            } else if curve == 0.0 {
+                                "Linear".to_string()
+                            } else {
+                                format!("Curve {:+.0}%", curve * 100.0)
+                            };
+                            let label = format!("{} {}  ·  {shape}", if fade_in { "Fade In" } else { "Fade Out" }, format_time(len as f64, s.sample_rate));
+                            painter.text(p + vec2(14.0, -14.0), Align2::LEFT_BOTTOM, label, FontId::monospace(11.0), Color32::from_rgb(0xf2, 0xc2, 0x30));
+                        }
                     }
                     MtDrag::EnvPoint(ti, pan, idx) => {
                         let (ti, pan, idx) = (*ti, *pan, *idx);
@@ -2087,7 +2112,7 @@ fn draw_clip(p: &egui::Painter, r: Rect, c: &Clip, src: Option<&Source>, track_c
                 .map(|k| {
                     let f = k as f32 / n as f32;
                     let x = if fade_in { r.left() + (hx - r.left()) * f } else { hx + (r.right() - hx) * f };
-                    let g = if fade_in { (std::f32::consts::FRAC_PI_2 * f).sin() } else { (std::f32::consts::FRAC_PI_2 * (1.0 - f)).sin() };
+                    let g = if fade_in { fade_shape(f, c.fade_in_curve, c.fade_in_cos) } else { fade_shape(1.0 - f, c.fade_out_curve, c.fade_out_cos) };
                     pos2(x, wave.bottom() - g * wave.height())
                 })
                 .collect();

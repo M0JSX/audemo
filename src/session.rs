@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::dsp::effects::fade_shape;
 use crate::dsp::peaks::PeakCache;
 use crate::dsp::util::db_to_lin;
 use crate::engine::Buffer;
@@ -67,6 +68,11 @@ pub struct Clip {
     pub gain_db: f32,
     pub fade_in: usize,
     pub fade_out: usize,
+    /// Fade shapes: -1..1 (0 = linear), or a cosine S-curve.
+    pub fade_in_curve: f32,
+    pub fade_out_curve: f32,
+    pub fade_in_cos: bool,
+    pub fade_out_cos: bool,
     pub mute: bool,
 }
 
@@ -79,11 +85,11 @@ impl Clip {
     pub fn envelope(&self, i: usize) -> f32 {
         let mut g = 1.0f32;
         if self.fade_in > 0 && i < self.fade_in {
-            g *= (std::f32::consts::FRAC_PI_2 * i as f32 / self.fade_in as f32).sin();
+            g *= fade_shape(i as f32 / self.fade_in as f32, self.fade_in_curve, self.fade_in_cos);
         }
         if self.fade_out > 0 && i + self.fade_out > self.len {
             let r = (self.len - i) as f32 / self.fade_out as f32;
-            g *= (std::f32::consts::FRAC_PI_2 * r.min(1.0)).sin();
+            g *= fade_shape(r.min(1.0), self.fade_out_curve, self.fade_out_cos);
         }
         g
     }
@@ -478,7 +484,22 @@ impl Session {
         let name = self.sources[&source].name.clone();
         self.push_undo("Insert Clip");
         let id = self.new_id();
-        self.tracks[track].clips.push(Clip { id, source, name, start: at, offset: 0, len, gain_db: 0.0, fade_in: 0, fade_out: 0, mute: false });
+        self.tracks[track].clips.push(Clip {
+            id,
+            source,
+            name,
+            start: at,
+            offset: 0,
+            len,
+            gain_db: 0.0,
+            fade_in: 0,
+            fade_out: 0,
+            fade_in_curve: 0.0,
+            fade_out_curve: 0.0,
+            fade_in_cos: false,
+            fade_out_cos: false,
+            mute: false,
+        });
         self.selected_clips.clear();
         self.selected_clips.insert(id);
         self.touch();
@@ -758,8 +779,21 @@ pub fn to_text(s: &Session, paths: &BTreeMap<u64, PathBuf>, base: Option<&Path>)
         }
         for c in &t.clips {
             o.push_str(&format!(
-                "clip\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-                c.id, c.source, c.start, c.offset, c.len, c.gain_db, c.fade_in, c.fade_out, c.mute as u8, clean(&c.name)
+                "clip\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                c.id,
+                c.source,
+                c.start,
+                c.offset,
+                c.len,
+                c.gain_db,
+                c.fade_in,
+                c.fade_out,
+                c.mute as u8,
+                clean(&c.name),
+                c.fade_in_curve,
+                c.fade_out_curve,
+                c.fade_in_cos as u8,
+                c.fade_out_cos as u8
             ));
         }
     }
@@ -835,6 +869,10 @@ pub fn from_text(id: u64, text: &str, base: Option<&Path>) -> Result<ParsedSessi
                     fade_out: num(8)? as usize,
                     mute: num(9)? != 0.0,
                     name: f.get(10).unwrap_or(&"").to_string(),
+                    fade_in_curve: num(11).unwrap_or(0.0).clamp(-1.0, 1.0) as f32,
+                    fade_out_curve: num(12).unwrap_or(0.0).clamp(-1.0, 1.0) as f32,
+                    fade_in_cos: num(13).map(|v| v != 0.0).unwrap_or(false),
+                    fade_out_cos: num(14).map(|v| v != 0.0).unwrap_or(false),
                 };
                 let mut c = c;
                 c.len = c.len.max(1);
@@ -1024,6 +1062,28 @@ mod tests {
     }
 
     #[test]
+    fn fade_shapes() {
+        // Linear, bent up, bent down, cosine: all start at 0 and end at 1.
+        for (c, cos) in [(0.0, false), (0.7, false), (-0.7, false), (0.0, true)] {
+            assert!(fade_shape(0.0, c, cos).abs() < 1e-6 && (fade_shape(1.0, c, cos) - 1.0).abs() < 1e-6);
+        }
+        assert!((fade_shape(0.5, 0.0, false) - 0.5).abs() < 1e-6);
+        assert!(fade_shape(0.5, 0.7, false) > 0.75, "up = fast rise");
+        assert!(fade_shape(0.5, -0.7, false) < 0.25, "down = slow rise");
+        assert!((fade_shape(0.5, 0.0, true) - 0.5).abs() < 1e-6);
+        let (mut s, src) = session_with(vec![vec![1.0; 100]]);
+        let c = s.insert_clip(0, src, 0).unwrap();
+        {
+            let k = s.clip_mut(c).unwrap();
+            k.fade_out = 50;
+            k.fade_out_curve = 1.0;
+        }
+        // A bent-up fade-out stays loud longer than a linear one.
+        let m = mix_range(&s.mix_state(), 0, 100);
+        assert!(m[0][75] > 0.85, "{}", m[0][75]);
+    }
+
+    #[test]
     fn session_text_round_trip() {
         let (mut s, src) = session_with(vec![vec![0.1; 50]]);
         let c = s.insert_clip(1, src, 7).unwrap();
@@ -1031,6 +1091,8 @@ mod tests {
             let k = s.clip_mut(c).unwrap();
             k.gain_db = -3.5;
             k.fade_in = 4;
+            k.fade_in_curve = 0.5;
+            k.fade_out_cos = true;
             k.name = "Take\t1".into();
         }
         s.tracks[1].pan = -25.0;

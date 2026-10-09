@@ -208,6 +208,42 @@ fn fade_curve(t: f32, shape: usize) -> f32 {
     }
 }
 
+/// Audition-style fade shape at `t` (0..1). `curve` runs -1..1: 0 is linear,
+/// positive bends the curve up (fast rise, "logarithmic"), negative bends it
+/// down (slow rise, "exponential"). `cosine` gives an S-curve instead.
+pub fn fade_shape(t: f32, curve: f32, cosine: bool) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    if cosine {
+        return 0.5 - 0.5 * (std::f32::consts::PI * t).cos();
+    }
+    let c = curve.clamp(-1.0, 1.0);
+    if c.abs() < 1e-3 {
+        return t;
+    }
+    let p = 1.0 + 3.0 * c.abs();
+    if c > 0.0 {
+        1.0 - (1.0 - t).powf(p)
+    } else {
+        t.powf(p)
+    }
+}
+
+/// Fade the whole of `i` in or out with an Audition-style shape.
+pub fn fade_shaped(i: &[Vec<f32>], fade_in: bool, curve: f32, cosine: bool) -> Vec<Vec<f32>> {
+    i.iter()
+        .map(|c| {
+            let n = c.len().max(2) as f32 - 1.0;
+            c.iter()
+                .enumerate()
+                .map(|(k, s)| {
+                    let t = k as f32 / n;
+                    s * fade_shape(if fade_in { t } else { 1.0 - t }, curve, cosine)
+                })
+                .collect()
+        })
+        .collect()
+}
+
 pub fn fade(i: &[Vec<f32>], fade_in: bool, shape: usize) -> Vec<Vec<f32>> {
     i.iter()
         .map(|c| {

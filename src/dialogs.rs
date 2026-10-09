@@ -41,6 +41,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Multitrack: add audio track", "Alt+A"),
     ("Multitrack: split clip at playhead", "Ctrl+K"),
     ("Multitrack: move / trim / fade a clip", "Drag the clip / its edges / its yellow handles"),
+    ("Shape a fade (both editors)", "Drag the fade handle up/down; hold Ctrl for cosine"),
     ("Multitrack: snap off while dragging", "Hold Alt"),
     ("Multitrack: show automation", "A on the track header"),
     ("Multitrack: add / move / delete automation point", "Double-click or drag the line / drag a point / double-click a point"),

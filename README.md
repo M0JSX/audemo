@@ -85,6 +85,7 @@ All processing is 32-bit float. Effects run on a background thread, so the windo
 | Scroll tracks | wheel over the track headers, or Alt+wheel |
 | Show automation (Multitrack) | A on the track header |
 | Add / delete automation point | double-click the line / double-click the point |
+| Shape a fade | drag the fade handle up (fast rise) or down (slow rise); hold Ctrl (⌘) for a cosine S-curve |
 
 On macOS use ⌘ instead of Ctrl.
 

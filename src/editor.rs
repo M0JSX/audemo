@@ -500,7 +500,7 @@ impl App {
         let wave_rects: Vec<Rect> = (0..n_ch).map(|c| lane_rect(wave_area, c)).collect();
         for fade_in in [true, false] {
             let current = match self.fade_drag {
-                Some((fi, l)) if fi == fade_in => l,
+                Some((fi, l, _, _)) if fi == fade_in => l,
                 _ => 0,
             };
             let edge = if fade_in { 0.0 } else { len as f64 };
@@ -518,39 +518,54 @@ impl App {
             if hot {
                 ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
             }
-            let hresp = hresp.on_hover_text(if fade_in { "Drag to fade in" } else { "Drag to fade out" });
+            let hresp = hresp.on_hover_text(if fade_in {
+                "Drag sideways to fade in; up/down bends the curve; hold Ctrl (⌘) for a cosine fade"
+            } else {
+                "Drag sideways to fade out; up/down bends the curve; hold Ctrl (⌘) for a cosine fade"
+            });
             if hresp.dragged() {
                 if let Some(p) = hresp.interact_pointer_pos() {
                     let s = to_sample(p.x);
                     let l = if fade_in { s } else { len - s.min(len) };
-                    self.fade_drag = Some((fade_in, l));
+                    // Up/down from where the drag began bends the curve, as in Audition.
+                    let y0 = ui.input(|i| i.pointer.press_origin()).map(|o| o.y).unwrap_or(p.y);
+                    let curve = ((y0 - p.y) / 80.0).clamp(-1.0, 1.0);
+                    let curve = if curve.abs() < 0.04 { 0.0 } else { curve };
+                    let cosine = mods.command || mods.ctrl;
+                    self.fade_drag = Some((fade_in, l, curve, cosine));
                 }
             }
             if hresp.drag_stopped() {
-                if let Some((fi, l)) = self.fade_drag.take() {
+                if let Some((fi, l, curve, cosine)) = self.fade_drag.take() {
                     if l > 1 {
-                        self.actions.push(Action::ApplyFade { fade_in: fi, len: l });
+                        self.actions.push(Action::ApplyFade { fade_in: fi, len: l, curve, cosine });
                     }
                 }
             }
-            if let Some((fi, l)) = self.fade_drag {
+            if let Some((fi, l, curve, cosine)) = self.fade_drag {
                 if fi == fade_in && l > 1 {
                     let (a, b) = if fade_in { (0.0, l as f64) } else { (len as f64 - l as f64, len as f64) };
                     for r in &wave_rects {
                         let pts: Vec<Pos2> = (0..=48)
                             .map(|k| {
                                 let t = k as f32 / 48.0;
-                                let g = 0.5 - 0.5 * (std::f32::consts::PI * t).cos();
-                                let g = if fade_in { g } else { 1.0 - g };
+                                let g = crate::dsp::effects::fade_shape(if fade_in { t } else { 1.0 - t }, curve, cosine);
                                 pos2(v.x(a + (b - a) * t as f64), r.bottom() - g * r.height())
                             })
                             .collect();
                         painter.add(Shape::line(pts, Stroke::new(1.5_f32, ACCENT)));
                     }
+                    let shape = if cosine {
+                        "Cosine".to_string()
+                    } else if curve == 0.0 {
+                        "Linear".to_string()
+                    } else {
+                        format!("Curve {:+.0}%", curve * 100.0)
+                    };
                     painter.text(
                         pos2(hx, top_lane.top() + 20.0),
                         if fade_in { Align2::LEFT_TOP } else { Align2::RIGHT_TOP },
-                        format!(" {} ", format_time(l as f64, doc.sample_rate)),
+                        format!(" {}  ·  {shape} ", format_time(l as f64, doc.sample_rate)),
                         FontId::monospace(10.0),
                         Color32::WHITE,
                     );

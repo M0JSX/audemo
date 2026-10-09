@@ -433,7 +433,7 @@ pub enum Action {
     OpenEffect(usize),
     ApplyEffect(usize, Params),
     ApplyFavorite(&'static str, &'static str),
-    ApplyFade { fade_in: bool, len: usize },
+    ApplyFade { fade_in: bool, len: usize, curve: f32, cosine: bool },
     ApplyGain(f32),
     CaptureNoise,
     Convert(u32, usize),
@@ -555,7 +555,8 @@ pub struct App {
     pub hud_gain: f32,
     pub drag_anchor: Option<usize>,
     pub hand_anchor: Option<(f32, f64, f64)>,
-    pub fade_drag: Option<(bool, usize)>,
+    /// Waveform fade handle drag: (fade in?, length, curve, cosine).
+    pub fade_drag: Option<(bool, usize, f32, bool)>,
     pub play_origin: usize,
     pub allow_quit: bool,
     pub mode: Mode,
@@ -1713,7 +1714,7 @@ impl App {
                     self.run_effect(idx, params);
                 }
             }
-            Action::ApplyFade { fade_in, len } => {
+            Action::ApplyFade { fade_in, len, curve, cosine } => {
                 if let Some(d) = self.doc_mut() {
                     let total = d.len();
                     let len = len.min(total);
@@ -1722,7 +1723,7 @@ impl App {
                     }
                     let (a, b) = if fade_in { (0, len) } else { (total - len, total) };
                     let seg = slice_range(&d.audio, a, b);
-                    let out = effects::fade(&seg, fade_in, 2);
+                    let out = effects::fade_shaped(&seg, fade_in, curve, cosine);
                     let active = d.active_ch.clone();
                     let (sel, cur) = (d.sel, d.cursor);
                     apply_edit(d, if fade_in { "Fade In" } else { "Fade Out" }, (a, b), &active, out, None, false);

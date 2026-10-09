@@ -199,5 +199,5 @@ pub fn registry() -> Vec<EffectDef> {
     v
 }
 
-pub use amplitude::fade;
+pub use amplitude::{fade_shape, fade_shaped};
 pub use restoration::capture_noise_print;
