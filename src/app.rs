@@ -1241,7 +1241,15 @@ impl App {
         let Some(doc) = self.doc() else { return };
         let st = self.engine.status();
         if st.playing && st.tag == doc.id {
+            // Space leaves the cursor where playback stopped, so the next
+            // Space carries on from there (the Stop button still returns
+            // to where playback started).
             self.engine.stop();
+            let pos = self.engine.status().pos.round().max(0.0) as usize;
+            self.paused = None;
+            if let Some(d) = self.doc_mut() {
+                d.cursor = pos.min(d.len());
+            }
             return;
         }
         let len = doc.len();
