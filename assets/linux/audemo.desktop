@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Audemo
+GenericName=Audio Editor
+Comment=Waveform audio editor with a built-in effects suite
+Exec=audemo %F
+Icon=audemo
+Terminal=false
+Categories=AudioVideo;Audio;AudioVideoEditing;
+MimeType=audio/x-wav;audio/wav;audio/flac;audio/mpeg;audio/ogg;audio/x-aiff;audio/mp4;
+Keywords=audio;wave;editor;sound;record;

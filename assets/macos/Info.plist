@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Audemo</string>
+    <key>CFBundleDisplayName</key>
+    <string>Audemo</string>
+    <key>CFBundleIdentifier</key>
+    <string>radio.m0jsx.audemo</string>
+    <key>CFBundleIconFile</key>
+    <string>Audemo</string>
+    <key>CFBundleExecutable</key>
+    <string>audemo</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleVersion</key>
+    <string>__VERSION__</string>
+    <key>CFBundleShortVersionString</key>
+    <string>__VERSION__</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Audemo records audio from your microphone or audio interface when you press Record.</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.music</string>
+</dict>
+</plist>

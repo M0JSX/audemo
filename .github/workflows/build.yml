@@ -1,0 +1,105 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            artifact: audemo-windows
+          - name: macOS universal
+            os: macos-latest
+            artifact: audemo-macos
+          - name: Linux x64
+            os: ubuntu-22.04
+            artifact: audemo-linux
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libxkbcommon-dev libwayland-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libgtk-3-dev libfuse2
+
+      - name: Test
+        run: cargo test --release
+
+      # ---------------------------------------------------------------- Windows
+      - name: Build, zip and MSI (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --release
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          New-Item -ItemType Directory -Force dist/portable | Out-Null
+          Copy-Item target/release/audemo.exe dist/portable/Audemo.exe
+          Copy-Item README.md dist/portable/
+          Compress-Archive -Force -Path dist/portable/* -DestinationPath dist/audemo-windows-x64-portable.zip
+          dotnet tool install --global wix --version 5.0.2
+          wix build assets/windows/audemo.wxs -arch x64 `
+            -d "ExePath=target/release/audemo.exe" `
+            -d "IconPath=assets/icons/audemo.ico" `
+            -d "Version=$version" `
+            -o "dist/Audemo-$version-x64.msi"
+          Get-ChildItem dist
+
+      # ---------------------------------------------------------------- macOS
+      - name: Build app, zip and DMG (macOS)
+        if: runner.os == 'macOS'
+        run: bash scripts/package-macos.sh
+
+      # ---------------------------------------------------------------- Linux
+      - name: Build tarball, .deb and AppImage (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --release
+          bash scripts/package-linux.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/*.msi
+            dist/*.zip
+            dist/*.dmg
+            dist/*.deb
+            dist/*.AppImage
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

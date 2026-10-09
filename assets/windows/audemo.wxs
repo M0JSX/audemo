@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- WiX Toolset v5 installer for Audemo. Built in CI with:
+     wix build assets/windows/audemo.wxs -arch x64 -d ExePath=... -d IconPath=... -d Version=... -o audemo.msi -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Audemo"
+           Manufacturer="Jonathan (M0JSX)"
+           Version="$(var.Version)"
+           UpgradeCode="6E33CABC-7F8E-4567-BAC3-CB8CFE909BED"
+           Scope="perMachine"
+           Compressed="yes">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Audemo is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="AudemoIcon" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="AudemoIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://m0jsx.radio" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Audemo">
+        <Component Id="MainExecutable" Bitness="always64">
+          <File Id="AudemoExe" Name="Audemo.exe" Source="$(var.ExePath)" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut" Bitness="always64">
+        <Shortcut Id="AudemoStartMenu"
+                  Name="Audemo"
+                  Description="Waveform audio editor"
+                  Target="[INSTALLFOLDER]Audemo.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="AudemoIcon" />
+        <RegistryValue Root="HKLM" Key="Software\Audemo" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="Audemo">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+  </Package>
+</Wix>
