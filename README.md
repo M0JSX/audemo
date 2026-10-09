@@ -12,13 +12,14 @@ The interface uses Adobe's open-source Source Sans 3 and Source Code Pro typefac
 ## Features
 
 - **Open** WAV, AIFF, FLAC, MP3, OGG/Vorbis, M4A/AAC, ALAC, CAF and MKV/WebM audio (drag files onto the window, or pass them on the command line).
-- **Save** WAV as 16-bit, 24-bit or 32-bit integer, or 32-bit float, with optional TPDF dither.
+- **Save** as WAV (16/24/32-bit integer or 32-bit float), FLAC (16/24-bit, lossless), MP3 (32–320 kbps CBR or V0–V9 VBR, via LAME) or AAC in M4A (64–320 kbps, via Fraunhofer FDK AAC), with optional TPDF dither. Saving runs in the background with a progress bar and Cancel, and writes to a temporary file first so a failed save never damages the original. MP3 and M4A files are gapless (encoder delay and padding are recorded and removed on open).
+- **Metadata** panel: title, artist, album, album artist, genre, year, track number, composer, comment and copyright, read from and written to every format (RIFF INFO, ID3v2, Vorbis comments, iTunes tags). WAV files also keep their **markers** as cue points.
 - **Workspace** laid out like Audition's default: Files / Favorites, then Media Browser / Effects Rack / Markers / Properties, then History down the left; the Editor in the centre with its transport bar; Levels / Frequency Analysis / Phase Meter and Selection/View along the bottom; History / Match Loudness at the bottom left. Panel groups resize, and Window > Workspace > Reset to Default restores the layout.
 - **Multitrack editor** (toolbar *Multitrack*, or 0): sessions of tracks with volume, pan, mute, solo and record-arm; drag files from the Files panel (or the desktop) onto tracks; move clips between tracks, trim their edges, drag fade handles, set clip gain, split at the playhead (Ctrl+K), with snapping to clip edges, the cursor and the selection. The mix plays live as you edit. Arm a track and record onto it while the other tracks play. **Volume and pan automation**: press A on a track to show its yellow (volume) and blue (pan) lines; drag or double-click a line to add points, drag points, double-click one to delete it, right-click to clear. Overlapping clips on a track **crossfade automatically** (equal-power). Peak **meters** on every track. **Recording latency compensation** (Preferences) lines overdubs up with what you heard. **Track effects racks**: every track, bus and the master has a 16-slot rack of real-time effects (EQs and filters, compressors, limiter, gate, de-esser, delay, echo, chorus/flanger, reverb, distortion, stereo tools), edited in the Effects Rack panel and heard live as the session plays. **Bus tracks** (Alt+B) take tracks routed to them (Out) and **sends** (pre- or post-fader) and have their own rack and fader. A **Mixer** view with faders, pan, meters, sends, output routing and rack access for every track, bus and the master. **Mixdown Session to New File** (entire session or time selection). Clips stay linked to their files, so edits made in the Waveform editor (double-click a clip) are heard in the session. Sessions save as `.audemo` files, with any unsaved audio written to a folder beside them.
 - **Waveform editor** with an overview/zoom navigator, time ruler, per-channel lanes, amplitude ruler in dB, sample-level zoom and channel enable toggles (edit L or R only).
 - **Spectral frequency display** (Shift+D) shown under the waveform, with **spectral editing**: Marquee (E), Lasso (D) and Paintbrush (P) tools select an area of time × frequency; any effect then changes only that area, Delete silences it, and **Auto Heal** (Ctrl+U) rebuilds it from the sound around it. The **Spot Healing Brush** (B) repairs whatever you paint over (clicks, coughs, chair squeaks, phone beeps) as soon as you let go.
 - **Diagnostics** panel: scan a file or selection for clicks, clipping, silence or audio; jump to each finding, then Repair, Delete or Mark one or all.
-- **Batch Process** panel: run the Effects Rack chain, Match Loudness or a Favorite over a list of files and save them as WAV (bit depth, sample rate, folder, name suffix), never overwriting anything.
+- **Batch Process** panel: run the Effects Rack chain, Match Loudness or a Favorite over a list of files and save them as WAV, FLAC, MP3 or AAC (sample rate, folder, name suffix; tags and markers carried over), never overwriting anything.
 - **Edit**: cut, copy, paste, paste to new, delete, crop, select all, convert sample rate and channel count.
 - **Unlimited-style history**: 60-step undo/redo plus a History panel you can click to jump to any state.
 - **Fade handles** in the top corners of the waveform and a floating **clip gain** control.
@@ -162,7 +163,8 @@ src/
   prefs.rs       saved preferences (audio devices, recent files)
   dialogs.rs     effect windows (presets, preview, EQ curve) and other dialogs
   engine.rs      cpal playback and recording
-  io.rs          symphonia decoding, hound WAV export
+  io.rs          symphonia decoding, tags, markers, MP4 edit lists
+  export/        WAV, FLAC (own encoder), MP3 (LAME) and M4A (FDK AAC) writers; tags
   theme.rs       palette and hand-drawn transport icons
 assets/          app icon, macOS Info.plist, Linux .desktop file, WiX installer source
 scripts/         macOS and Linux packaging scripts
@@ -181,4 +183,11 @@ preview are generated from that definition.
 2. ~~Real-time Effects Rack, remaining Audition effects, Match Loudness, analysis panels~~ (done)
 3. Multitrack sessions: ~~tracks, clips, Mixer, mixdown, recording~~ (0.6), ~~automation, crossfades, track meters, latency compensation~~ (0.6.5), ~~track/bus/master effects racks, bus tracks, sends~~ (0.7) — done
 4. ~~Spectral selection/healing tools, Diagnostics panel, batch processing~~ (0.8)
-5. MP3/FLAC/AAC export, metadata, VST3/AU plug-in hosting
+5. ~~MP3/FLAC/AAC export, metadata~~ (0.9); VST3/AU plug-in hosting next
+
+## Third-party codecs
+
+MP3 encoding uses [LAME](https://lame.sourceforge.io/) (LGPL 2.0) and AAC encoding uses the
+[Fraunhofer FDK AAC](https://android.googlesource.com/platform/external/aac/) library (FDK AAC
+licence), both compiled from source into the binary through the `mp3lame-encoder` and `fdk-aac`
+crates. The FLAC encoder is Audemo's own. Decoding uses Symphonia (MPL 2.0).

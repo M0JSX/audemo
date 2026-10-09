@@ -7,6 +7,7 @@ mod dialogs;
 mod dsp;
 mod editor;
 mod engine;
+mod export;
 mod io;
 mod liverack;
 #[cfg(any(target_os = "macos", audemo_check_menu))]

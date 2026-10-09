@@ -14,13 +14,14 @@ use crate::dsp::resample::{remap_channels, resample_channels};
 use crate::dsp::util::{db_to_lin, format_time, slice_range};
 use crate::engine::{Buffer, Engine, StreamBuf, BROWSER_TAG, PREVIEW_TAG};
 use crate::liverack::{LiveRack, RackSettings};
-use crate::io::{self, WavFormat};
+use crate::export::{self, Container, ExportSettings};
+use crate::io;
 use crate::prefs::Prefs;
 
 pub const MAX_UNDO: usize = 60;
 pub const SAMPLE_RATES: [u32; 10] = [8000, 11025, 16000, 22050, 32000, 44100, 48000, 88200, 96000, 192000];
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Marker {
     pub pos: usize,
     pub name: String,
@@ -68,6 +69,10 @@ pub struct Document {
     /// Length (in this file's samples) of a recording in progress.
     pub pending: usize,
     pub recording: bool,
+    /// Title, artist and the other tags written when the file is saved.
+    pub meta: export::Metadata,
+    /// Format settings from the last Save As, reused by Save.
+    pub export: Option<ExportSettings>,
 }
 
 impl Document {
@@ -100,7 +105,42 @@ impl Document {
             spec_sel: None,
             pending: 0,
             recording: false,
+            meta: export::Metadata::default(),
+            export: None,
         }
+    }
+
+    /// A document for a file just read from disk, with its tags and markers.
+    pub fn from_decoded(id: u64, name: String, path: PathBuf, dec: io::Decoded) -> Self {
+        let mut d = Document::new(id, name, Some(path), dec.channels, dec.sample_rate, dec.bits, "Open");
+        d.meta = dec.meta;
+        d.markers = dec
+            .markers
+            .into_iter()
+            .enumerate()
+            .map(|(i, (pos, name))| Marker { pos, name: if name.trim().is_empty() { format!("Marker {:02}", i + 1) } else { name } })
+            .collect();
+        d
+    }
+
+    /// Settings for saving straight back to the file's own path, if that
+    /// needs no questions: lossless files always, lossy ones once Save As
+    /// has chosen their encoding.
+    pub fn direct_save(&self) -> Option<ExportSettings> {
+        let c = self.path.as_deref().and_then(Container::from_path)?;
+        match self.export {
+            Some(s) if s.container == c => Some(s),
+            _ if !c.lossy() => Some(ExportSettings::for_source(c, self.source_bits)),
+            _ => None,
+        }
+    }
+
+    /// Settings to offer in Save As.
+    pub fn save_as_settings(&self) -> ExportSettings {
+        self.export.unwrap_or_else(|| {
+            let c = self.path.as_deref().and_then(Container::from_path).unwrap_or(Container::Wav);
+            ExportSettings::for_source(c, self.source_bits)
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -309,15 +349,16 @@ pub enum Panel {
     PhaseMeter,
     Diagnostics,
     BatchProcess,
+    Metadata,
 }
 
 impl Panel {
     pub const TOP: [Panel; 2] = [Panel::Files, Panel::Favorites];
-    pub const MIDDLE: [Panel; 6] = [Panel::MediaBrowser, Panel::EffectsRack, Panel::Markers, Panel::Properties, Panel::Diagnostics, Panel::BatchProcess];
+    pub const MIDDLE: [Panel; 7] = [Panel::MediaBrowser, Panel::EffectsRack, Panel::Markers, Panel::Properties, Panel::Metadata, Panel::Diagnostics, Panel::BatchProcess];
     pub const BOTTOM: [Panel; 2] = [Panel::History, Panel::MatchLoudness];
     pub const METERS: [Panel; 3] = [Panel::Levels, Panel::FrequencyAnalysis, Panel::PhaseMeter];
     /// Every panel, in Window-menu order.
-    pub const ALL: [Panel; 13] = [
+    pub const ALL: [Panel; 14] = [
         Panel::BatchProcess,
         Panel::Diagnostics,
         Panel::EffectsRack,
@@ -329,6 +370,7 @@ impl Panel {
         Panel::Markers,
         Panel::MatchLoudness,
         Panel::MediaBrowser,
+        Panel::Metadata,
         Panel::PhaseMeter,
         Panel::Properties,
     ];
@@ -347,6 +389,7 @@ impl Panel {
             Panel::PhaseMeter => "Phase Meter",
             Panel::Diagnostics => "Diagnostics",
             Panel::BatchProcess => "Batch Process",
+            Panel::Metadata => "Metadata",
         }
     }
 }
@@ -407,7 +450,7 @@ pub enum Dialog {
     Effect(EffectDialog),
     /// New Audio File; `then_record` starts recording into it on OK.
     NewFile { name: String, rate: u32, channels: usize, bits: Option<u32>, seconds: f32, then_record: bool },
-    Export { format: WavFormat, dither: bool, path: Option<PathBuf>, selection: bool },
+    Export { settings: ExportSettings, path: Option<PathBuf>, selection: bool },
     Preferences { input: Option<String>, output: Option<String>, inputs: Vec<String>, outputs: Vec<String>, latency_ms: f32 },
     MixPaste { mode: usize, clip_db: f32, orig_db: f32 },
     Convert { rate: u32, channels: usize },
@@ -428,6 +471,21 @@ pub enum JobKind {
     Preview { params: Params },
     /// Open the result as a new file (e.g. a multitrack mixdown).
     NewDoc { name: String, rate: u32 },
+}
+
+/// A file being written in the background.
+pub struct SaveJob {
+    pub rx: Receiver<Result<(), String>>,
+    pub progress: export::Progress,
+    pub doc_id: u64,
+    pub path: PathBuf,
+    pub settings: ExportSettings,
+    pub selection: bool,
+    /// What was saved, to tell whether the document changed meanwhile.
+    pub version: u64,
+    pub markers: Vec<Marker>,
+    pub meta: export::Metadata,
+    pub started: Instant,
 }
 
 pub struct Job {
@@ -542,6 +600,7 @@ pub struct App {
     pub noise_print: Option<NoiseProfile>,
     pub dialog: Option<Dialog>,
     pub job: Option<Job>,
+    pub saving: Option<SaveJob>,
     pub loads: Vec<(PathBuf, LoadIntent, Receiver<Result<io::Decoded, String>>)>,
     pub status: String,
     pub status_at: Instant,
@@ -626,6 +685,7 @@ impl App {
             noise_print: None,
             dialog: None,
             job: None,
+            saving: None,
             loads: Vec::new(),
             status_at: Instant::now(),
             show_spectral: false,
@@ -768,6 +828,7 @@ impl App {
         self.poll_native_menu(ctx);
         self.poll_loads();
         self.poll_job();
+        self.poll_save();
         self.handle_dropped_files(ctx);
         self.handle_shortcuts(ctx);
         self.update_meters(ctx);
@@ -813,6 +874,9 @@ impl App {
             ctx.request_repaint();
         } else {
             ctx.request_repaint_after(Duration::from_millis(250));
+        }
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.wait_for_save();
         }
         if ctx.input(|i| i.viewport().close_requested()) && !self.allow_quit && (self.docs.iter().any(|d| d.dirty) || self.sessions.iter().any(|s| s.dirty)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -993,11 +1057,12 @@ impl App {
                 LoadIntent::Open => {
                     let id = self.new_id();
                     let len = dec.channels[0].len();
-                    let doc = Document::new(id, name.clone(), Some(path.clone()), dec.channels, dec.sample_rate, dec.bits, "Open");
+                    let rate = dec.sample_rate;
+                    let doc = Document::from_decoded(id, name.clone(), path.clone(), dec);
                     self.add_doc(doc);
                     self.prefs.add_recent(path.clone());
                     self.prefs.save();
-                    self.set_status(format!("Opened {name} ({})", format_time(len as f64, dec.sample_rate)));
+                    self.set_status(format!("Opened {name} ({})", format_time(len as f64, rate)));
                 }
                 LoadIntent::Append(doc_id) => {
                     if let Some(d) = self.docs.iter_mut().find(|d| d.id == doc_id) {
@@ -1551,60 +1616,141 @@ impl App {
 
     fn save(&mut self, force_dialog: bool) {
         let Some(doc) = self.doc() else { return };
-        let is_wav = doc
-            .path
-            .as_ref()
-            .and_then(|p| p.extension())
-            .map(|e| e.eq_ignore_ascii_case("wav") || e.eq_ignore_ascii_case("wave"))
-            .unwrap_or(false);
-        if force_dialog || !is_wav {
-            let fmt = WavFormat::from_bits(doc.source_bits);
-            self.dialog = Some(Dialog::Export { format: fmt, dither: fmt == WavFormat::Pcm16, path: None, selection: false });
-            return;
+        match (force_dialog, doc.direct_save(), doc.path.clone()) {
+            (false, Some(settings), Some(path)) => self.begin_save(path, settings, false),
+            _ => self.open_save_dialog(false),
         }
-        let path = doc.path.clone().unwrap();
-        let fmt = WavFormat::from_bits(doc.source_bits);
-        self.write_wav(path, fmt, fmt == WavFormat::Pcm16, false);
     }
 
-    /// Write the active file (or just its selection) as WAV.
-    pub fn write_wav(&mut self, path: PathBuf, fmt: WavFormat, dither: bool, selection: bool) {
+    pub fn open_save_dialog(&mut self, selection: bool) {
         let Some(doc) = self.doc() else { return };
-        let res = if selection {
-            let (a, b) = doc.target_range();
-            io::save_wav(&path, &slice_range(&doc.audio, a, b), doc.sample_rate, fmt, dither)
-        } else {
-            io::save_wav(&path, &doc.audio, doc.sample_rate, fmt, dither)
+        // A file's own format first; otherwise the format used last time.
+        let own = doc.export.is_some() || doc.path.as_deref().and_then(Container::from_path).is_some();
+        let settings = match self.prefs.export {
+            Some(last) if !own => last,
+            _ => doc.save_as_settings(),
         };
-        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        self.dialog = Some(Dialog::Export { settings, path: None, selection });
+    }
+
+    /// The audio, markers and tags to write for the active document.
+    fn save_payload(doc: &Document, selection: bool) -> (Buffer, Vec<(usize, String)>) {
+        if selection {
+            let (a, b) = doc.target_range();
+            let markers = doc.markers.iter().filter(|m| m.pos >= a && m.pos <= b).map(|m| (m.pos - a, m.name.clone())).collect();
+            (Arc::new(slice_range(&doc.audio, a, b)), markers)
+        } else {
+            (doc.audio.clone(), doc.markers.iter().map(|m| (m.pos, m.name.clone())).collect())
+        }
+    }
+
+    /// Write the active file (or its selection) in the background.
+    pub fn begin_save(&mut self, path: PathBuf, settings: ExportSettings, selection: bool) {
+        if self.saving.is_some() {
+            self.set_status("Wait for the current save to finish.");
+            return;
+        }
+        let Some(doc) = self.doc() else { return };
+        let (audio, markers) = Self::save_payload(doc, selection);
+        let (meta, rate) = (doc.meta.clone(), doc.sample_rate);
+        let progress = export::Progress::default();
+        let (tx, rx) = channel();
+        let (p2, path2) = (progress.clone(), path.clone());
+        std::thread::spawn(move || {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| export::save(&path2, &audio, rate, &settings, &meta, &markers, &p2)))
+                .unwrap_or_else(|_| Err("The encoder failed unexpectedly.".into()));
+            let _ = tx.send(r);
+        });
+        self.saving = Some(SaveJob {
+            rx,
+            progress,
+            doc_id: doc.id,
+            path,
+            settings,
+            selection,
+            version: doc.version,
+            markers: doc.markers.clone(),
+            meta: doc.meta.clone(),
+            started: Instant::now(),
+        });
+    }
+
+    fn poll_save(&mut self) {
+        let res = match &self.saving {
+            Some(j) => match j.rx.try_recv() {
+                Ok(r) => r,
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(_) => Err("The save stopped unexpectedly.".into()),
+            },
+            None => return,
+        };
+        let job = self.saving.take().unwrap();
+        self.finish_save(job, res);
+    }
+
+    /// Block until a background save finishes (used before quitting).
+    pub fn wait_for_save(&mut self) {
+        if let Some(job) = self.saving.take() {
+            let res = job.rx.recv().unwrap_or_else(|_| Err("The save stopped unexpectedly.".into()));
+            self.finish_save(job, res);
+        }
+    }
+
+    fn finish_save(&mut self, job: SaveJob, res: Result<(), String>) {
+        let name = job.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         match res {
-            Ok(()) if selection => {
-                self.prefs.add_recent(path.clone());
-                self.prefs.save();
-                self.set_status(format!("Saved selection as {name}"));
-            }
             Ok(()) => {
-                let doc = self.doc_mut().unwrap();
-                doc.path = Some(path.clone());
-                doc.name = name.clone();
-                doc.dirty = false;
-                doc.source_bits = match fmt {
-                    WavFormat::Pcm16 => Some(16),
-                    WavFormat::Pcm24 => Some(24),
-                    WavFormat::Pcm32 => Some(32),
-                    WavFormat::Float32 => None,
-                };
-                self.prefs.add_recent(path);
+                self.prefs.add_recent(job.path.clone());
                 self.prefs.save();
-                self.set_status(format!("Saved {name} ({})", fmt.label()));
+                if job.selection {
+                    self.set_status(format!("Saved selection as {name} ({})", job.settings.summary()));
+                    return;
+                }
+                if let Some(d) = self.docs.iter_mut().find(|d| d.id == job.doc_id) {
+                    let unchanged = d.version == job.version && d.markers == job.markers && d.meta == job.meta;
+                    d.path = Some(job.path.clone());
+                    d.name = name.clone();
+                    d.export = Some(job.settings);
+                    if matches!(job.settings.container, Container::Wav | Container::Flac) {
+                        d.source_bits = job.settings.bits();
+                    }
+                    if unchanged {
+                        d.dirty = false;
+                    }
+                }
+                self.set_status(format!("Saved {name} ({})", job.settings.summary()));
             }
+            Err(e) if e == "Cancelled" => self.set_status("Save cancelled."),
             Err(e) => self.dialog = Some(Dialog::Message { title: "Save failed".into(), text: e }),
         }
+    }
+
+    /// Save document `i` now, on this thread. Returns false if it wasn't saved.
+    fn save_doc_now(&mut self, i: usize, path: PathBuf, settings: ExportSettings) -> bool {
+        let d = &self.docs[i];
+        let (audio, markers) = Self::save_payload(d, false);
+        let res = export::save(&path, &audio, d.sample_rate, &settings, &d.meta, &markers, &export::Progress::default());
+        let job = SaveJob {
+            rx: channel().1,
+            progress: export::Progress::default(),
+            doc_id: d.id,
+            path,
+            settings,
+            selection: false,
+            version: d.version,
+            markers: d.markers.clone(),
+            meta: d.meta.clone(),
+            started: Instant::now(),
+        };
+        let ok = res.is_ok();
+        self.finish_save(job, res);
+        ok
     }
 
     /// Save every unsaved session and file, asking for a name where one is
     /// needed. Returns true when nothing is left unsaved.
     pub fn save_everything(&mut self) -> bool {
+        self.wait_for_save();
         let (prev_session, prev_doc) = (self.active_session, self.active);
         // Sessions first: saving one can also save the files it uses.
         for i in 0..self.sessions.len() {
@@ -1619,10 +1765,13 @@ impl App {
             }
             self.active = Some(i);
             let d = &self.docs[i];
-            let fmt = WavFormat::from_bits(d.source_bits);
-            let wav = d.path.clone().filter(|p| p.extension().map(|e| e.eq_ignore_ascii_case("wav") || e.eq_ignore_ascii_case("wave")).unwrap_or(false));
-            if let Some(p) = wav.or_else(|| self.pick_save_path()) {
-                self.write_wav(p, fmt, fmt == WavFormat::Pcm16, false);
+            if let (Some(s), Some(p)) = (d.direct_save(), d.path.clone()) {
+                self.save_doc_now(i, p, s);
+            } else {
+                let s = d.save_as_settings();
+                if let Some(p) = self.pick_save_path(s.container) {
+                    self.save_doc_now(i, p, s);
+                }
             }
         }
         self.active_session = prev_session;
@@ -1630,14 +1779,15 @@ impl App {
         !self.docs.iter().any(|d| d.dirty) && !self.sessions.iter().any(|s| s.dirty)
     }
 
-    pub fn pick_save_path(&self) -> Option<PathBuf> {
+    /// Ask where to save the active file in format `c`.
+    pub fn pick_save_path(&self, c: Container) -> Option<PathBuf> {
         let doc = self.doc()?;
         let stem = Path::new(&doc.name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled".into());
-        let mut dlg = rfd::FileDialog::new().add_filter("WAV audio", &["wav"]).set_file_name(format!("{stem}.wav"));
+        let mut dlg = rfd::FileDialog::new().add_filter(c.label(), &[c.ext()]).set_file_name(format!("{stem}.{}", c.ext()));
         if let Some(dir) = doc.path.as_ref().and_then(|p| p.parent()) {
             dlg = dlg.set_directory(dir);
         }
-        dlg.save_file().map(|p| if p.extension().is_none() { p.with_extension("wav") } else { p })
+        dlg.save_file().map(|p| if Container::from_path(&p) == Some(c) { p } else { p.with_extension(c.ext()) })
     }
 
     // ---------------------------------------------------------------- dispatcher
@@ -1701,6 +1851,7 @@ impl App {
                 }
             }
             Action::Quit => {
+                self.wait_for_save();
                 if (self.docs.iter().any(|d| d.dirty) || self.sessions.iter().any(|s| s.dirty)) && !self.allow_quit {
                     self.dialog = Some(Dialog::ConfirmQuit);
                 } else {
@@ -2057,32 +2208,30 @@ impl App {
                 }
             }
             Action::SaveAll => {
+                self.wait_for_save();
                 let mut saved = 0;
                 let mut skipped = 0;
-                for d in self.docs.iter_mut().filter(|d| d.dirty) {
-                    let wav = d.path.as_ref().and_then(|p| p.extension()).map(|e| e.eq_ignore_ascii_case("wav")).unwrap_or(false);
-                    if !wav {
-                        skipped += 1;
+                for i in 0..self.docs.len() {
+                    let d = &self.docs[i];
+                    if !d.dirty {
                         continue;
                     }
-                    let fmt = WavFormat::from_bits(d.source_bits);
-                    if io::save_wav(d.path.as_ref().unwrap(), &d.audio, d.sample_rate, fmt, fmt == WavFormat::Pcm16).is_ok() {
-                        d.dirty = false;
-                        saved += 1;
+                    match (d.direct_save(), d.path.clone()) {
+                        (Some(s), Some(p)) => {
+                            if self.save_doc_now(i, p, s) {
+                                saved += 1;
+                            }
+                        }
+                        _ => skipped += 1,
                     }
                 }
                 self.set_status(if skipped > 0 {
-                    format!("Saved {saved} file(s). {skipped} need Save As first (new or non-WAV files).")
+                    format!("Saved {saved} file(s). {skipped} need Save As first (new files, or MP3/AAC not yet saved this session).")
                 } else {
                     format!("Saved {saved} file(s).")
                 });
             }
-            Action::SaveSelectionAs => {
-                if let Some(d) = self.doc() {
-                    let fmt = WavFormat::from_bits(d.source_bits);
-                    self.dialog = Some(Dialog::Export { format: fmt, dither: fmt == WavFormat::Pcm16, path: None, selection: true });
-                }
-            }
+            Action::SaveSelectionAs => self.open_save_dialog(true),
             Action::CopyToNew => {
                 let res = self.doc().map(|d| {
                     let (a, b) = d.target_range();

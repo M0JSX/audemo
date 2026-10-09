@@ -1,6 +1,6 @@
 [package]
 name = "audemo"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 rust-version = "1.80"
 description = "Audemo: a cross-platform waveform audio editor with a built-in effects suite"
@@ -18,8 +18,10 @@ eframe = "0.29.1"
 cpal = "0.15.3"
 # Decoding: WAV, AIFF, FLAC, MP3, OGG/Vorbis, AAC/M4A, ALAC, MKV/WebM.
 symphonia = { version = "0.5.4", features = ["all"] }
-# WAV export.
-hound = "3.5.1"
+# MP3 export (LAME, built from source).
+mp3lame-encoder = "0.2.5"
+# AAC export (Fraunhofer FDK AAC, built from source).
+fdk-aac = "0.8.0"
 # Native open/save dialogs.
 rfd = "0.14.1"
 
@@ -32,7 +34,7 @@ muda = "0.15"
 arboard = "3.4"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(audemo_check_menu)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(audemo_check_menu)', 'cfg(audemo_std_test)', 'cfg(audemo_stub)'] }
 
 [profile.release]
 opt-level = 3

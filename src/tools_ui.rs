@@ -14,7 +14,8 @@ use crate::dsp::effects::Ctx;
 use crate::dsp::params::{Params, Value};
 use crate::dsp::resample::resample_channels;
 use crate::dsp::util::{format_time, slice_range};
-use crate::io::{self, WavFormat};
+use crate::export::{self, Container, ExportSettings, WavFormat};
+use crate::io;
 use crate::theme::*;
 
 pub const DIAG_KINDS: [&str; 4] = ["Click/Pop Eliminator", "DeClipper", "Delete Silence", "Mark Audio"];
@@ -69,7 +70,7 @@ pub struct BatchState {
     pub files: Vec<(PathBuf, BatchStatus)>,
     /// 0 = no processing, 1 = Effects Rack chain, 2 = Match Loudness, 3.. = Favorites
     pub process: usize,
-    pub format: WavFormat,
+    pub format: ExportSettings,
     pub rate: Option<u32>,
     pub out_dir: Option<PathBuf>,
     pub suffix: String,
@@ -83,7 +84,7 @@ impl Default for BatchState {
         BatchState {
             files: Vec::new(),
             process: 1,
-            format: WavFormat::Pcm24,
+            format: ExportSettings::default(),
             rate: None,
             out_dir: None,
             suffix: "_processed".into(),
@@ -413,6 +414,7 @@ impl App {
                 let files_ref = &files;
                 let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<String, String> {
                     let dec = io::load(path)?;
+                    let (meta, mut markers) = (dec.meta, dec.markers);
                     let mut audio = dec.channels;
                     let mut sr = dec.sample_rate;
                     let n_ch = audio.len();
@@ -425,20 +427,25 @@ impl App {
                         }
                     };
                     if let Some(r) = rate.filter(|r| *r != sr) {
-                        audio = resample_channels(&audio, r as f64 / sr as f64);
+                        let ratio = r as f64 / sr as f64;
+                        audio = resample_channels(&audio, ratio);
+                        for m in markers.iter_mut() {
+                            m.0 = (m.0 as f64 * ratio).round() as usize;
+                        }
                         sr = r;
                     }
                     let dir = out_dir.clone().or_else(|| path.parent().map(|p| p.to_path_buf())).unwrap_or_default();
                     let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "audio".into());
-                    let mut out = dir.join(format!("{stem}{suffix}.wav"));
+                    let ext = fmt.container.ext();
+                    let mut out = dir.join(format!("{stem}{suffix}.{ext}"));
                     let mut k = 2;
                     // Never overwrite a source file, another output of this run,
                     // or anything already on disk: number the name instead.
                     while out.exists() || written_ref.contains(&out) || files_ref.contains(&out) {
-                        out = dir.join(format!("{stem}{suffix} {k}.wav"));
+                        out = dir.join(format!("{stem}{suffix} {k}.{ext}"));
                         k += 1;
                     }
-                    io::save_wav(&out, &audio, sr, fmt, fmt == WavFormat::Pcm16)?;
+                    export::save(&out, &audio, sr, &fmt, &meta, &markers, &export::Progress::default())?;
                     written_ref.insert(out.clone());
                     Ok(out.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())
                 }))
@@ -528,9 +535,9 @@ impl App {
             });
             ui.end_row();
             ui.label(RichText::new("Format").color(TEXT_DIM));
-            egui::ComboBox::from_id_source("batch_fmt").width(180.0).selected_text(format!("WAV {}", self.batch.format.label())).show_ui(ui, |ui| {
-                for f in [WavFormat::Pcm16, WavFormat::Pcm24, WavFormat::Pcm32, WavFormat::Float32] {
-                    ui.selectable_value(&mut self.batch.format, f, format!("WAV {}", f.label()));
+            egui::ComboBox::from_id_source("batch_fmt").width(180.0).selected_text(self.batch.format.summary()).show_ui(ui, |ui| {
+                for f in batch_formats() {
+                    ui.selectable_value(&mut self.batch.format, f, f.summary());
                 }
             });
             ui.end_row();
@@ -574,5 +581,68 @@ impl App {
                 }
             }
         });
+    }
+}
+
+/// Output formats offered by Batch Process.
+fn batch_formats() -> Vec<ExportSettings> {
+    let base = ExportSettings::default();
+    let mut v: Vec<ExportSettings> = WavFormat::ALL.iter().map(|w| ExportSettings { container: Container::Wav, wav: *w, ..base }).collect();
+    for bits in [16, 24] {
+        v.push(ExportSettings { container: Container::Flac, flac_bits: bits, ..base });
+    }
+    for kbps in [320, 256, 192, 128] {
+        v.push(ExportSettings { container: Container::Mp3, mp3_kbps: kbps, ..base });
+    }
+    for q in [0, 2] {
+        v.push(ExportSettings { container: Container::Mp3, mp3_vbr: true, mp3_vbr_quality: q, ..base });
+    }
+    for kbps in [256, 192, 128] {
+        v.push(ExportSettings { container: Container::M4a, aac_kbps: kbps, ..base });
+    }
+    v
+}
+
+impl App {
+    /// Title, artist and the other tags of the active file.
+    pub fn metadata_panel(&mut self, ui: &mut Ui) {
+        let Some(doc) = self.doc_mut() else {
+            ui.label(RichText::new("Open a file to edit its metadata.").color(TEXT_DIM));
+            return;
+        };
+        let mut changed = false;
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            egui::Grid::new("meta_grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+                for t in export::TAGS {
+                    ui.label(RichText::new(t.label()).color(TEXT_DIM));
+                    let mut v = doc.meta.get(t).to_string();
+                    let edit = if t == export::Tag::Comment {
+                        egui::TextEdit::multiline(&mut v).desired_rows(2).desired_width(f32::INFINITY)
+                    } else {
+                        egui::TextEdit::singleline(&mut v).desired_width(f32::INFINITY)
+                    };
+                    if ui.add(edit).changed() {
+                        doc.meta.set(t, v);
+                        changed = true;
+                    }
+                    ui.end_row();
+                }
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!doc.meta.is_empty(), egui::Button::new("Clear All")).clicked() {
+                    doc.meta = export::Metadata::default();
+                    changed = true;
+                }
+            });
+            ui.label(
+                RichText::new("Saved with the file: RIFF INFO in WAV, ID3 in MP3, Vorbis comments in FLAC, iTunes tags in M4A. WAV files also keep their markers.")
+                    .color(TEXT_DIM)
+                    .size(10.5),
+            );
+        });
+        if changed {
+            doc.dirty = true;
+        }
     }
 }

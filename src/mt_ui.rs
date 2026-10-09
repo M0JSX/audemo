@@ -15,7 +15,8 @@ use crate::dsp::resample::{remap_channels, resample_channels};
 use crate::dsp::util::{db_to_lin, format_time};
 use crate::editor::{ruler_label, RULER_STEPS};
 use crate::engine::Buffer;
-use crate::io::{self, WavFormat};
+use crate::export::{self, Container, ExportSettings, WavFormat};
+use crate::io;
 use crate::session::{self, crossfade_pairs, mix_range, Clip, Envelope, Session, Source, Track, SESSION_EXT, VOL_ENV_MAX, VOL_ENV_MIN};
 use crate::theme::*;
 
@@ -422,7 +423,8 @@ impl App {
                 n += 1;
             }
             taken.insert(p.clone());
-            if let Err(e) = io::save_wav(&p, &src.audio, s.sample_rate, WavFormat::Float32, false) {
+            let float = ExportSettings { container: Container::Wav, wav: WavFormat::Float32, include_meta: false, ..Default::default() };
+            if let Err(e) = export::save(&p, &src.audio, s.sample_rate, &float, &export::Metadata::default(), &[], &export::Progress::default()) {
                 self.dialog = Some(Dialog::Message { title: "Save failed".into(), text: e });
                 return;
             }

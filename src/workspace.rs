@@ -403,12 +403,10 @@ impl App {
                 (pk, rms)
             }
         };
-        let format = doc
-            .path
-            .as_ref()
-            .and_then(|p| p.extension())
-            .map(|e| e.to_string_lossy().to_uppercase())
-            .unwrap_or_else(|| "Unsaved".into());
+        let format = match doc.export {
+            Some(e) if doc.path.is_some() => e.summary(),
+            _ => doc.path.as_ref().and_then(|p| p.extension()).map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_else(|| "Unsaved".into()),
+        };
         let path = doc.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "Not saved yet".into());
         let basic: Vec<(&str, String)> = vec![
             ("Duration", format_time(doc.len() as f64, doc.sample_rate)),

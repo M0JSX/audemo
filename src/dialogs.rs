@@ -9,7 +9,7 @@ use crate::dsp::effects::EffectDef;
 use crate::dsp::params::{Kind, Params, Value};
 use crate::dsp::util::format_time;
 use crate::engine::PREVIEW_TAG;
-use crate::io::WavFormat;
+use crate::export::{Container, WavFormat, AAC_BITRATES, MP3_BITRATES};
 use crate::theme::*;
 
 const SHORTCUTS: &[(&str, &str)] = &[
@@ -129,27 +129,108 @@ impl App {
                     next = Some(Dialog::NewFile { name, rate, channels, bits, seconds, then_record });
                 }
             }
-            Dialog::Export { mut format, mut dither, path, selection } => {
+            Dialog::Export { mut settings, path, selection } => {
+                let mut open_meta = false;
                 centered(egui::Window::new(if selection { "Save Selection As" } else { "Save As" })).show(ctx, |ui| {
-                    if let Some(d) = self.doc() {
-                        ui.label(RichText::new(format!("{} • {}", d.name, d.format_label())).color(TEXT_DIM));
-                    }
+                    ui.set_min_width(420.0);
+                    let (frames, ch, rate) = match self.doc() {
+                        Some(d) => {
+                            ui.label(RichText::new(format!("{} • {}", d.name, d.format_label())).color(TEXT_DIM));
+                            let frames = if selection { let (a, b) = d.target_range(); b - a } else { d.len() };
+                            (frames, d.n_ch(), d.sample_rate)
+                        }
+                        None => (0, 2, 48000),
+                    };
                     ui.add_space(4.0);
                     egui::Grid::new("export").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                         ui.label("Format");
-                        ui.label("WAV (Microsoft)");
-                        ui.end_row();
-                        ui.label("Sample type");
-                        egui::ComboBox::from_id_source("exp_fmt").selected_text(format.label()).show_ui(ui, |ui| {
-                            for f in WavFormat::ALL {
-                                ui.selectable_value(&mut format, f, f.label());
+                        egui::ComboBox::from_id_source("exp_container").width(220.0).selected_text(settings.container.label()).show_ui(ui, |ui| {
+                            for c in Container::ALL {
+                                ui.selectable_value(&mut settings.container, c, c.label());
                             }
                         });
                         ui.end_row();
-                        ui.label("Dither");
-                        ui.add_enabled(format != WavFormat::Float32, egui::Checkbox::new(&mut dither, "Triangular (TPDF) dither"));
+                        match settings.container {
+                            Container::Wav => {
+                                ui.label("Sample type");
+                                egui::ComboBox::from_id_source("exp_fmt").width(220.0).selected_text(settings.wav.label()).show_ui(ui, |ui| {
+                                    for f in WavFormat::ALL {
+                                        ui.selectable_value(&mut settings.wav, f, f.label());
+                                    }
+                                });
+                                ui.end_row();
+                            }
+                            Container::Flac => {
+                                ui.label("Sample type");
+                                egui::ComboBox::from_id_source("exp_flac").width(220.0).selected_text(format!("{}-bit integer", settings.flac_bits)).show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut settings.flac_bits, 16, "16-bit integer");
+                                    ui.selectable_value(&mut settings.flac_bits, 24, "24-bit integer");
+                                });
+                                ui.end_row();
+                            }
+                            Container::Mp3 => {
+                                ui.label("Mode");
+                                ui.horizontal(|ui| {
+                                    ui.radio_value(&mut settings.mp3_vbr, false, "Constant bitrate");
+                                    ui.radio_value(&mut settings.mp3_vbr, true, "Variable bitrate");
+                                });
+                                ui.end_row();
+                                if settings.mp3_vbr {
+                                    ui.label("Quality");
+                                    ui.horizontal(|ui| {
+                                        let mut q = 9 - settings.mp3_vbr_quality as i32;
+                                        ui.add(egui::Slider::new(&mut q, 0..=9).show_value(false));
+                                        settings.mp3_vbr_quality = (9 - q).clamp(0, 9) as u8;
+                                        ui.label(RichText::new(format!("V{} (≈{} kbps)", settings.mp3_vbr_quality, vbr_kbps(settings.mp3_vbr_quality))).color(TEXT_DIM));
+                                    });
+                                } else {
+                                    ui.label("Bitrate");
+                                    egui::ComboBox::from_id_source("exp_mp3").width(120.0).selected_text(format!("{} kbps", settings.mp3_kbps)).show_ui(ui, |ui| {
+                                        for b in MP3_BITRATES {
+                                            ui.selectable_value(&mut settings.mp3_kbps, b, format!("{b} kbps"));
+                                        }
+                                    });
+                                }
+                                ui.end_row();
+                            }
+                            Container::M4a => {
+                                ui.label("Bitrate");
+                                egui::ComboBox::from_id_source("exp_aac").width(120.0).selected_text(format!("{} kbps", settings.aac_kbps)).show_ui(ui, |ui| {
+                                    for b in AAC_BITRATES {
+                                        ui.selectable_value(&mut settings.aac_kbps, b, format!("{b} kbps"));
+                                    }
+                                });
+                                ui.end_row();
+                            }
+                        }
+                        if settings.integer() {
+                            ui.label("Dither");
+                            ui.checkbox(&mut settings.dither, "Triangular (TPDF) dither");
+                            ui.end_row();
+                        }
+                        ui.label("Metadata");
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut settings.include_meta, if settings.container == Container::Wav { "Include markers and other metadata" } else { "Include metadata" });
+                            if ui.small_button("Edit…").on_hover_text("Open the Metadata panel").clicked() {
+                                open_meta = true;
+                            }
+                        });
+                        ui.end_row();
+                        ui.label("Estimated size");
+                        ui.label(RichText::new(estimate_size(&settings, frames, ch, rate)).color(TEXT_DIM));
                         ui.end_row();
                     });
+                    if settings.container.lossy() {
+                        let note = if rate > 48000 && settings.container == Container::Mp3 {
+                            format!("MP3 is lossy and tops out at 48 kHz, so this {rate} Hz audio is converted to 48 kHz. Keep a WAV or FLAC copy for editing.")
+                        } else {
+                            "Lossy formats discard detail on every save. Keep a WAV or FLAC copy for further editing.".to_string()
+                        };
+                        ui.label(RichText::new(note).color(TEXT_DIM).size(11.0));
+                    }
+                    if ch > 2 && settings.container.lossy() {
+                        ui.label(RichText::new("Only the first two channels are encoded.").color(WARN).size(11.0));
+                    }
                     ui.add_space(6.0);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.button("Cancel").clicked() {
@@ -157,14 +238,19 @@ impl App {
                         }
                         if ui.add(egui::Button::new(RichText::new("Choose location and save…").color(Color32::WHITE))).clicked() {
                             keep = false;
-                            if let Some(p) = path.clone().or_else(|| self.pick_save_path()) {
-                                self.write_wav(p, format, dither && format != WavFormat::Float32, selection);
+                            let target = path.clone().filter(|p| Container::from_path(p) == Some(settings.container)).or_else(|| self.pick_save_path(settings.container));
+                            if let Some(p) = target {
+                                self.prefs.export = Some(settings);
+                                self.begin_save(p, settings, selection);
                             }
                         }
                     });
                 });
+                if open_meta {
+                    self.show_panel(crate::app::Panel::Metadata);
+                }
                 if keep {
-                    next = Some(Dialog::Export { format, dither, path, selection });
+                    next = Some(Dialog::Export { settings, path, selection });
                 }
             }
             Dialog::Preferences { mut input, mut output, inputs, outputs, mut latency_ms } => {
@@ -848,4 +934,23 @@ fn response_curve(
             TEXT_DIM,
         );
     }
+}
+
+/// Typical LAME VBR bitrate for quality `q` (V0–V9).
+fn vbr_kbps(q: u8) -> u32 {
+    [245, 225, 190, 175, 165, 130, 115, 100, 85, 65][q.min(9) as usize]
+}
+
+fn estimate_size(s: &crate::export::ExportSettings, frames: usize, ch: usize, rate: u32) -> String {
+    let secs = frames as f64 / rate.max(1) as f64;
+    let pcm = |bytes: usize| frames as f64 * ch as f64 * bytes as f64;
+    let (bytes, approx) = match s.container {
+        Container::Wav => (pcm(match s.wav { WavFormat::Pcm16 => 2, WavFormat::Pcm24 => 3, _ => 4 }), false),
+        Container::Flac => (pcm(s.flac_bits as usize / 8) * 0.6, true),
+        Container::Mp3 => ((if s.mp3_vbr { vbr_kbps(s.mp3_vbr_quality) } else { s.mp3_kbps }) as f64 * 125.0 * secs, s.mp3_vbr),
+        Container::M4a => (s.aac_kbps as f64 * 125.0 * secs, false),
+    };
+    let mb = bytes / 1_000_000.0;
+    let text = if mb >= 1000.0 { format!("{:.2} GB", mb / 1000.0) } else if mb >= 1.0 { format!("{mb:.1} MB") } else { format!("{:.0} KB", bytes / 1000.0) };
+    if approx { format!("about {text}") } else { text }
 }

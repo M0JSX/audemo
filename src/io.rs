@@ -1,4 +1,4 @@
-//! File decoding (symphonia) and WAV export (hound).
+//! File decoding (symphonia). Writing lives in `crate::export`.
 
 use std::path::Path;
 
@@ -7,7 +7,7 @@ use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymError;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
+use symphonia::core::meta::{MetadataOptions, MetadataRevision, StandardTagKey};
 use symphonia::core::probe::Hint;
 
 pub const OPEN_EXTENSIONS: &[&str] = &[
@@ -19,6 +19,39 @@ pub struct Decoded {
     pub sample_rate: u32,
     pub channels: Vec<Vec<f32>>,
     pub bits: Option<u32>,
+    pub meta: crate::export::Metadata,
+    /// Markers stored in the file (WAV cue points): (frame, name).
+    pub markers: Vec<(usize, String)>,
+}
+
+fn read_tags(rev: &MetadataRevision, meta: &mut crate::export::Metadata, total: &mut Option<String>) {
+    use crate::export::Tag;
+    for t in rev.tags() {
+        let tag = match t.std_key {
+            Some(StandardTagKey::TrackTitle) => Some(Tag::Title),
+            Some(StandardTagKey::Artist) => Some(Tag::Artist),
+            Some(StandardTagKey::Album) => Some(Tag::Album),
+            Some(StandardTagKey::AlbumArtist) => Some(Tag::AlbumArtist),
+            Some(StandardTagKey::Genre) => Some(Tag::Genre),
+            Some(StandardTagKey::Date) => Some(Tag::Year),
+            Some(StandardTagKey::TrackNumber) => Some(Tag::Track),
+            Some(StandardTagKey::Composer) => Some(Tag::Composer),
+            Some(StandardTagKey::Comment) => Some(Tag::Comment),
+            Some(StandardTagKey::Copyright) => Some(Tag::Copyright),
+            Some(StandardTagKey::TrackTotal) => {
+                *total = Some(t.value.to_string());
+                None
+            }
+            Some(_) => None,
+            None => Tag::from_key(&t.key),
+        };
+        if let Some(tag) = tag {
+            let v = t.value.to_string();
+            if !v.trim().is_empty() && meta.get(tag).is_empty() {
+                meta.set(tag, v.trim());
+            }
+        }
+    }
 }
 
 pub fn load(path: &Path) -> Result<Decoded, String> {
@@ -28,10 +61,20 @@ pub fn load(path: &Path) -> Result<Decoded, String> {
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
     }
-    let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+    let mut probed = symphonia::default::get_probe()
+        .format(&hint, mss, &FormatOptions { enable_gapless: true, ..Default::default() }, &MetadataOptions::default())
         .map_err(|e| format!("Unrecognised audio format: {e}"))?;
     let mut format = probed.format;
+    let mut meta = crate::export::Metadata::default();
+    let mut track_total = None;
+    if let Some(m) = probed.metadata.get() {
+        if let Some(rev) = m.current() {
+            read_tags(rev, &mut meta, &mut track_total);
+        }
+    }
+    if let Some(rev) = format.metadata().current() {
+        read_tags(rev, &mut meta, &mut track_total);
+    }
     let track = format
         .tracks()
         .iter()
@@ -89,76 +132,135 @@ pub fn load(path: &Path) -> Result<Decoded, String> {
     for c in channels.iter_mut() {
         c.truncate(len);
     }
-    Ok(Decoded { sample_rate, channels, bits })
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WavFormat {
-    Pcm16,
-    Pcm24,
-    Pcm32,
-    Float32,
-}
-
-impl WavFormat {
-    pub const ALL: [WavFormat; 4] = [WavFormat::Pcm16, WavFormat::Pcm24, WavFormat::Pcm32, WavFormat::Float32];
-    pub fn label(self) -> &'static str {
-        match self {
-            WavFormat::Pcm16 => "16-bit integer",
-            WavFormat::Pcm24 => "24-bit integer",
-            WavFormat::Pcm32 => "32-bit integer",
-            WavFormat::Float32 => "32-bit floating point",
-        }
-    }
-    pub fn from_bits(bits: Option<u32>) -> Self {
-        match bits {
-            Some(16) | Some(8) => WavFormat::Pcm16,
-            Some(24) => WavFormat::Pcm24,
-            _ => WavFormat::Float32,
-        }
-    }
-}
-
-pub fn save_wav(
-    path: &Path,
-    chs: &[Vec<f32>],
-    sample_rate: u32,
-    fmt: WavFormat,
-    dither: bool,
-) -> Result<(), String> {
-    let n_ch = chs.len().max(1);
-    let (bits, sample_format) = match fmt {
-        WavFormat::Pcm16 => (16, hound::SampleFormat::Int),
-        WavFormat::Pcm24 => (24, hound::SampleFormat::Int),
-        WavFormat::Pcm32 => (32, hound::SampleFormat::Int),
-        WavFormat::Float32 => (32, hound::SampleFormat::Float),
-    };
-    let spec = hound::WavSpec { channels: n_ch as u16, sample_rate, bits_per_sample: bits, sample_format };
-    let mut w = hound::WavWriter::create(path, spec).map_err(|e| format!("Couldn't create file: {e}"))?;
-    let len = chs.first().map(|c| c.len()).unwrap_or(0);
-    let mut rng = crate::dsp::util::Rng::new(0xF3_77_17E);
-    let err = |e: hound::Error| format!("Write failed: {e}");
-    for i in 0..len {
-        for c in chs {
-            let s = c[i];
-            match fmt {
-                WavFormat::Float32 => w.write_sample(s).map_err(err)?,
-                WavFormat::Pcm16 => {
-                    let tpdf = if dither { (rng.bipolar() + rng.bipolar()) * 0.5 } else { 0.0 };
-                    let v = (s * 32767.0 + tpdf).round().clamp(-32768.0, 32767.0) as i16;
-                    w.write_sample(v).map_err(err)?
-                }
-                WavFormat::Pcm24 => {
-                    let tpdf = if dither { (rng.bipolar() + rng.bipolar()) * 0.5 } else { 0.0 };
-                    let v = (s as f64 * 8_388_607.0 + tpdf as f64).round().clamp(-8_388_608.0, 8_388_607.0) as i32;
-                    w.write_sample(v).map_err(err)?
-                }
-                WavFormat::Pcm32 => {
-                    let v = (s as f64 * 2_147_483_647.0).round().clamp(-2_147_483_648.0, 2_147_483_647.0) as i32;
-                    w.write_sample(v).map_err(err)?
+    // MPEG-4 audio: apply the edit list (encoder delay and padding), which
+    // the decoder leaves in.
+    if matches!(crate::export::Container::from_path(path), Some(crate::export::Container::M4a)) {
+        if let Some((skip, dur, ts)) = mp4_edit(path) {
+            let scale = sample_rate as f64 / ts.max(1) as f64;
+            let skip = (skip as f64 * scale).round() as usize;
+            let dur = (dur as f64 * scale).round() as usize;
+            let len = channels[0].len();
+            if skip < len && dur > 0 && skip + dur <= len + 4096 {
+                for c in channels.iter_mut() {
+                    c.drain(..skip);
+                    c.truncate(dur);
                 }
             }
         }
     }
-    w.finalize().map_err(|e| format!("Couldn't finish file: {e}"))
+    let len = channels[0].len();
+    if let Some(total) = track_total {
+        let n = meta.get(crate::export::Tag::Track).to_string();
+        if !n.is_empty() && !n.contains('/') && !total.trim().is_empty() {
+            meta.set(crate::export::Tag::Track, format!("{n}/{}", total.trim()));
+        }
+    }
+    let mut markers = Vec::new();
+    if matches!(crate::export::Container::from_path(path), Some(crate::export::Container::Wav)) {
+        let (m, info) = crate::export::meta::read_wav_extras(path);
+        markers = m.into_iter().filter(|(p, _)| *p <= len).collect();
+        for (t, v) in info.entries() {
+            if meta.get(t).is_empty() {
+                meta.set(t, v);
+            }
+        }
+    }
+    Ok(Decoded { sample_rate, channels, bits, meta, markers })
+}
+
+/// The first audio track's edit: (media frames to skip, frames to play,
+/// media timescale), when it has a single plain edit.
+fn mp4_edit(path: &Path) -> Option<(u64, u64, u32)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let file_len = f.metadata().ok()?.len();
+    // Find moov among the top-level boxes.
+    let mut pos = 0u64;
+    let moov = loop {
+        if pos + 8 > file_len {
+            return None;
+        }
+        f.seek(SeekFrom::Start(pos)).ok()?;
+        let mut h = [0u8; 16];
+        f.read_exact(&mut h[..8]).ok()?;
+        let mut size = u32::from_be_bytes([h[0], h[1], h[2], h[3]]) as u64;
+        let mut head = 8;
+        if size == 1 {
+            f.read_exact(&mut h[8..16]).ok()?;
+            size = u64::from_be_bytes(h[8..16].try_into().ok()?);
+            head = 16;
+        } else if size == 0 {
+            size = file_len - pos;
+        }
+        if size < head {
+            return None;
+        }
+        if &h[4..8] == b"moov" {
+            if size > 64 << 20 {
+                return None;
+            }
+            let mut b = vec![0u8; (size - head) as usize];
+            f.read_exact(&mut b).ok()?;
+            break b;
+        }
+        pos += size;
+    };
+    fn boxes(b: &[u8]) -> Vec<([u8; 4], &[u8])> {
+        let mut out = Vec::new();
+        let mut o = 0;
+        while o + 8 <= b.len() {
+            let size = u32::from_be_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) as usize;
+            let (size, head) = if size == 1 && o + 16 <= b.len() {
+                (u64::from_be_bytes(b[o + 8..o + 16].try_into().unwrap()) as usize, 16)
+            } else if size == 0 {
+                (b.len() - o, 8)
+            } else {
+                (size, 8)
+            };
+            if size < head || o + size > b.len() {
+                break;
+            }
+            out.push(([b[o + 4], b[o + 5], b[o + 6], b[o + 7]], &b[o + head..o + size]));
+            o += size;
+        }
+        out
+    }
+    let be32 = |b: &[u8], o: usize| b.get(o..o + 4).map(|s| u32::from_be_bytes(s.try_into().unwrap()));
+    let be64 = |b: &[u8], o: usize| b.get(o..o + 8).map(|s| u64::from_be_bytes(s.try_into().unwrap()));
+    let top = boxes(&moov);
+    let mvhd = top.iter().find(|b| &b.0 == b"mvhd")?.1;
+    let movie_ts = if mvhd.first()? == &1 { be32(mvhd, 20)? } else { be32(mvhd, 12)? };
+    for (_, trak) in top.iter().filter(|b| &b.0 == b"trak") {
+        let inner = boxes(trak);
+        let Some(mdia) = inner.iter().find(|b| &b.0 == b"mdia").map(|b| boxes(b.1)) else { continue };
+        let is_audio = mdia.iter().any(|b| &b.0 == b"hdlr" && b.1.get(8..12) == Some(b"soun"));
+        if !is_audio {
+            continue;
+        }
+        let mdhd = mdia.iter().find(|b| &b.0 == b"mdhd")?.1;
+        let media_ts = if mdhd.first()? == &1 { be32(mdhd, 20)? } else { be32(mdhd, 12)? };
+        let edts = inner.iter().find(|b| &b.0 == b"edts").map(|b| boxes(b.1))?;
+        let elst = edts.iter().find(|b| &b.0 == b"elst")?.1;
+        let v1 = elst.first()? == &1;
+        let n = be32(elst, 4)? as usize;
+        let mut edits = Vec::new();
+        for i in 0..n {
+            let (dur, time) = if v1 {
+                let o = 8 + i * 20;
+                (be64(elst, o)?, be64(elst, o + 8)? as i64)
+            } else {
+                let o = 8 + i * 12;
+                (be32(elst, o)? as u64, be32(elst, o + 4)? as i32 as i64)
+            };
+            edits.push((dur, time));
+        }
+        let real: Vec<_> = edits.iter().filter(|e| e.1 >= 0).collect();
+        if real.len() != 1 || edits.len() != 1 || movie_ts == 0 {
+            return None;
+        }
+        let (dur, time) = *real[0];
+        let dur_media = (dur as f64 * media_ts as f64 / movie_ts as f64).round() as u64;
+        return Some((time as u64, dur_media, media_ts));
+    }
+    None
 }

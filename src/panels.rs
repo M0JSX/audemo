@@ -414,6 +414,7 @@ impl App {
                         Panel::Properties => self.properties_panel(ui),
                         Panel::Diagnostics => self.diagnostics_panel(ui),
                         Panel::BatchProcess => self.batch_panel(ui),
+                        Panel::Metadata => self.metadata_panel(ui),
                         _ => self.effects_rack(ui),
                     }
                 });
@@ -904,6 +905,32 @@ impl App {
     }
 
     pub fn job_overlay(&mut self, ctx: &egui::Context) {
+        if let Some(sj) = &self.saving {
+            let t = sj.started.elapsed().as_secs_f32();
+            if t > 0.2 {
+                let name = sj.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let (frac, summary, progress) = (sj.progress.get(), sj.settings.summary(), sj.progress.clone());
+                egui::Area::new(egui::Id::new("saving"))
+                    .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+                    .order(egui::Order::Foreground)
+                    .show(ctx, |ui| {
+                        egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(16.0)).show(ui, |ui| {
+                            ui.set_width(340.0);
+                            ui.label(RichText::new(format!("Saving {name}")).size(14.0));
+                            ui.label(RichText::new(summary).color(TEXT_DIM).size(11.0));
+                            ui.add_space(4.0);
+                            ui.add(egui::ProgressBar::new(frac).show_percentage());
+                            ui.add_space(4.0);
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.button("Cancel").clicked() {
+                                    progress.cancel();
+                                }
+                            });
+                        });
+                    });
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
         let Some(j) = &self.job else { return };
         if !self.busy() {
             return;
