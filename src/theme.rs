@@ -84,8 +84,13 @@ pub fn apply(ctx: &egui::Context) {
     for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
         w.rounding = Rounding::same(2.0);
     }
-    ctx.set_visuals(v);
-    ctx.style_mut(|s| {
+    // Audemo is always dark. egui otherwise follows the OS theme and swaps in
+    // its stock light or dark style, leaving our dark panels with the wrong
+    // text colours (an unreadable menu bar on Windows).
+    ctx.set_theme(egui::ThemePreference::Dark);
+    ctx.set_visuals_of(egui::Theme::Dark, v.clone());
+    ctx.set_visuals_of(egui::Theme::Light, v);
+    ctx.all_styles_mut(|s| {
         s.spacing.item_spacing = vec2(6.0, 3.0);
         s.spacing.button_padding = vec2(7.0, 2.0);
         s.spacing.slider_width = 190.0;

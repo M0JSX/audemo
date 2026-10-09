@@ -1,6 +1,6 @@
 [package]
 name = "audemo"
-version = "0.9.0"
+version = "0.9.1"
 edition = "2021"
 rust-version = "1.80"
 description = "Audemo: a cross-platform waveform audio editor with a built-in effects suite"
