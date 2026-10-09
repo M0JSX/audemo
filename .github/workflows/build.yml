@@ -45,7 +45,17 @@ jobs:
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libgtk-3-dev libfuse2
 
       - name: Test
-        run: cargo test --release
+        shell: bash
+        run: |
+          set +e
+          cargo test --release 2>&1 | tee test.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" != "0" ]; then
+            # Surface the failure as an annotation (readable from the API).
+            msg=$(grep -E "^error|^warning: unused|panicked|assert|left:|right:|FAILED|failures:|^  --> |^   --> |error:" test.log | head -60 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=cargo test failed::$msg"
+          fi
+          exit $status
 
       # ---------------------------------------------------------------- Windows
       - name: Build, zip and MSI (Windows)
