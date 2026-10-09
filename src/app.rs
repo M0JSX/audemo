@@ -425,6 +425,10 @@ pub enum Action {
     Preferences,
     ApplyRack,
     Audition(PathBuf),
+    Pause,
+    /// Move the playhead by this many seconds (Rewind / Fast Forward).
+    Nudge(f64),
+    ClearHistory,
 }
 
 pub const FAVORITES: &[(&str, &str, &str)] = &[
@@ -466,6 +470,8 @@ pub struct App {
     pub rack_in_db: f32,
     pub rack_out_db: f32,
     pub rack_previewing: bool,
+    /// Effects Rack "Process": false = selection only, true = entire file.
+    pub rack_entire: bool,
     pub rack_version: u64,
     pub rack_rendered: u64,
     pub rack_changed: Instant,
@@ -474,6 +480,9 @@ pub struct App {
     pub browser_dir: PathBuf,
     pub browser_entries: Option<(PathBuf, Vec<(PathBuf, bool, u64)>)>,
     pub browser_selected: Option<PathBuf>,
+    /// (document id, position) of a paused playback.
+    pub paused: Option<(u64, f64)>,
+    pub free_cache: std::cell::Cell<Option<(Instant, Option<u64>)>>,
     pub tool: Tool,
     pub looping: bool,
     pub follow: bool,
@@ -527,6 +536,7 @@ impl App {
             rack_in_db: 0.0,
             rack_out_db: 0.0,
             rack_previewing: false,
+            rack_entire: false,
             rack_version: 1,
             rack_rendered: 0,
             rack_changed: Instant::now(),
@@ -535,6 +545,8 @@ impl App {
             browser_dir,
             browser_entries: None,
             browser_selected: None,
+            paused: None,
+            free_cache: std::cell::Cell::new(None),
             tool: Tool::Selection,
             looping: false,
             follow: true,
@@ -563,6 +575,22 @@ impl App {
             Some(i) => self.docs.get_mut(i),
             None => None,
         }
+    }
+
+    /// Free space on the drive holding the active file (cached for 10 s).
+    pub fn free_space(&self) -> Option<u64> {
+        if let Some((at, v)) = self.free_cache.get() {
+            if at.elapsed() < Duration::from_secs(10) {
+                return v;
+            }
+        }
+        let dir = self
+            .doc()
+            .and_then(|d| d.path.as_ref().and_then(|p| p.parent().map(|p| p.to_path_buf())))
+            .or_else(crate::prefs::home_dir)?;
+        let v = crate::prefs::disk_free(&dir);
+        self.free_cache.set(Some((Instant::now(), v)));
+        v
     }
 
     pub fn set_status(&mut self, s: impl Into<String>) {
@@ -984,7 +1012,7 @@ impl App {
     fn rack_inputs(&self) -> Option<(Vec<(usize, Params)>, (usize, usize), Vec<Vec<f32>>, u32, usize)> {
         let doc = self.doc()?;
         let slots = self.rack.iter().filter(|s| s.on).map(|s| (s.idx, s.params.clone())).collect();
-        let (a, b) = doc.target_range();
+        let (a, b) = if self.rack_entire { (0, doc.len()) } else { doc.target_range() };
         Some((slots, (a, b), Vec::new(), doc.sample_rate, doc.n_ch()))
     }
 
@@ -1164,6 +1192,17 @@ impl App {
             return;
         }
         let len = doc.len();
+        if let Some((pid, pos)) = self.paused {
+            if pid == doc.id {
+                let (buf, sr, id) = (doc.audio.clone(), doc.sample_rate, doc.id);
+                let end = doc.sel_range().filter(|(a, b)| pos >= *a as f64 && pos < *b as f64).map(|s| s.1).unwrap_or(len);
+                let start = doc.sel_range().map(|s| s.0).filter(|&a| (a as f64) <= pos).unwrap_or(0);
+                self.paused = None;
+                self.engine.play(buf, sr, start as f64, end as f64, self.looping, id);
+                self.engine.seek(pos);
+                return;
+            }
+        }
         let (mut start, mut end) = match doc.sel_range() {
             Some((a, b)) if doc.cursor >= a && doc.cursor < b => (doc.cursor, b),
             Some((a, b)) => (a, b),
@@ -1599,6 +1638,7 @@ impl App {
             Action::Stop if self.engine.is_recording() => self.stop_recording(),
             Action::PlayToggle => self.play_toggle(),
             Action::Stop => {
+                self.paused = None;
                 self.engine.stop();
             }
             Action::Record => self.toggle_record(),
@@ -1679,6 +1719,7 @@ impl App {
                 }
             }
             Action::SetCursor(p) => {
+                self.paused = None;
                 if let Some(d) = self.doc_mut() {
                     d.cursor = p.min(d.len());
                 }
@@ -1779,6 +1820,42 @@ impl App {
                 });
             }
             Action::ApplyRack => self.apply_rack(),
+            Action::Pause => {
+                let st = self.engine.status();
+                match (self.doc().map(|d| d.id), self.paused) {
+                    (Some(id), Some((pid, _))) if pid == id => self.play_toggle(),
+                    (Some(id), _) if st.playing && st.tag == id => {
+                        self.paused = Some((id, st.pos));
+                        self.engine.stop();
+                    }
+                    _ => {}
+                }
+            }
+            Action::Nudge(secs) => {
+                let st = self.engine.status();
+                if let Some(d) = self.doc_mut() {
+                    let delta = secs * d.sample_rate as f64;
+                    if st.playing && st.tag == d.id {
+                        self.engine.seek(st.pos + delta);
+                    } else {
+                        let len = d.len() as f64;
+                        d.cursor = (d.cursor as f64 + delta).clamp(0.0, len) as usize;
+                        if (d.cursor as f64) < d.view_start || (d.cursor as f64) > d.view_end {
+                            let span = d.view_end - d.view_start;
+                            d.view_start = d.cursor as f64 - span / 2.0;
+                            d.view_end = d.view_start + span;
+                            d.clamp_view();
+                        }
+                    }
+                }
+            }
+            Action::ClearHistory => {
+                if let Some(d) = self.doc_mut() {
+                    d.undo.clear();
+                    d.redo.clear();
+                }
+                self.set_status("History cleared.");
+            }
             Action::Audition(p) => {
                 self.browser_selected = Some(p.clone());
                 if self.engine.is_playing_tag(BROWSER_TAG) {

@@ -1,6 +1,6 @@
 [package]
 name = "audemo"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.80"
 description = "Audemo: a cross-platform waveform audio editor with a built-in effects suite"
@@ -22,6 +22,9 @@ symphonia = { version = "0.5.4", features = ["all"] }
 hound = "3.5.1"
 # Native open/save dialogs.
 rfd = "0.14.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 opt-level = 3

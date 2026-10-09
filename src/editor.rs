@@ -1,7 +1,7 @@
 //! The waveform editor: overview strip, time ruler, waveform lanes, spectral
 //! display, selection, markers, fade handles and the clip gain HUD.
 
-use eframe::egui::{self, pos2, vec2, Align2, Color32, CursorIcon, FontId, Pos2, Rect, Sense, Shape, Stroke, Ui};
+use eframe::egui::{self, pos2, vec2, Align2, Color32, CursorIcon, FontId, Pos2, Rect, RichText, Rounding, Sense, Shape, Stroke, Ui};
 
 use crate::app::{Action, App, SpecTex, Tool};
 use crate::dsp::spectrogram::{heat_colour, spectrogram_range};
@@ -10,8 +10,8 @@ use crate::theme::*;
 
 const OVERVIEW_H: f32 = 20.0;
 const RULER_H: f32 = 24.0;
-const LEFT_W: f32 = 24.0;
-const RIGHT_W: f32 = 46.0;
+const LEFT_W: f32 = 30.0;
+const RIGHT_W: f32 = 64.0;
 const SPEC_FFT: usize = 1024;
 
 const RULER_STEPS: [f64; 22] = [
@@ -86,7 +86,7 @@ impl App {
         let sr = doc.sample_rate as f64;
 
         // ------------------------------------------------ overview strip
-        painter.rect_filled(overview, 0.0, BG_DEEP);
+        painter.rect_filled(overview, 0.0, Color32::from_rgb(0x1c, 0x1c, 0x1c));
         {
             let total = doc.max_span();
             let cols = overview.width().max(1.0) as usize;
@@ -105,7 +105,7 @@ impl App {
                     amp = amp.max(hi.abs()).max(lo.abs());
                 }
                 let x = overview.left() + px as f32 + 0.5;
-                shapes.push(Shape::line_segment([pos2(x, mid - amp * h), pos2(x, mid + amp * h + 1.0)], Stroke::new(1.0_f32, WAVE_DIM)));
+                shapes.push(Shape::line_segment([pos2(x, mid - amp * h), pos2(x, mid + amp * h + 1.0)], Stroke::new(1.0_f32, OVERVIEW_WAVE)));
             }
             painter.extend(shapes);
             let ox = |s: f64| overview.left() + (s / total) as f32 * overview.width();
@@ -113,8 +113,8 @@ impl App {
                 painter.rect_filled(Rect::from_x_y_ranges(ox(a as f64)..=ox(b as f64).max(ox(a as f64) + 1.0), overview.y_range()), 0.0, Color32::from_white_alpha(28));
             }
             let vr = Rect::from_x_y_ranges(ox(doc.view_start)..=ox(doc.view_end).max(ox(doc.view_start) + 3.0), overview.y_range());
-            painter.rect_filled(vr, 0.0, Color32::from_rgba_unmultiplied(61, 155, 255, 30));
-            painter.rect_stroke(vr.shrink(0.5), 0.0, Stroke::new(1.0_f32, ACCENT));
+            painter.rect_filled(vr, 0.0, Color32::from_rgba_unmultiplied(242, 194, 48, 26));
+            painter.rect_stroke(vr.shrink(0.5), 0.0, Stroke::new(1.0_f32, PLAYHEAD));
             if st.playing && st.tag == doc.id {
                 let x = ox(st.pos);
                 painter.line_segment([pos2(x, overview.top()), pos2(x, overview.bottom())], Stroke::new(1.0_f32, PLAYHEAD));
@@ -137,8 +137,9 @@ impl App {
         let v = View { left: lanes.left(), width: lanes.width(), start: doc.view_start, end: doc.view_end };
 
         // ------------------------------------------------ ruler
-        painter.rect_filled(ruler, 0.0, BG_RAISED);
+        painter.rect_filled(ruler, 0.0, Color32::from_rgb(0x2b, 0x2b, 0x2b));
         painter.line_segment([pos2(ruler.left(), ruler.bottom()), pos2(ruler.right(), ruler.bottom())], Stroke::new(1.0_f32, BORDER));
+        painter.text(pos2(ruler.left() + 4.0, ruler.top() + 3.0), Align2::LEFT_TOP, "hms", FontId::proportional(11.0), TEXT_DIM);
         {
             let px_per_s = v.width as f64 / ((v.end - v.start) / sr);
             let step = *RULER_STEPS.iter().find(|&&s| s * px_per_s >= 84.0).unwrap_or(&3600.0);
@@ -185,7 +186,7 @@ impl App {
             let h = area.height() / n_ch as f32;
             Rect::from_min_size(pos2(area.left(), area.top() + h * c as f32), vec2(area.width(), h - if c + 1 < n_ch { 2.0 } else { 0.0 }))
         };
-        painter.rect_filled(Rect::from_min_max(body.min, body.max), 0.0, BG_DEEP);
+        painter.rect_filled(Rect::from_min_max(body.min, body.max), 0.0, Color32::from_rgb(0x2b, 0x2b, 0x2b));
         let sel = doc.sel_range();
 
         for c in 0..n_ch {
@@ -197,7 +198,7 @@ impl App {
                 let x0 = v.x(a as f64).max(r.left());
                 let x1 = v.x(b as f64).min(r.right()).max(x0 + 1.0);
                 if x1 > r.left() && x0 < r.right() {
-                    painter.rect_filled(Rect::from_x_y_ranges(x0..=x1, r.y_range()), 0.0, if active { SEL_FILL } else { Color32::from_white_alpha(10) });
+                    painter.rect_filled(Rect::from_x_y_ranges(x0..=x1, r.y_range()), 0.0, if active { SEL_FILL } else { Color32::from_rgb(0x2c, 0x3d, 0x37) });
                 }
             }
             draw_grid(&painter, r, doc.amp_zoom);
@@ -215,10 +216,11 @@ impl App {
                 (_, 1) => "R",
                 _ => "·",
             };
-            let tr = Rect::from_min_size(pos2(body.left() + 3.0, r.top() + 4.0), vec2(LEFT_W - 6.0, 18.0));
+            let tr = Rect::from_min_size(pos2(body.right() - 17.0, r.center().y - 9.0), vec2(15.0, 18.0));
             let tresp = ui.interact(tr, ui.id().with(("chan", doc.id, c)), Sense::click());
-            painter.rect_filled(tr, 3.0, if active { Color32::from_rgb(0x1d, 0x5a, 0x40) } else { BG_RAISED });
-            painter.text(tr.center(), Align2::CENTER_CENTER, label, FontId::proportional(11.0), if active { WAVE_SEL } else { TEXT_DIM });
+            painter.rect_filled(tr, 2.0, if active { Color32::from_rgb(0x5a, 0x5a, 0x5a) } else { Color32::from_rgb(0x2c, 0x2c, 0x2c) });
+            painter.rect_stroke(tr, 2.0, Stroke::new(1.0_f32, BORDER));
+            painter.text(tr.center(), Align2::CENTER_CENTER, label, bold(11.0), if active { Color32::WHITE } else { TEXT_DIM });
             let tresp = tresp.on_hover_text("Enable / disable this channel for editing");
             if tresp.clicked() && c < doc.active_ch.len() {
                 doc.active_ch[c] = !doc.active_ch[c];
@@ -538,20 +540,23 @@ impl App {
         }
 
         // ------------------------------------------------ clip gain HUD
-        let hud = Rect::from_center_size(pos2(top_lane.center().x, top_lane.top() + 16.0), vec2(118.0, 22.0));
+        let hud = Rect::from_center_size(pos2(top_lane.center().x, top_lane.top() + 16.0), vec2(108.0, 22.0));
         if top_lane.height() > 60.0 {
-            painter.rect_filled(hud, 11.0, Color32::from_rgba_unmultiplied(20, 24, 30, 210));
-            painter.rect_stroke(hud, 11.0, Stroke::new(1.0_f32, BORDER));
-            painter.circle_stroke(pos2(hud.left() + 13.0, hud.center().y), 6.0, Stroke::new(1.5_f32, TEXT_DIM));
-            let angle = -std::f32::consts::FRAC_PI_2 + self.hud_gain / 40.0 * 2.4;
+            painter.rect_filled(hud, 2.0, Color32::from_rgba_unmultiplied(58, 58, 58, 235));
+            painter.rect_stroke(hud, 2.0, Stroke::new(1.0_f32, Color32::from_rgb(0x1e, 0x1e, 0x1e)));
             let c = pos2(hud.left() + 13.0, hud.center().y);
-            painter.line_segment([c, c + vec2(angle.cos(), angle.sin()) * 6.0], Stroke::new(1.5_f32, ACCENT));
-            let dv_rect = Rect::from_min_max(pos2(hud.left() + 24.0, hud.top() + 2.0), pos2(hud.right() - 6.0, hud.bottom() - 2.0));
-            let r = ui.put(
-                dv_rect,
-                egui::DragValue::new(&mut self.hud_gain).speed(0.1).range(-40.0..=40.0).fixed_decimals(1).suffix(" dB"),
-            );
-            let r = r.on_hover_text("Drag to change the gain of the selection (or whole file)");
+            painter.circle_filled(c, 7.0, Color32::from_rgb(0x26, 0x26, 0x26));
+            painter.circle_stroke(c, 7.0, Stroke::new(1.0_f32, Color32::from_rgb(0x70, 0x70, 0x70)));
+            let angle = -std::f32::consts::FRAC_PI_2 + self.hud_gain / 40.0 * 2.4;
+            painter.line_segment([c, c + vec2(angle.cos(), angle.sin()) * 6.0], Stroke::new(1.5_f32, HOT));
+            let dv_rect = Rect::from_min_max(pos2(hud.left() + 24.0, hud.top() + 2.0), pos2(hud.right() - 4.0, hud.bottom() - 2.0));
+            let sign = if self.hud_gain >= 0.0 { "+" } else { "" };
+            let r = ui
+                .allocate_ui_at_rect(dv_rect, |ui| {
+                    hot_drag(ui, egui::DragValue::new(&mut self.hud_gain).speed(0.1).range(-40.0..=40.0).fixed_decimals(1).prefix(sign).suffix(" dB"))
+                })
+                .inner;
+            let r = r.on_hover_text("Adjust Amplitude: drag to change the gain of the selection (or whole file)");
             if (r.drag_stopped() || r.lost_focus()) && self.hud_gain.abs() > 0.05 {
                 self.actions.push(Action::ApplyGain(self.hud_gain));
                 self.hud_gain = 0.0;
@@ -566,57 +571,55 @@ impl App {
 
     fn editor_tabs(&mut self, ui: &mut Ui) {
         let mut switch = None;
-        let mut close = None;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            for (i, d) in self.docs.iter().enumerate() {
-                let active = Some(i) == self.active;
-                let text = egui::RichText::new(format!("Editor: {}", d.display_name())).size(12.0);
-                let text = if active { text.color(Color32::WHITE) } else { text.color(TEXT_DIM) };
-                if ui.selectable_label(active, text).clicked() {
-                    switch = Some(i);
+        let mut close = false;
+        let rect = ui.available_rect_before_wrap();
+        let header = Rect::from_min_size(rect.min, vec2(rect.width(), 24.0));
+        ui.painter().rect_filled(header, 0.0, BG_HEADER);
+        ui.allocate_ui_at_rect(header, |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let name = self.doc().map(|d| d.display_name()).unwrap_or_default();
+                let title = if name.is_empty() { "Editor".to_string() } else { format!("Editor: {name}") };
+                let (r, _) = ui.allocate_exact_size(vec2(ui.fonts(|f| f.layout_no_wrap(title.clone(), bold(12.0), TEXT).size().x) + 16.0, 22.0), Sense::hover());
+                ui.painter().rect_filled(Rect::from_min_max(pos2(r.left(), r.top() + 1.0), pos2(r.right(), header.bottom())), Rounding { nw: 3.0, ne: 3.0, sw: 0.0, se: 0.0 }, BG_PANEL);
+                ui.painter().text(r.center(), Align2::CENTER_CENTER, &title, bold(12.0), Color32::WHITE);
+                if !self.docs.is_empty() {
+                    ui.menu_button(RichText::new("▾").color(TEXT), |ui| {
+                        for (i, d) in self.docs.iter().enumerate() {
+                            if ui.selectable_label(Some(i) == self.active, d.display_name()).clicked() {
+                                switch = Some(i);
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                    if ui.small_button("×").on_hover_text("Close file").clicked() {
+                        close = true;
+                    }
                 }
-                if ui.small_button("×").on_hover_text("Close file").clicked() {
-                    close = Some(i);
-                }
-                ui.add_space(8.0);
-            }
+            });
         });
+        ui.add_space(24.0);
         if let Some(i) = switch {
             self.active = Some(i);
         }
-        if let Some(i) = close {
-            self.actions.push(Action::Close(i));
+        if close {
+            self.actions.push(Action::Close(usize::MAX));
         }
     }
 
     fn welcome_ui(&mut self, ui: &mut Ui) {
+        // Like Audition: an empty Editor until a file is open.
+        self.editor_tabs(ui);
         let rect = ui.available_rect_before_wrap();
-        ui.painter().rect_filled(rect, 0.0, BG_DEEP);
-        ui.allocate_ui_at_rect(rect.shrink(40.0), |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space((rect.height() * 0.22).max(10.0));
-                ui.label(egui::RichText::new("Audemo").size(34.0).color(Color32::WHITE).strong());
-                ui.label(egui::RichText::new("Waveform audio editor").size(14.0).color(TEXT_DIM));
-                ui.add_space(22.0);
-                ui.horizontal(|ui| {
-                    let w = 3.0 * 120.0 + 2.0 * 8.0;
-                    ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
-                    if ui.add_sized([120.0, 30.0], egui::Button::new("Open File…")).clicked() {
-                        self.actions.push(Action::Open);
-                    }
-                    if ui.add_sized([120.0, 30.0], egui::Button::new("New File…")).clicked() {
-                        self.actions.push(Action::New);
-                    }
-                    if ui.add_sized([120.0, 30.0], egui::Button::new("Record")).clicked() {
-                        self.actions.push(Action::Record);
-                    }
-                });
-                ui.add_space(18.0);
-                ui.label(egui::RichText::new("Drop audio files anywhere in this window.").color(TEXT_DIM));
-                ui.label(egui::RichText::new("WAV · AIFF · FLAC · MP3 · OGG · M4A/AAC · ALAC").color(TEXT_DIM).size(11.0));
-            });
-        });
+        ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(0x2b, 0x2b, 0x2b));
+        ui.painter().text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "Open, drop or record audio to begin",
+            FontId::proportional(12.0),
+            Color32::from_rgb(0x6a, 0x6a, 0x6a),
+        );
+        ui.allocate_rect(rect, Sense::hover());
     }
 }
 

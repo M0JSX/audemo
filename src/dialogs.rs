@@ -78,7 +78,7 @@ impl App {
                         if ui.button("Cancel").clicked() {
                             keep = false;
                         }
-                        if ui.add(egui::Button::new(RichText::new("  OK  ").color(Color32::WHITE)).fill(ACCENT)).clicked() {
+                        if ui.add(egui::Button::new(RichText::new("  OK  ").color(Color32::WHITE))).clicked() {
                             self.create_new(rate, channels, seconds);
                             keep = false;
                         }
@@ -114,7 +114,7 @@ impl App {
                         if ui.button("Cancel").clicked() {
                             keep = false;
                         }
-                        if ui.add(egui::Button::new(RichText::new("Choose location and save…").color(Color32::WHITE)).fill(ACCENT)).clicked() {
+                        if ui.add(egui::Button::new(RichText::new("Choose location and save…").color(Color32::WHITE))).clicked() {
                             keep = false;
                             if let Some(p) = path.clone().or_else(|| self.pick_save_path()) {
                                 self.write_wav(p, format, dither && format != WavFormat::Float32, selection);
@@ -159,7 +159,7 @@ impl App {
                         if ui.button("Cancel").clicked() {
                             keep = false;
                         }
-                        if ui.add(egui::Button::new(RichText::new("  OK  ").color(Color32::WHITE)).fill(ACCENT)).clicked() {
+                        if ui.add(egui::Button::new(RichText::new("  OK  ").color(Color32::WHITE))).clicked() {
                             keep = false;
                             if self.engine.is_recording() {
                                 self.stop_recording();
@@ -207,7 +207,7 @@ impl App {
                         if ui.button("Cancel").clicked() {
                             keep = false;
                         }
-                        if ui.add(egui::Button::new(RichText::new("  OK  ").color(Color32::WHITE)).fill(ACCENT)).clicked() {
+                        if ui.add(egui::Button::new(RichText::new("  OK  ").color(Color32::WHITE))).clicked() {
                             self.actions.push(Action::MixPaste { mode, clip_db, orig_db });
                             keep = false;
                         }
@@ -240,7 +240,7 @@ impl App {
                         if ui.button("Cancel").clicked() {
                             keep = false;
                         }
-                        if ui.add(egui::Button::new(RichText::new("  OK  ").color(Color32::WHITE)).fill(ACCENT)).clicked() {
+                        if ui.add(egui::Button::new(RichText::new("  OK  ").color(Color32::WHITE))).clicked() {
                             self.actions.push(Action::Convert(rate, channels));
                             keep = false;
                         }
@@ -439,7 +439,7 @@ impl App {
                             close = true;
                         }
                         let label = if rack_mode { "  Save to Rack  " } else { "    Apply    " };
-                        if ui.add(egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(ACCENT).min_size(vec2(90.0, 26.0))).clicked() {
+                        if ui.add(egui::Button::new(RichText::new(label).color(Color32::WHITE)).min_size(vec2(90.0, 26.0))).clicked() {
                             apply = true;
                         }
                     });
@@ -492,7 +492,7 @@ fn param_grid(ui: &mut Ui, def: &EffectDef, params: &mut Params, _sr: u32) {
             if pd.group != group {
                 group = pd.group;
                 if !group.is_empty() {
-                    ui.label(RichText::new(group).strong().color(ACCENT));
+                    ui.label(RichText::new(group).font(bold(12.5)).color(Color32::WHITE));
                     ui.end_row();
                 }
             }

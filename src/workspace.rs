@@ -12,6 +12,15 @@ use crate::engine::{BROWSER_TAG, PREVIEW_TAG};
 use crate::io::OPEN_EXTENSIONS;
 use crate::theme::*;
 
+/// Built-in Effects Rack presets: (name, [(effect id, effect preset)]).
+const RACK_PRESETS: &[(&str, &[(&str, &str)])] = &[
+    ("Podcast Voice", &[("parametric_eq", "Remove Rumble"), ("dynamics", "Gentle Vocal"), ("hard_limiter", "Limit to -1 dB")]),
+    ("Broadcast Voice", &[("parametric_eq", "Vocal Presence"), ("dynamics", "Broadcast"), ("hard_limiter", "Limit to -1 dB")]),
+    ("Clean Up Recording", &[("dehummer", "50 Hz, 4 harmonics"), ("adaptive_nr", ""), ("declicker", "")]),
+    ("SSB Radio Voice", &[("parametric_eq", "SSB Voice (2.4 kHz)"), ("dynamics", "Broadcast"), ("hard_limiter", "Limit to -1 dB")]),
+    ("Telephone", &[("parametric_eq", "Telephone"), ("distortion", "Radio Overdrive")]),
+];
+
 fn is_audio(p: &Path) -> bool {
     p.extension()
         .and_then(|e| e.to_str())
@@ -201,59 +210,107 @@ impl App {
         let mut edit: Option<usize> = None;
         let mut remove: Option<usize> = None;
         let mut swap: Option<(usize, usize)> = None;
-        let scope = match self.doc().and_then(|d| d.sel_range()) {
-            Some(_) => "Process: selection",
-            None => "Process: entire file",
-        };
-        egui::ScrollArea::vertical().max_height((ui.available_height() - 120.0).max(60.0)).auto_shrink([false, false]).show(ui, |ui| {
-            let n = self.rack.len();
-            for (i, slot) in self.rack.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    if ui.checkbox(&mut slot.on, "").on_hover_text("Power").changed() {
+        let mut add: Option<(usize, usize)> = None; // (slot, effect)
+
+        // Presets row.
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Presets:").color(TEXT_DIM));
+            egui::ComboBox::from_id_source("rack_presets").width(ui.available_width() - 4.0).selected_text("(Default)").show_ui(ui, |ui| {
+                if ui.selectable_label(false, "(Default)").clicked() {
+                    self.rack.clear();
+                    changed = true;
+                }
+                for (name, chain) in RACK_PRESETS {
+                    if ui.selectable_label(false, *name).clicked() {
+                        self.rack = chain
+                            .iter()
+                            .filter_map(|(id, preset)| {
+                                let i = effects.iter().position(|e| e.id == *id)?;
+                                let params = if preset.is_empty() { effects[i].default_params() } else { effects[i].preset_params(preset).unwrap_or_else(|| effects[i].default_params()) };
+                                Some(RackSlot { idx: i, params, on: true })
+                            })
+                            .collect();
                         changed = true;
                     }
-                    ui.label(RichText::new(format!("{:>2}", i + 1)).monospace().color(TEXT_DIM));
-                    let def = &effects[slot.idx];
-                    let name = RichText::new(def.name).color(if slot.on { TEXT } else { TEXT_DIM });
-                    let r = ui.selectable_label(false, name);
-                    if r.clicked() && !def.params.is_empty() {
-                        edit = Some(i);
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.small_button("×").on_hover_text("Remove").clicked() {
-                            remove = Some(i);
-                        }
-                        if i + 1 < n && ui.small_button("↓").on_hover_text("Move down").clicked() {
-                            swap = Some((i, i + 1));
-                        }
-                        if i > 0 && ui.small_button("↑").on_hover_text("Move up").clicked() {
-                            swap = Some((i, i - 1));
+                }
+            });
+        });
+
+        // Sixteen slots, always shown.
+        let list_h = (ui.available_height() - 112.0).max(80.0);
+        egui::Frame::none().fill(BG_LIST).inner_margin(egui::Margin::same(2.0)).show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(list_h).min_scrolled_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
+                let n = self.rack.len();
+                for i in 0..RACK_SLOTS {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 3.0;
+                        if let Some(slot) = self.rack.get_mut(i) {
+                            if icon_button_sized(ui, Icon::Power, slot.on, if slot.on { "Turn effect off" } else { "Turn effect on" }, egui::vec2(18.0, 18.0), true).clicked() {
+                                slot.on = !slot.on;
+                                changed = true;
+                            }
+                            ui.label(RichText::new(format!("{:>2}", i + 1)).monospace().color(TEXT_DIM));
+                            let def = &effects[slot.idx];
+                            let name = RichText::new(def.name).color(if slot.on { TEXT } else { TEXT_DIM });
+                            if ui.selectable_label(false, name).on_hover_text("Click to edit settings").clicked() && !def.params.is_empty() {
+                                edit = Some(i);
+                            }
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.menu_button(RichText::new("▸").color(TEXT_DIM), |ui| {
+                                    if !def.params.is_empty() && ui.button("Edit Effect…").clicked() {
+                                        edit = Some(i);
+                                        ui.close_menu();
+                                    }
+                                    if i > 0 && ui.button("Move Up").clicked() {
+                                        swap = Some((i, i - 1));
+                                        ui.close_menu();
+                                    }
+                                    if i + 1 < n && ui.button("Move Down").clicked() {
+                                        swap = Some((i, i + 1));
+                                        ui.close_menu();
+                                    }
+                                    if ui.button("Remove Effect").clicked() {
+                                        remove = Some(i);
+                                        ui.close_menu();
+                                    }
+                                });
+                            });
+                        } else {
+                            icon_button_sized(ui, Icon::Power, false, "Empty slot", egui::vec2(18.0, 18.0), false);
+                            ui.label(RichText::new(format!("{:>2}", i + 1)).monospace().color(Color32::from_rgb(0x66, 0x66, 0x66)));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if i == n {
+                                    ui.menu_button(RichText::new("▸").color(TEXT), |ui| {
+                                        for cat in std::iter::once(Category::Basic).chain(Category::MENU_ORDER) {
+                                            if cat == Category::Generate {
+                                                continue;
+                                            }
+                                            ui.menu_button(cat.name(), |ui| {
+                                                for (ei, e) in effects.iter().enumerate().filter(|(_, e)| e.category == cat && !e.changes_length) {
+                                                    if ui.button(e.name).clicked() {
+                                                        add = Some((i, ei));
+                                                        ui.close_menu();
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text("Add an effect");
+                                }
+                            });
                         }
                     });
-                });
-            }
-            if self.rack.len() < RACK_SLOTS {
-                ui.menu_button(RichText::new(format!("{:>2}  + Add effect", self.rack.len() + 1)).color(ACCENT), |ui| {
-                    for cat in std::iter::once(Category::Basic).chain(Category::MENU_ORDER) {
-                        if cat == Category::Generate {
-                            continue;
-                        }
-                        ui.menu_button(cat.name(), |ui| {
-                            for (i, e) in effects.iter().enumerate().filter(|(_, e)| e.category == cat && !e.changes_length) {
-                                if ui.button(e.name).clicked() {
-                                    ui.close_menu();
-                                    self.rack.push(RackSlot { idx: i, params: e.default_params(), on: true });
-                                    changed = true;
-                                    if !e.params.is_empty() {
-                                        edit = Some(self.rack.len() - 1);
-                                    }
-                                }
-                            }
-                        });
-                    }
-                });
-            }
+                }
+            });
         });
+        if let Some((_, ei)) = add {
+            self.rack.push(RackSlot { idx: ei, params: effects[ei].default_params(), on: true });
+            changed = true;
+            if !effects[ei].params.is_empty() {
+                edit = Some(self.rack.len() - 1);
+            }
+        }
         if let Some(i) = remove {
             self.rack.remove(i);
             changed = true;
@@ -262,44 +319,50 @@ impl App {
             self.rack.swap(a, b);
             changed = true;
         }
-        ui.separator();
-        egui::Grid::new("rack_io").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-            ui.label("Input");
-            changed |= ui.add(egui::Slider::new(&mut self.rack_in_db, -24.0..=24.0).suffix(" dB").fixed_decimals(1)).changed();
-            ui.end_row();
-            ui.label("Output");
-            changed |= ui.add(egui::Slider::new(&mut self.rack_out_db, -24.0..=24.0).suffix(" dB").fixed_decimals(1)).changed();
-            ui.end_row();
-            ui.label("Mix (wet)");
-            changed |= ui.add(egui::Slider::new(&mut self.rack_mix, 0.0..=100.0).suffix(" %").fixed_decimals(0)).changed();
-            ui.end_row();
+
+        // Gain, mix, process and apply.
+        ui.add_space(3.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Input").color(TEXT_DIM));
+            changed |= hot_drag(ui, egui::DragValue::new(&mut self.rack_in_db).speed(0.1).range(-24.0..=24.0).fixed_decimals(1).suffix(" dB")).changed();
+            ui.add_space(8.0);
+            ui.label(RichText::new("Output").color(TEXT_DIM));
+            changed |= hot_drag(ui, egui::DragValue::new(&mut self.rack_out_db).speed(0.1).range(-24.0..=24.0).fixed_decimals(1).suffix(" dB")).changed();
         });
         ui.horizontal(|ui| {
-            let has_doc = self.doc().is_some();
-            let label = if self.rack_previewing { "Stop Preview" } else { "Preview" };
-            if ui.add_enabled(has_doc, egui::Button::new(label)).on_hover_text("Loop the selection through the rack").clicked() {
-                self.rack_previewing = !self.rack_previewing;
-                if self.rack_previewing {
-                    self.rack_rendered = 0;
-                    self.rack_changed = Instant::now().checked_sub(std::time::Duration::from_millis(500)).unwrap_or_else(Instant::now);
-                } else if self.engine.is_playing_tag(PREVIEW_TAG) {
-                    self.engine.stop();
-                }
-            }
-            let any_on = self.rack.iter().any(|s| s.on);
-            if ui
-                .add_enabled(has_doc && any_on, egui::Button::new(RichText::new("Apply").color(Color32::WHITE)).fill(ACCENT))
-                .on_hover_text("Process the audio with every enabled effect")
-                .clicked()
-            {
-                self.actions.push(Action::ApplyRack);
-            }
-            if ui.add_enabled(!self.rack.is_empty(), egui::Button::new("Clear")).clicked() {
-                self.rack.clear();
-                changed = true;
-            }
+            ui.label(RichText::new("Mix:").color(TEXT_DIM));
+            ui.label(RichText::new("Dry").color(TEXT_DIM).size(11.0));
+            ui.spacing_mut().slider_width = (ui.available_width() - 90.0).max(60.0);
+            changed |= ui.add(egui::Slider::new(&mut self.rack_mix, 0.0..=100.0).show_value(false)).changed();
+            ui.label(RichText::new("Wet").color(TEXT_DIM).size(11.0));
+            changed |= hot_drag(ui, egui::DragValue::new(&mut self.rack_mix).speed(0.5).range(0.0..=100.0).fixed_decimals(0).suffix(" %")).changed();
         });
-        ui.label(RichText::new(scope).color(TEXT_DIM).size(11.0));
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Process:").color(TEXT_DIM));
+            let before = self.rack_entire;
+            egui::ComboBox::from_id_source("rack_process").width(110.0).selected_text(if self.rack_entire { "Entire File" } else { "Selection Only" }).show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.rack_entire, false, "Selection Only");
+                ui.selectable_value(&mut self.rack_entire, true, "Entire File");
+            });
+            changed |= before != self.rack_entire;
+            let has_doc = self.doc().is_some();
+            let any_on = self.rack.iter().any(|s| s.on);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.add_enabled(has_doc && any_on, egui::Button::new("Apply")).on_hover_text("Process the audio with every enabled effect").clicked() {
+                    self.actions.push(Action::ApplyRack);
+                }
+                let label = if self.rack_previewing { "Stop" } else { "Preview" };
+                if ui.add_enabled(has_doc, egui::Button::new(label)).on_hover_text("Loop the audio through the rack").clicked() {
+                    self.rack_previewing = !self.rack_previewing;
+                    if self.rack_previewing {
+                        self.rack_rendered = 0;
+                        self.rack_changed = Instant::now().checked_sub(std::time::Duration::from_millis(500)).unwrap_or_else(Instant::now);
+                    } else if self.engine.is_playing_tag(PREVIEW_TAG) {
+                        self.engine.stop();
+                    }
+                }
+            });
+        });
         if changed {
             self.rack_touched();
         }
@@ -345,27 +408,42 @@ impl App {
             .and_then(|p| p.extension())
             .map(|e| e.to_string_lossy().to_uppercase())
             .unwrap_or_else(|| "Unsaved".into());
-        let rows: Vec<(&str, String)> = vec![
-            ("Name", doc.name.clone()),
-            ("Location", doc.path.as_ref().and_then(|p| p.parent()).map(|p| p.display().to_string()).unwrap_or_else(|| "Not saved yet".into())),
-            ("Format", format),
+        let path = doc.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "Not saved yet".into());
+        let basic: Vec<(&str, String)> = vec![
+            ("Duration", format_time(doc.len() as f64, doc.sample_rate)),
             ("Sample Rate", format!("{} Hz", doc.sample_rate)),
             ("Channels", if doc.n_ch() == 1 { "Mono".into() } else { "Stereo".into() }),
-            ("Bit Depth", doc.source_bits.map(|b| format!("{b}-bit")).unwrap_or_else(|| "32-bit (float)".into())),
-            ("Duration", format_time(doc.len() as f64, doc.sample_rate)),
+            ("Bit Depth", doc.source_bits.map(|b| format!("{b}")).unwrap_or_else(|| "32 (float)".into())),
+            ("Format", format),
+            ("File Path", path),
+        ];
+        let advanced: Vec<(&str, String)> = vec![
             ("Samples", format!("{}", doc.len())),
             ("Peak Amplitude", format!("{:.2} dBFS", lin_to_db(pk).max(-200.0))),
-            ("RMS (loudest ch.)", format!("{:.2} dBFS", lin_to_db(rms).max(-200.0))),
+            ("RMS (loudest channel)", format!("{:.2} dBFS", lin_to_db(rms).max(-200.0))),
             ("Markers", format!("{}", doc.markers.len())),
             ("Unsaved Changes", if doc.dirty { "Yes".into() } else { "No".into() }),
         ];
+        let name = doc.display_name();
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            egui::Grid::new("props").num_columns(2).striped(true).spacing([10.0, 3.0]).show(ui, |ui| {
-                for (k, v) in rows {
-                    ui.label(RichText::new(k).color(TEXT_DIM).size(11.5));
-                    ui.label(RichText::new(v).size(11.5));
-                    ui.end_row();
-                }
+            ui.label(RichText::new(name).font(bold(13.0)).color(Color32::WHITE));
+            ui.label(RichText::new("Audio File").color(TEXT_DIM).size(11.5));
+            ui.add_space(4.0);
+            let grid = |ui: &mut Ui, id: &str, rows: Vec<(&str, String)>| {
+                egui::Grid::new(id).num_columns(2).spacing([8.0, 3.0]).show(ui, |ui| {
+                    for (k, v) in rows {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(RichText::new(format!("{k}:")).color(TEXT_DIM).size(11.5));
+                        });
+                        ui.label(RichText::new(v).size(11.5));
+                        ui.end_row();
+                    }
+                });
+            };
+            grid(ui, "props_basic", basic);
+            ui.add_space(4.0);
+            egui::CollapsingHeader::new(RichText::new("Advanced").size(12.0)).default_open(false).show(ui, |ui| {
+                grid(ui, "props_adv", advanced);
             });
         });
     }

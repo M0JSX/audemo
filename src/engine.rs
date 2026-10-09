@@ -211,12 +211,6 @@ impl Engine {
         }
     }
 
-    pub fn set_volume(&self, v: f32) {
-        if let Ok(mut s) = self.shared.lock() {
-            s.volume = v;
-        }
-    }
-
     pub fn seek(&self, pos: f64) {
         if let Ok(mut s) = self.shared.lock() {
             s.pos = pos.clamp(s.start, s.end.max(s.start));

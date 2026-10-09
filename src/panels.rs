@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, FontId, Layout, Rect, RichText, Sense, Stroke, Ui};
+use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, FontId, Layout, Rect, RichText, Rounding, Sense, Stroke, Ui};
 
 use crate::app::{Action, App, Dialog, Panel, Tool, FAVORITES};
 use crate::dsp::effects::Category;
@@ -40,7 +40,7 @@ fn time_field(ui: &mut Ui, id: egui::Id, samples: f64, sr: u32, enabled: bool) -
     }
     let resp = ui.add_enabled(
         enabled,
-        egui::TextEdit::singleline(&mut text).id(id).desired_width(78.0).font(egui::TextStyle::Monospace),
+        egui::TextEdit::singleline(&mut text).id(id).desired_width(78.0).font(egui::TextStyle::Monospace).text_color(HOT).frame(has_focus),
     );
     ui.data_mut(|d| d.insert_temp(id, text.clone()));
     if resp.lost_focus() {
@@ -228,40 +228,92 @@ impl App {
 
     pub fn toolbar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("toolbar")
-            .frame(egui::Frame::none().fill(BG_PANEL).inner_margin(egui::Margin::symmetric(8.0, 4.0)).stroke(Stroke::new(1.0_f32, BORDER)))
+            .frame(egui::Frame::none().fill(BG_PANEL).inner_margin(egui::Margin::symmetric(6.0, 3.0)).stroke(Stroke::new(1.0_f32, BORDER)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    let (r, _) = ui.allocate_exact_size(vec2(84.0, 24.0), Sense::hover());
-                    ui.painter().rect_filled(r, 3.0, Color32::from_rgb(0x25, 0x5a, 0x9a));
-                    ui.painter().text(r.center(), Align2::CENTER_CENTER, "Waveform", FontId::proportional(12.5), Color32::WHITE);
-                    ui.add_space(10.0);
-                    ui.separator();
-                    if icon_button(ui, Icon::Selection, self.tool == Tool::Selection, "Time Selection tool").clicked() {
-                        self.tool = Tool::Selection;
-                    }
-                    if icon_button(ui, Icon::Hand, self.tool == Tool::Hand, "Hand tool (drag to scroll; middle-drag works with any tool)").clicked() {
-                        self.tool = Tool::Hand;
-                    }
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    mode_button(ui, Icon::Waveform, "Waveform", true, true, "Waveform Editor");
+                    mode_button(ui, Icon::Multitrack, "Multitrack", false, false, "Multitrack sessions arrive in a later release");
+                    ui.add_space(6.0);
                     ui.separator();
                     if icon_button(ui, Icon::Spectral, self.show_spectral, "Show Spectral Frequency Display (Shift+D)").clicked() {
                         self.show_spectral = !self.show_spectral;
                     }
+                    ui.separator();
+                    let later_mt = "Multitrack tool: arrives with Multitrack sessions";
+                    for (icon, tip) in [(Icon::Move, later_mt), (Icon::Razor, later_mt), (Icon::Slip, later_mt)] {
+                        icon_button_sized(ui, icon, false, tip, vec2(24.0, 22.0), false);
+                    }
+                    if icon_button(ui, Icon::Selection, self.tool == Tool::Selection, "Time Selection Tool (T)").clicked() {
+                        self.tool = Tool::Selection;
+                    }
+                    if icon_button(ui, Icon::Hand, self.tool == Tool::Hand, "Hand Tool (drag to scroll; middle-drag works with any tool)").clicked() {
+                        self.tool = Tool::Hand;
+                    }
+                    let later_sp = "Spectral editing tool: arrives with spectral editing";
+                    for (icon, tip) in [(Icon::Marquee, later_sp), (Icon::Lasso, later_sp), (Icon::Brush, later_sp), (Icon::Healing, later_sp)] {
+                        icon_button_sized(ui, icon, false, tip, vec2(24.0, 22.0), false);
+                    }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        match &self.noise_print {
-                            Some(np) => {
-                                let secs = np.samples.first().map(|c| c.len()).unwrap_or(0) as f64 / np.sample_rate as f64;
-                                if ui.small_button("Clear").clicked() {
-                                    self.noise_print = None;
-                                }
-                                ui.label(RichText::new(format!("Noise print: {secs:.2} s")).color(WAVE_SEL).size(11.5));
+                        self.search_box(ui);
+                        ui.add_space(10.0);
+                        egui::ComboBox::from_id_source("workspace").width(120.0).selected_text("Default").show_ui(ui, |ui| {
+                            if ui.selectable_label(true, "Default").clicked() {}
+                            ui.separator();
+                            if ui.button("Reset \"Default\" to Saved Layout").clicked() {
+                                self.reset_workspace();
+                                ui.close_menu();
                             }
-                            None => {
-                                ui.label(RichText::new("No noise print").color(TEXT_DIM).size(11.5));
-                            }
+                        });
+                        ui.label(RichText::new("Workspace:").color(TEXT_DIM));
+                        ui.add_space(12.0);
+                        if let Some(np) = &self.noise_print {
+                            let secs = np.samples.first().map(|c| c.len()).unwrap_or(0) as f64 / np.sample_rate as f64;
+                            ui.label(RichText::new(format!("Noise print {secs:.1} s")).color(HOT).size(11.5))
+                                .on_hover_text("Captured noise print for Noise Reduction (process)");
                         }
                     });
                 });
             });
+    }
+
+    /// "Search Help" box: finds effects and opens them.
+    fn search_box(&mut self, ui: &mut Ui) {
+        let id = egui::Id::new("search_help");
+        let mut q: String = ui.data_mut(|d| d.get_temp(id)).unwrap_or_default();
+        let resp = ui.add(egui::TextEdit::singleline(&mut q).id(id).hint_text("Search Help").desired_width(170.0));
+        let ql = q.trim().to_lowercase();
+        let mut open: Option<usize> = None;
+        if !ql.is_empty() && (resp.has_focus() || resp.lost_focus()) {
+            let hits: Vec<(usize, &'static str, &'static str)> = self
+                .effects
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.name.to_lowercase().contains(&ql) || e.description.to_lowercase().contains(&ql))
+                .take(10)
+                .map(|(i, e)| (i, e.name, e.category.name()))
+                .collect();
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                open = hits.first().map(|h| h.0);
+            } else if !hits.is_empty() {
+                egui::Area::new(id.with("popup")).order(egui::Order::Foreground).fixed_pos(resp.rect.left_bottom() + vec2(-120.0, 2.0)).show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_min_width(290.0);
+                        for (i, name, cat) in &hits {
+                            let r = ui.selectable_label(false, format!("{name}   ·   {cat}"));
+                            if r.clicked() || r.is_pointer_button_down_on() {
+                                open = Some(*i);
+                            }
+                        }
+                    });
+                });
+            }
+        }
+        if let Some(i) = open {
+            q.clear();
+            self.actions.push(Action::OpenEffect(i));
+        }
+        ui.data_mut(|d| d.insert_temp(id, q));
     }
 
     pub fn left_column(&mut self, ctx: &egui::Context) {
@@ -310,48 +362,51 @@ impl App {
     }
 
     fn files_tab(&mut self, ui: &mut Ui) {
+        let has_doc = self.doc().is_some();
         ui.horizontal(|ui| {
-            if ui.button("Open…").clicked() {
+            ui.spacing_mut().item_spacing.x = 1.0;
+            if icon_button_sized(ui, Icon::FolderOpen, false, "Open File (Ctrl+O)", vec2(22.0, 20.0), true).clicked() {
                 self.actions.push(Action::Open);
             }
-            if ui.button("New…").clicked() {
+            if icon_button_sized(ui, Icon::NewFile, false, "New Audio File (Ctrl+N)", vec2(22.0, 20.0), true).clicked() {
                 self.actions.push(Action::New);
             }
-        });
-        ui.add_space(4.0);
-        if self.docs.is_empty() {
-            ui.label(RichText::new("No files open. Drop audio here or use Open.").color(TEXT_DIM));
-        }
-        let mut switch = None;
-        let mut close = None;
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            for (i, d) in self.docs.iter().enumerate() {
-                let active = Some(i) == self.active;
-                ui.horizontal(|ui| {
-                    let name = RichText::new(d.display_name()).color(if active { Color32::WHITE } else { TEXT });
-                    if ui.selectable_label(active, name).clicked() {
-                        switch = Some(i);
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.small_button("×").on_hover_text("Close").clicked() {
-                            close = Some(i);
-                        }
-                    });
-                });
-                let ch = if d.n_ch() == 1 { "Mono" } else { "Stereo" };
-                ui.label(
-                    RichText::new(format!("   {:.1} kHz · {} · {}", d.sample_rate as f32 / 1000.0, ch, format_time(d.len() as f64, d.sample_rate)))
-                        .color(TEXT_DIM)
-                        .size(11.0),
-                );
-                ui.add_space(4.0);
+            if icon_button_sized(ui, Icon::CloseFile, false, "Close File (Ctrl+W)", vec2(22.0, 20.0), has_doc).clicked() {
+                self.actions.push(Action::Close(usize::MAX));
             }
+        });
+        let mut switch = None;
+        egui::Frame::none().fill(BG_LIST).show(ui, |ui| {
+            ui.set_min_height(ui.available_height());
+            egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+                egui::Grid::new("files_table").num_columns(7).striped(true).spacing([12.0, 2.0]).show(ui, |ui| {
+                    for h in ["Name", "Status", "Duration", "Sample Rate", "Channels", "Bit Depth", "Source Format"] {
+                        ui.label(RichText::new(h).color(TEXT_DIM).size(11.5));
+                    }
+                    ui.end_row();
+                    for (i, d) in self.docs.iter().enumerate() {
+                        let active = Some(i) == self.active;
+                        ui.horizontal(|ui| {
+                            let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                            draw_icon(ui.painter(), r.shrink(1.0), Icon::Waveform, if active { HOT } else { WAVE });
+                            let name = RichText::new(&d.name).color(if active { HOT } else { TEXT });
+                            if ui.selectable_label(active, if active { name.strong() } else { name }).clicked() {
+                                switch = Some(i);
+                            }
+                        });
+                        ui.label(if d.dirty { "*" } else { "" });
+                        ui.label(format_time(d.len() as f64, d.sample_rate));
+                        ui.label(format!("{} Hz", d.sample_rate));
+                        ui.label(if d.n_ch() == 1 { "Mono" } else { "Stereo" });
+                        ui.label(d.source_bits.map(|b| format!("{b}")).unwrap_or_else(|| "32 (float)".into()));
+                        ui.label(d.path.as_ref().and_then(|p| p.extension()).map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default());
+                        ui.end_row();
+                    }
+                });
+            });
         });
         if let Some(i) = switch {
             self.active = Some(i);
-        }
-        if let Some(i) = close {
-            self.actions.push(Action::Close(i));
         }
     }
 
@@ -499,10 +554,11 @@ impl App {
 
     fn history(&mut self, ui: &mut Ui) {
         let Some(doc) = self.doc() else {
-            ui.label(RichText::new("Nothing yet").color(TEXT_DIM));
+            ui.label(RichText::new("No history").color(TEXT_DIM));
             return;
         };
         let current = doc.undo.len();
+        let undos = doc.undo.len();
         let mut entries: Vec<(usize, String, bool)> = vec![(0, doc.origin.clone(), false)];
         for (i, s) in doc.undo.iter().enumerate() {
             entries.push((i + 1, s.label.clone(), false));
@@ -511,25 +567,52 @@ impl App {
             entries.push((current + 1 + k, s.label.clone(), true));
         }
         let mut jump = None;
-        egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
-            for (idx, label, future) in entries {
-                let text = if future { RichText::new(&label).color(TEXT_DIM).italics() } else { RichText::new(&label) };
-                if ui.selectable_label(idx == current, text).clicked() && idx != current {
-                    jump = Some(idx);
+        let mut clear = false;
+        let list_h = (ui.available_height() - 24.0).max(30.0);
+        egui::Frame::none().fill(BG_LIST).show(ui, |ui| {
+            ui.set_height(list_h);
+            egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
+                for (idx, label, future) in entries {
+                    let text = if future { RichText::new(&label).color(TEXT_DIM).italics() } else { RichText::new(&label) };
+                    ui.horizontal(|ui| {
+                        let (r, _) = ui.allocate_exact_size(vec2(12.0, 14.0), Sense::hover());
+                        if idx == current {
+                            ui.painter().add(egui::Shape::convex_polygon(
+                                vec![pos2(r.left() + 2.0, r.top() + 3.0), pos2(r.right() - 2.0, r.center().y), pos2(r.left() + 2.0, r.bottom() - 3.0)],
+                                HOT,
+                                Stroke::NONE,
+                            ));
+                        }
+                        if ui.selectable_label(idx == current, text).clicked() && idx != current {
+                            jump = Some(idx);
+                        }
+                    });
                 }
-            }
+            });
+        });
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("{undos} Undo{}", if undos == 1 { "" } else { "s" })).color(TEXT_DIM).size(11.5));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if icon_button_sized(ui, Icon::Trash, false, "Clear History", vec2(20.0, 18.0), undos > 0 || current > 0).clicked() {
+                    clear = true;
+                }
+            });
         });
         if let Some(j) = jump {
             self.actions.push(Action::JumpHistory(j));
+        }
+        if clear {
+            self.actions.push(Action::ClearHistory);
         }
     }
 
     /// Transport and zoom controls along the bottom of the Editor panel.
     pub fn transport_bar(&mut self, ui: &mut Ui) {
         egui::TopBottomPanel::bottom("transport")
-            .frame(egui::Frame::none().fill(BG_PANEL).inner_margin(egui::Margin::symmetric(8.0, 5.0)).stroke(Stroke::new(1.0_f32, BORDER)))
+            .frame(egui::Frame::none().fill(BG_PANEL).inner_margin(egui::Margin::symmetric(8.0, 4.0)))
             .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 1.0;
                     let sr = self.doc().map(|d| d.sample_rate).unwrap_or(48000);
                     let recording = self.engine.is_recording();
                     let pos = match (&self.rec_target, self.doc()) {
@@ -537,59 +620,61 @@ impl App {
                         _ => self.display_pos(),
                     };
                     let (r, _) = ui.allocate_exact_size(vec2(150.0, 30.0), Sense::hover());
-                    ui.painter().rect_filled(r, 3.0, BG_DEEP);
                     let col = if recording { RECORD } else { TIME };
-                    ui.painter().text(r.right_center() - vec2(8.0, 0.0), Align2::RIGHT_CENTER, format_time(pos, sr), FontId::monospace(22.0), col);
-                    ui.add_space(8.0);
+                    ui.painter().text(r.left_center() + vec2(2.0, 0.0), Align2::LEFT_CENTER, format_time(pos, sr), FontId::monospace(24.0), col);
 
                     let st = self.engine.status();
                     let playing = st.playing && self.doc().map(|d| d.id == st.tag).unwrap_or(false);
-                    if icon_button(ui, Icon::Stop, false, "Stop (also ends recording)").clicked() {
+                    let zoom_w = 6.0 * 25.0;
+                    let group_w = 9.0 * 25.0;
+                    ui.add_space(((ui.available_width() - group_w - zoom_w) / 2.0).max(10.0));
+                    let dt = ui.input(|i| i.stable_dt).min(0.1) as f64;
+                    if icon_button(ui, Icon::Stop, false, "Stop").clicked() {
                         self.actions.push(Action::Stop);
                     }
-                    if icon_button(ui, if playing { Icon::Pause } else { Icon::Play }, playing, "Play / Stop (Space)").clicked() {
-                        self.actions.push(Action::PlayToggle);
+                    if icon_button(ui, Icon::Play, playing, "Play (Space)").clicked() {
+                        self.actions.push(if playing { Action::Stop } else { Action::PlayToggle });
                     }
-                    if icon_button(ui, Icon::ToStart, false, "Move playhead to start (Home)").clicked() {
-                        self.actions.push(Action::ToStart);
+                    if icon_button(ui, Icon::Pause, self.paused.is_some(), "Pause").clicked() {
+                        self.actions.push(Action::Pause);
                     }
-                    if icon_button(ui, Icon::PrevMarker, false, "Previous marker / edge (←)").clicked() {
+                    if icon_button(ui, Icon::ToStart, false, "Move Playhead to Previous (←)").clicked() {
                         self.actions.push(Action::PrevMarker);
                     }
-                    if icon_button(ui, Icon::NextMarker, false, "Next marker / edge (→)").clicked() {
-                        self.actions.push(Action::NextMarker);
+                    let rw = icon_button(ui, Icon::Rewind, false, "Rewind (hold)");
+                    if rw.is_pointer_button_down_on() {
+                        self.actions.push(Action::Nudge(-4.0 * dt));
+                        ui.ctx().request_repaint();
                     }
-                    if icon_button(ui, Icon::ToEnd, false, "Move playhead to end (End)").clicked() {
-                        self.actions.push(Action::ToEnd);
+                    let ff = icon_button(ui, Icon::FastForward, false, "Fast Forward (hold)");
+                    if ff.is_pointer_button_down_on() {
+                        self.actions.push(Action::Nudge(4.0 * dt));
+                        ui.ctx().request_repaint();
+                    }
+                    if icon_button(ui, Icon::ToEnd, false, "Move Playhead to Next (→)").clicked() {
+                        self.actions.push(Action::NextMarker);
                     }
                     if icon_button(ui, Icon::Record, recording, "Record (Shift+Space)").clicked() {
                         self.actions.push(Action::Record);
                     }
-                    if icon_button(ui, Icon::Loop, self.looping, "Loop playback").clicked() {
+                    if icon_button(ui, Icon::Loop, self.looping, "Loop Playback").clicked() {
                         self.looping = !self.looping;
                         self.engine.set_looping(self.looping);
                     }
-                    ui.separator();
-                    for (icon, action, tip) in [
-                        (Icon::AmpIn, Action::AmpIn, "Zoom in amplitude (Alt+wheel)"),
-                        (Icon::AmpOut, Action::AmpOut, "Zoom out amplitude"),
-                        (Icon::ZoomIn, Action::ZoomIn, "Zoom in time (=, wheel)"),
-                        (Icon::ZoomOut, Action::ZoomOut, "Zoom out time (-)"),
-                        (Icon::ZoomFull, Action::ZoomFull, "Zoom out full (\\)"),
-                        (Icon::ZoomSel, Action::ZoomSel, "Zoom to selection"),
-                    ] {
-                        if icon_button(ui, icon, false, tip).clicked() {
-                            self.actions.push(action);
-                        }
-                    }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let mut vol = ui.data_mut(|d| d.get_temp::<f32>(egui::Id::new("monitor_vol"))).unwrap_or(0.0);
-                        let r = ui.add(egui::Slider::new(&mut vol, -40.0..=6.0).suffix(" dB").fixed_decimals(1).show_value(true));
-                        if r.changed() {
-                            self.engine.set_volume(crate::dsp::util::db_to_lin(vol));
-                            ui.data_mut(|d| d.insert_temp(egui::Id::new("monitor_vol"), vol));
+                        ui.spacing_mut().item_spacing.x = 1.0;
+                        for (icon, action, tip) in [
+                            (Icon::ZoomSel, Action::ZoomSel, "Zoom to Selection"),
+                            (Icon::ZoomFull, Action::ZoomFull, "Zoom Out Full (\\)"),
+                            (Icon::ZoomOut, Action::ZoomOut, "Zoom Out (Time) (-)"),
+                            (Icon::ZoomIn, Action::ZoomIn, "Zoom In (Time) (=)"),
+                            (Icon::AmpOut, Action::AmpOut, "Zoom Out (Amplitude)"),
+                            (Icon::AmpIn, Action::AmpIn, "Zoom In (Amplitude) (Alt+wheel)"),
+                        ] {
+                            if icon_button(ui, icon, false, tip).clicked() {
+                                self.actions.push(action);
+                            }
                         }
-                        ui.label(RichText::new("Monitor").color(TEXT_DIM));
                     });
                 });
             });
@@ -646,7 +731,7 @@ impl App {
     pub fn status_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("status")
             .exact_height(24.0)
-            .frame(egui::Frame::none().fill(Color32::from_rgb(0x1a, 0x3d, 0x66)).inner_margin(egui::Margin::symmetric(10.0, 3.0)))
+            .frame(egui::Frame::none().fill(Color32::from_rgb(0x2c, 0x2c, 0x2c)).inner_margin(egui::Margin::symmetric(8.0, 3.0)).stroke(Stroke::new(1.0_f32, BORDER)))
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
                     let st = self.engine.status();
@@ -659,7 +744,7 @@ impl App {
                     } else {
                         "Stopped"
                     };
-                    ui.label(RichText::new(state).color(Color32::WHITE).size(11.5).strong());
+                    ui.label(RichText::new(state).color(TEXT).size(11.5));
                     ui.add_space(12.0);
                     let msg = if let Some(j) = &self.job {
                         format!("{}… {:.1} s", j.label, j.started.elapsed().as_secs_f32())
@@ -670,12 +755,16 @@ impl App {
                     } else {
                         "Ready".into()
                     };
-                    ui.label(RichText::new(msg).color(Color32::from_rgb(0xdd, 0xe6, 0xf2)).size(11.5));
+                    ui.label(RichText::new(msg).color(TEXT_DIM).size(11.5));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if let Some(d) = self.doc() {
                             let mb = d.len() as f64 * d.n_ch() as f64 * 4.0 / 1_048_576.0;
-                            let col = Color32::from_rgb(0xdd, 0xe6, 0xf2);
-                            ui.label(RichText::new(format_time(d.len() as f64, d.sample_rate)).monospace().color(col).size(11.5));
+                            let col = TEXT;
+                            if let Some(free) = self.free_space() {
+                                ui.label(RichText::new(format!("{:.2} GB free", free as f64 / 1_073_741_824.0)).color(col).size(11.5));
+                                ui.add_space(14.0);
+                            }
+                            ui.label(RichText::new(format_time(d.len() as f64, d.sample_rate)).color(col).size(11.5));
                             ui.add_space(14.0);
                             ui.label(RichText::new(format!("{mb:.2} MB")).color(col).size(11.5));
                             ui.add_space(14.0);
@@ -711,7 +800,7 @@ impl App {
 }
 
 fn panel_frame() -> egui::Frame {
-    egui::Frame::none().fill(BG_PANEL).inner_margin(egui::Margin::same(6.0)).stroke(Stroke::new(1.0_f32, BORDER))
+    egui::Frame::none().fill(BG_PANEL).inner_margin(egui::Margin::same(PANEL_MARGIN)).rounding(3.0).outer_margin(egui::Margin::same(2.0))
 }
 
 /// Audition-style tab header for a panel group.
@@ -722,19 +811,55 @@ pub fn tab_strip(ui: &mut Ui, panels: &[Panel], current: &mut Panel) {
     *current = panels[idx];
 }
 
+/// Dark strip across the top of a panel frame with text tabs; the active
+/// tab takes the panel colour, the others sit on the strip.
 pub fn tab_strip_named(ui: &mut Ui, names: &[&str], current: &mut usize) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        for (i, n) in names.iter().enumerate() {
-            let active = i == *current;
-            let text = RichText::new(*n).size(12.0).color(if active { Color32::WHITE } else { TEXT_DIM });
-            let text = if active { text.strong() } else { text };
-            if ui.selectable_label(active, text).clicked() {
-                *current = i;
-            }
+    let full = ui.available_rect_before_wrap();
+    let m = PANEL_MARGIN;
+    let h = 22.0;
+    let header = Rect::from_min_size(pos2(full.left() - m, full.top() - m), vec2(full.width() + 2.0 * m, h));
+    let p = ui.painter().clone();
+    p.rect_filled(header, Rounding { nw: 3.0, ne: 3.0, sw: 0.0, se: 0.0 }, BG_HEADER);
+    let mut x = header.left() + 2.0;
+    for (i, n) in names.iter().enumerate() {
+        let active = i == *current;
+        let font = if active { bold(12.0) } else { FontId::proportional(12.0) };
+        let w = ui.fonts(|f| f.layout_no_wrap(n.to_string(), font.clone(), TEXT).size().x) + 18.0;
+        if x + w > header.right() - 20.0 && i > 0 {
+            break;
         }
-    });
-    let r = ui.available_rect_before_wrap();
-    ui.painter().line_segment([pos2(r.left() - 6.0, r.top()), pos2(r.right() + 6.0, r.top())], Stroke::new(1.0_f32, BORDER));
-    ui.add_space(4.0);
+        let r = Rect::from_min_max(pos2(x, header.top() + 2.0), pos2(x + w, header.bottom()));
+        let resp = ui.interact(r, ui.id().with(("tab", *n)), Sense::click());
+        if active {
+            p.rect_filled(r, Rounding { nw: 3.0, ne: 3.0, sw: 0.0, se: 0.0 }, BG_PANEL);
+        } else if resp.hovered() {
+            p.rect_filled(r, Rounding { nw: 3.0, ne: 3.0, sw: 0.0, se: 0.0 }, Color32::from_rgb(0x33, 0x33, 0x33));
+        }
+        p.text(r.center(), Align2::CENTER_CENTER, *n, font, if active { Color32::WHITE } else { TEXT_DIM });
+        if resp.clicked() {
+            *current = i;
+        }
+        x += w + 1.0;
+    }
+    let menu = Rect::from_center_size(pos2(header.right() - 11.0, header.center().y + 1.0), vec2(10.0, 8.0));
+    draw_icon(&p, menu, Icon::Menu, TEXT_DIM);
+    ui.add_space(h - m + 4.0);
+}
+
+pub const PANEL_MARGIN: f32 = 6.0;
+
+/// Waveform / Multitrack view buttons at the left of the toolbar.
+fn mode_button(ui: &mut Ui, icon: Icon, label: &str, active: bool, enabled: bool, tip: &str) -> egui::Response {
+    let font = FontId::proportional(12.5);
+    let tw = ui.fonts(|f| f.layout_no_wrap(label.to_string(), font.clone(), TEXT).size().x);
+    let (rect, resp) = ui.allocate_exact_size(vec2(tw + 34.0, 22.0), if enabled { Sense::click() } else { Sense::hover() });
+    let p = ui.painter();
+    let bg = if active { Color32::from_rgb(0x26, 0x26, 0x26) } else if enabled && resp.hovered() { Color32::from_rgb(0x55, 0x55, 0x55) } else { BG_RAISED };
+    p.rect_filled(rect, 2.0, bg);
+    p.rect_stroke(rect, 2.0, Stroke::new(1.0_f32, BORDER));
+    let fg = if !enabled { Color32::from_rgb(0x70, 0x70, 0x70) } else if active { Color32::WHITE } else { TEXT };
+    let ir = Rect::from_center_size(pos2(rect.left() + 13.0, rect.center().y), vec2(14.0, 12.0));
+    draw_icon(p, ir, icon, if active { WAVE } else { fg });
+    p.text(pos2(rect.left() + 24.0, rect.center().y), Align2::LEFT_CENTER, label, font, fg);
+    resp.on_hover_text(tip)
 }

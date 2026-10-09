@@ -7,6 +7,8 @@ bottom. It runs on Windows, macOS and Linux from one codebase.
 
 Audemo is an independent project and is not affiliated with Adobe.
 
+The interface uses Adobe's open-source Source Sans 3 and Source Code Pro typefaces, bundled under the SIL Open Font License (see `assets/fonts/`).
+
 ## Features
 
 - **Open** WAV, AIFF, FLAC, MP3, OGG/Vorbis, M4A/AAC, ALAC, CAF and MKV/WebM audio (drag files onto the window, or pass them on the command line).
