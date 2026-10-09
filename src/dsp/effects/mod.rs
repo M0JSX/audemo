@@ -9,6 +9,7 @@ mod modulation;
 mod more;
 mod restoration;
 mod reverb;
+pub mod rt;
 mod special;
 mod stereo;
 mod timepitch;

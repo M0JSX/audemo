@@ -374,6 +374,9 @@ pub struct EffectDialog {
     pub error: Option<String>,
     /// Editing a slot of the Effects Rack rather than applying directly.
     pub rack_slot: Option<usize>,
+    /// Editing a multitrack rack slot: (session id, track id or None for the
+    /// master, slot id). Changes are heard live.
+    pub track_fx: Option<(u64, Option<u64>, u64)>,
 }
 
 pub enum Dialog {
@@ -486,6 +489,7 @@ pub enum Action {
     MtDropFiles(Vec<PathBuf>),
     /// An open file dragged onto a track.
     MtInsertAt { session_id: u64, doc_id: u64, track: usize, at: usize },
+    MtAddBus,
 }
 
 pub const FAVORITES: &[(&str, &str, &str)] = &[
@@ -809,6 +813,7 @@ impl App {
                 if i.consume_shortcut(&KS::new(cmd, Key::T)) { acts.push(Action::Crop); }
                 if i.consume_shortcut(&KS::new(cmd, Key::K)) { acts.push(Action::MtSplit); }
                 if i.consume_key(M::ALT, Key::A) { acts.push(Action::MtAddTrack); }
+                if i.consume_key(M::ALT, Key::B) { acts.push(Action::MtAddBus); }
                 if i.consume_key(M::NONE, Key::Num9) { acts.push(Action::SetMode(Mode::Waveform)); }
                 if i.consume_key(M::NONE, Key::Num0) { acts.push(Action::SetMode(Mode::Multitrack)); }
                 if i.consume_shortcut(&KS::new(cmd, Key::W)) { acts.push(Action::Close(usize::MAX)); }
@@ -829,8 +834,9 @@ impl App {
             });
         }
         for a in acts {
-            // In an effect dialog, Space toggles the preview and Esc closes it.
-            if let Some(Dialog::Effect(d)) = &mut self.dialog {
+            // In an effect dialog, Space toggles the preview and Esc closes it
+            // (rack slots are heard through normal playback, so Space plays).
+            if let Some(Dialog::Effect(d)) = &mut self.dialog.as_mut().filter(|d| !matches!(d, Dialog::Effect(e) if e.rack_slot.is_some() || e.track_fx.is_some())) {
                 match a {
                     Action::PlayToggle => {
                         d.previewing = !d.previewing;
@@ -1729,6 +1735,7 @@ impl App {
                     wet: None,
                     error: None,
                     rack_slot: None,
+                    track_fx: None,
                 }));
             }
             Action::ApplyEffect(idx, params) => {
@@ -1902,6 +1909,7 @@ impl App {
                     self.dialog = Some(Dialog::ConfirmClose { doc: i });
                 }
             }
+            Action::Status(s) if s == "__show_rack" => self.show_panel(Panel::EffectsRack),
             Action::Status(s) => self.set_status(s),
             Action::CloseAll => {
                 let dirty: Vec<usize> = (0..self.docs.len()).filter(|&i| self.docs[i].dirty).collect();
@@ -2041,7 +2049,8 @@ impl App {
             | Action::MtCloseSession(_)
             | Action::MtEditSource(_)
             | Action::MtDropFiles(_)
-            | Action::MtInsertAt { .. } => {}
+            | Action::MtInsertAt { .. }
+            | Action::MtAddBus => {}
             Action::Audition(p) => {
                 self.browser_selected = Some(p.clone());
                 if self.engine.is_playing_tag(BROWSER_TAG) {

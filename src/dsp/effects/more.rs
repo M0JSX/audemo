@@ -8,11 +8,11 @@ use super::special::shape;
 use super::Category::*;
 use super::super::loudness::integrated_lufs;
 
-const GEQ20: [f32; 20] = [
+pub(super) const GEQ20: [f32; 20] = [
     31.5, 44.0, 63.0, 88.0, 125.0, 177.0, 250.0, 355.0, 500.0, 710.0, 1000.0, 1400.0, 2000.0, 2800.0, 4000.0, 5600.0, 8000.0,
     11200.0, 16000.0, 20000.0,
 ];
-const GEQ30: [f32; 30] = [
+pub(super) const GEQ30: [f32; 30] = [
     25.0, 31.5, 40.0, 50.0, 63.0, 80.0, 100.0, 125.0, 160.0, 200.0, 250.0, 315.0, 400.0, 500.0, 630.0, 800.0, 1000.0, 1250.0,
     1600.0, 2000.0, 2500.0, 3150.0, 4000.0, 5000.0, 6300.0, 8000.0, 10000.0, 12500.0, 16000.0, 20000.0,
 ];
@@ -31,7 +31,7 @@ fn geq_params(bands: &[f32]) -> Vec<ParamDef> {
     v
 }
 
-fn geq_filters(bands: &[f32], q: f32, p: &Params, sr: f32) -> Vec<Biquad> {
+pub(super) fn geq_filters(bands: &[f32], q: f32, p: &Params, sr: f32) -> Vec<Biquad> {
     bands
         .iter()
         .enumerate()
@@ -53,7 +53,7 @@ fn filter_all(i: &[Vec<f32>], filters: &[Biquad], gain_db: f32) -> Vec<Vec<f32>>
         .collect()
 }
 
-fn notch_filters(p: &Params, sr: f32) -> Vec<Biquad> {
+pub(super) fn notch_filters(p: &Params, sr: f32) -> Vec<Biquad> {
     let q = [40.0, 12.0, 4.0][p.c("width").min(2)];
     (1..=6)
         .filter(|n| p.b(&format!("n{n}_on")))

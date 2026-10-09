@@ -38,7 +38,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Spectral display", "Shift+D"),
     ("Capture noise print", "Shift+P"),
     ("Toggle effect preview", "Space (with an effect open)"),
-    ("Multitrack: add audio track", "Alt+A"),
+    ("Multitrack: add audio track / bus track", "Alt+A / Alt+B"),
     ("Multitrack: split clip at playhead", "Ctrl+K"),
     ("Multitrack: move / trim / fade a clip", "Drag the clip / its edges / its yellow handles"),
     ("Shape a fade (both editors)", "Drag the fade handle up/down; hold Ctrl for cosine"),
@@ -499,8 +499,23 @@ impl App {
         let previewing_now = self.engine.is_playing_tag(PREVIEW_TAG);
         let Some(Dialog::Effect(d)) = &mut self.dialog else { return };
         let def: &EffectDef = &effects[d.idx];
-        let rack_mode = d.rack_slot.is_some();
-        let scope = if rack_mode {
+        let rack_mode = d.rack_slot.is_some() || d.track_fx.is_some();
+        let track_mode = d.track_fx.is_some();
+        let scope = if let Some((sid, tid, slot_id)) = d.track_fx {
+            let (owner, pos) = self
+                .sessions
+                .iter()
+                .find(|s| s.id == sid)
+                .map(|s| match tid {
+                    Some(t) => s.tracks.iter().find(|x| x.id == t).map(|x| (x.name.clone(), x.fx.iter().position(|f| f.id == slot_id))).unwrap_or_default(),
+                    None => ("Master".to_string(), s.master_fx.iter().position(|f| f.id == slot_id)),
+                })
+                .unwrap_or_default();
+            match pos {
+                Some(p) => format!("{owner} effects rack, slot {}", p + 1),
+                None => format!("{owner} effects rack (this effect was removed)"),
+            }
+        } else if rack_mode {
             format!("Effects Rack slot {}", d.rack_slot.unwrap() + 1)
         } else if def.generator {
             if scope.starts_with("Selection") { format!("Replaces the {}", scope.to_lowercase()) } else { "Inserts at the cursor".to_string() }
@@ -560,7 +575,8 @@ impl App {
                 ui.separator();
                 ui.horizontal(|ui| {
                     if rack_mode {
-                        ui.label(RichText::new("Changes are heard live while the rack's master power is on.").color(TEXT_DIM).size(11.0));
+                        let hint = if track_mode { "Changes are heard live as the session plays (Space)." } else { "Changes are heard live while the rack's master power is on." };
+                        ui.label(RichText::new(hint).color(TEXT_DIM).size(11.0));
                     } else {
                         let label = if d.previewing { "Stop Preview" } else { "Preview" };
                         if ui.add(egui::Button::new(label).min_size(vec2(118.0, 26.0))).on_hover_text("Loop the processed selection (Space)").clicked() {
@@ -583,6 +599,7 @@ impl App {
                 ui.label(RichText::new(scope.clone()).color(TEXT_DIM).size(11.0));
             });
         let live_update = if rack_mode && d.params != before { d.rack_slot.map(|s| (s, d.params.clone())) } else { None };
+        let live_track = if d.params != before { d.track_fx.map(|t| (t, d.params.clone())) } else { None };
         if d.params != before {
             d.last_change = Instant::now();
             if def.presets.iter().all(|(n, _)| def.preset_params(n).as_ref() != Some(&d.params)) && d.params != def.default_params() {
@@ -605,7 +622,9 @@ impl App {
                 self.engine.replace_buffer(b, sr, 0.0, len);
             }
         }
-        if apply && rack_mode {
+        if apply && d.track_fx.is_some() {
+            self.close_effect_dialog();
+        } else if apply && rack_mode {
             let (slot, p) = (d.rack_slot.unwrap(), d.params.clone());
             self.close_effect_dialog();
             if let Some(s) = self.rack.get_mut(slot) {
@@ -624,6 +643,9 @@ impl App {
                 s.params = p;
             }
             self.rack_touched();
+        }
+        if let Some(((sid, tid, slot), p)) = live_track {
+            self.mt_set_fx_params(sid, tid, slot, p);
         }
     }
 }

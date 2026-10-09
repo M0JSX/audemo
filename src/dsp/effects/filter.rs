@@ -107,7 +107,7 @@ pub fn peq_filters(p: &Params, sr: f32) -> Vec<Biquad> {
     v
 }
 
-fn geq_filters(p: &Params, sr: f32) -> Vec<Biquad> {
+pub(super) fn geq_filters(p: &Params, sr: f32) -> Vec<Biquad> {
     GEQ_BANDS
         .iter()
         .filter(|(_, _, f)| *f < sr * 0.45)
@@ -115,7 +115,7 @@ fn geq_filters(p: &Params, sr: f32) -> Vec<Biquad> {
         .collect()
 }
 
-fn sci_filters(p: &Params, sr: f32) -> Vec<Biquad> {
+pub(super) fn sci_filters(p: &Params, sr: f32) -> Vec<Biquad> {
     let order = (p.c("order") + 1) * 2;
     let f = p.f("freq");
     match p.c("kind") {

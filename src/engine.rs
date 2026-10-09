@@ -15,6 +15,9 @@ pub const PREVIEW_TAG: u64 = u64::MAX;
 /// Tag used for Media Browser auditioning.
 pub const BROWSER_TAG: u64 = u64::MAX - 1;
 
+/// Frames per live multitrack mix block (~20 ms ahead of what you hear).
+pub const MIX_BLOCK: usize = 1024;
+
 /// Frames summarised per live-recording peak block.
 pub const REC_BLOCK: usize = 64;
 
@@ -113,6 +116,8 @@ pub struct Shared {
     mix_gen: u64,
     /// Per-track (L, R) peaks of the session mix since the UI last read them.
     track_peaks: Vec<[f32; 2]>,
+    /// Per-track mix buffers, sized on the UI thread so the callback never allocates.
+    mix_scratch: crate::session::MixScratch,
     src_rate: f64,
     pos: f64,
     start: f64,
@@ -252,6 +257,7 @@ impl Engine {
             mix: None,
             mix_gen: 0,
             track_peaks: Vec::new(),
+            mix_scratch: Default::default(),
             src_rate: 48000.0,
             pos: 0.0,
             start: 0.0,
@@ -350,6 +356,7 @@ impl Engine {
             s.stream = None;
             s.mix_gen += 1;
             s.track_peaks = vec![[0.0; 2]; state.tracks.len()];
+            s.mix_scratch.reserve(state.tracks.len(), MIX_BLOCK);
             s.mix.replace(state)
         } else {
             None
@@ -362,11 +369,13 @@ impl Engine {
     pub fn set_mix(&self, state: Arc<crate::session::MixState>) {
         let old = match self.shared.lock() {
             Ok(mut s) if s.mix.is_some() => {
+                // No window reset: the block already rendered plays out (≈20 ms)
+                // and effects never process the same audio twice.
                 s.end = s.end.max(s.pos);
-                s.mix_gen += 1;
                 if s.track_peaks.len() != state.tracks.len() {
                     s.track_peaks = vec![[0.0; 2]; state.tracks.len()];
                 }
+                s.mix_scratch.reserve(state.tracks.len(), MIX_BLOCK);
                 s.mix.replace(state)
             }
             _ => None,
@@ -596,6 +605,8 @@ where
     let mut scratch: Vec<Vec<f32>> = vec![Vec::with_capacity(8192), Vec::with_capacity(8192)];
     let mut win = (0usize, 0usize);
     let mut win_version = u64::MAX;
+    // Last frame of the previous block, for interpolating across the join.
+    let mut prev_last = [0.0f32; 2];
     device
         .build_output_stream(
             cfg,
@@ -633,11 +644,17 @@ where
                             }
                         }
                         if let Some(m) = &st.mix {
-                            if i0 < win.0 || i0 + 1 >= win.1 {
-                                // ~20 ms ahead keeps edits and meters close to what you hear.
-                                let len = 1024;
-                                crate::session::mix_into(m, i0, i0 + len, &mut scratch, &mut st.track_peaks);
-                                win = (i0, i0 + len);
+                            let in_win = i0 >= win.0 && i0 + 1 < win.1;
+                            let at_join = win.1 > win.0 && i0 + 1 == win.0;
+                            if !in_win && !at_join {
+                                // Blocks follow on from each other so stateful effects
+                                // never see the same audio twice; anything else (a seek,
+                                // a loop, a new session) starts afresh at the playhead.
+                                let contiguous = win.1 > win.0 && i0 + 1 >= win.1 && i0 <= win.1;
+                                let start = if contiguous { win.1 } else { i0 };
+                                prev_last = if contiguous { [scratch[0][win.1 - win.0 - 1], scratch[1][win.1 - win.0 - 1]] } else { [0.0; 2] };
+                                crate::session::mix_into(m, start, start + MIX_BLOCK, &mut scratch, &mut st.track_peaks, &mut st.mix_scratch);
+                                win = (start, start + MIX_BLOCK);
                             }
                         }
                         for (c, out) in frame.iter_mut().enumerate() {
@@ -648,7 +665,11 @@ where
                                 }
                                 None if st.mix.is_some() => {
                                     let ch = &scratch[c.min(1)];
-                                    (ch[i0 - win.0], ch[i0 + 1 - win.0])
+                                    if i0 < win.0 {
+                                        (prev_last[c.min(1)], ch[0])
+                                    } else {
+                                        (ch[i0 - win.0], ch[i0 + 1 - win.0])
+                                    }
                                 }
                                 None => {
                                     let ch = &st.buffer[c.min(n_src - 1)];

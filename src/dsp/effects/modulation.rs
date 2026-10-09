@@ -2,21 +2,21 @@ use super::prelude::*;
 use super::Category::Modulation;
 use std::f32::consts::{PI, TAU};
 
-struct DelayLine {
+pub(super) struct DelayLine {
     buf: Vec<f32>,
     w: usize,
 }
 
 impl DelayLine {
-    fn new(max: usize) -> Self {
+    pub(super) fn new(max: usize) -> Self {
         DelayLine { buf: vec![0.0; max.max(4) + 4], w: 0 }
     }
-    fn push(&mut self, x: f32) {
+    pub(super) fn push(&mut self, x: f32) {
         self.buf[self.w] = x;
         self.w = (self.w + 1) % self.buf.len();
     }
     /// Read `d` samples behind the most recent write (fractional).
-    fn read(&self, d: f32) -> f32 {
+    pub(super) fn read(&self, d: f32) -> f32 {
         let n = self.buf.len();
         let d = d.clamp(1.0, (n - 3) as f32);
         let pos = self.w as f32 - d;

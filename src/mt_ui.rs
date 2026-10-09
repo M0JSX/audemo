@@ -86,6 +86,10 @@ pub struct MtState {
     context_track: Option<usize>,
     /// Right-clicked automation: (track, pan?, point)
     context_env: Option<(usize, bool, Option<usize>)>,
+    /// The Effects Rack panel shows the master rack instead of a track's.
+    pub rack_master: bool,
+    /// Slot whose effect window has already recorded its undo step.
+    fx_undo_for: Option<u64>,
     /// Per-track meter levels in dB (L, R), decayed.
     pub meters: Vec<[f32; 2]>,
     meter_at: Option<std::time::Instant>,
@@ -273,6 +277,7 @@ impl App {
         while s.tracks.len() <= track {
             s.add_track();
         }
+        let track = s.audio_track_at_or_after(track);
         let clip = s.insert_clip(track, src_id, at);
         if clip.is_some() {
             s.selected_track = track;
@@ -313,7 +318,7 @@ impl App {
             }
         };
         let id = self.new_id();
-        let parsed = match session::from_text(id, &text, path.parent()) {
+        let parsed = match session::from_text(id, &text, path.parent(), &self.effects) {
             Ok(p) => p,
             Err(e) => {
                 self.dialog = Some(Dialog::Message { title: "Couldn't open session".into(), text: e });
@@ -558,6 +563,7 @@ impl App {
             loop_start = 0;
             end = end_all;
         }
+        s.reset_fx();
         self.engine.play_mix(Arc::new(s.mix_state()), loop_start as f64, end as f64, self.looping, s.id);
         if start != loop_start {
             self.engine.seek(start as f64);
@@ -576,10 +582,10 @@ impl App {
         if s.tracks.is_empty() {
             s.add_track();
         }
-        let ti = match s.tracks.iter().position(|t| t.arm) {
+        let ti = match s.tracks.iter().position(|t| t.arm && !t.is_bus()) {
             Some(i) => i,
             None => {
-                let i = s.selected_track.min(s.tracks.len() - 1);
+                let i = s.audio_track_at_or_after(s.selected_track);
                 s.tracks[i].arm = true;
                 i
             }
@@ -592,6 +598,7 @@ impl App {
             Ok((rate, _)) => {
                 // Play the other tracks while recording (overdub).
                 if end > start {
+                    self.sessions[si].reset_fx();
                     self.engine.play_mix(state, start as f64, end as f64, false, session_id);
                 }
                 self.mt.rec = Some(MtRec { session_id, track_id, start });
@@ -765,7 +772,7 @@ impl App {
         if matches!(a, Action::MtSplit) && self.mode != Mode::Multitrack {
             return None;
         }
-        let session_cmd = matches!(a, Action::MtAddTrack | Action::MtDeleteTrack | Action::MtSplit | Action::MtMixdown(_));
+        let session_cmd = matches!(a, Action::MtAddTrack | Action::MtAddBus | Action::MtDeleteTrack | Action::MtSplit | Action::MtMixdown(_));
         if session_cmd && self.session().is_none() {
             self.set_status("Create or open a multitrack session first (File > New > Multitrack Session).");
             return None;
@@ -790,6 +797,11 @@ impl App {
             Action::MtAddTrack => {
                 let s = &mut self.sessions[si];
                 let i = s.add_track();
+                s.selected_track = i;
+            }
+            Action::MtAddBus => {
+                let s = &mut self.sessions[si];
+                let i = s.add_bus();
                 s.selected_track = i;
             }
             Action::MtDeleteTrack => {
@@ -881,7 +893,7 @@ impl App {
                 let (t0, at) = (s.selected_track, s.cursor);
                 let mut end = at;
                 for (dt, mut c) in items {
-                    let t = (t0 + dt).min(s.tracks.len().saturating_sub(1));
+                    let t = s.audio_track_at_or_after((t0 + dt).min(s.tracks.len().saturating_sub(1)));
                     c.id = s.new_id();
                     c.start += at;
                     end = end.max(c.end());
@@ -994,6 +1006,249 @@ impl App {
             other => return Some(other),
         }
         None
+    }
+
+    // ------------------------------------------------------------ effects racks
+
+    /// The rack being shown: the selected track's, or the master's.
+    fn rack_owner(&self) -> Option<(usize, Option<usize>)> {
+        let si = self.active_session.filter(|&i| i < self.sessions.len())?;
+        let s = &self.sessions[si];
+        if self.mt.rack_master || s.tracks.is_empty() {
+            Some((si, None))
+        } else {
+            Some((si, Some(s.selected_track.min(s.tracks.len() - 1))))
+        }
+    }
+
+    /// Live parameter change from an effect window editing a rack slot
+    /// (found by its stable id, so moving or removing slots can't misdirect
+    /// it). The first change made in a window is one undo step.
+    pub fn mt_set_fx_params(&mut self, session_id: u64, track: Option<u64>, slot_id: u64, p: crate::dsp::params::Params) {
+        let Some(s) = self.sessions.iter_mut().find(|s| s.id == session_id) else { return };
+        let found = match track {
+            Some(tid) => s.tracks.iter().position(|t| t.id == tid).and_then(|ti| s.tracks[ti].fx.iter().position(|f| f.id == slot_id).map(|k| (Some(ti), k))),
+            None => s.master_fx.iter().position(|f| f.id == slot_id).map(|k| (None, k)),
+        };
+        let Some((ti, k)) = found else { return };
+        if self.mt.fx_undo_for != Some(slot_id) {
+            s.push_undo("Effect Settings");
+            self.mt.fx_undo_for = Some(slot_id);
+        }
+        let slot = match ti {
+            Some(ti) => &mut s.tracks[ti].fx[k],
+            None => &mut s.master_fx[k],
+        };
+        slot.set_params(p);
+        s.touch();
+    }
+
+    /// The Effects Rack panel in the Multitrack editor: the selected track's
+    /// (or bus's, or the master's) live effects.
+    pub fn track_rack(&mut self, ui: &mut Ui) {
+        let Some((si, owner)) = self.rack_owner() else { return };
+        let effects = self.effects.clone();
+        let mut pick_master: Option<bool> = None;
+        let mut pick_track: Option<usize> = None;
+        {
+            let s = &self.sessions[si];
+            let title = match owner {
+                Some(ti) => format!("{}{}", s.tracks[ti].name, if s.tracks[ti].is_bus() { " (bus)" } else { "" }),
+                None => "Master".to_string(),
+            };
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Rack:").color(TEXT_DIM));
+                egui::ComboBox::from_id_source("track_rack_owner").width(ui.available_width() - 30.0).selected_text(title).show_ui(ui, |ui| {
+                    for (i, t) in s.tracks.iter().enumerate() {
+                        let label = if t.is_bus() { format!("{} (bus)", t.name) } else { t.name.clone() };
+                        if ui.selectable_label(owner == Some(i), label).clicked() {
+                            pick_track = Some(i);
+                        }
+                    }
+                    ui.separator();
+                    if ui.selectable_label(owner.is_none(), "Master").clicked() {
+                        pick_master = Some(true);
+                    }
+                });
+            });
+        }
+        if let Some(i) = pick_track {
+            self.mt.rack_master = false;
+            self.sessions[si].selected_track = i;
+        }
+        if pick_master.is_some() {
+            self.mt.rack_master = true;
+        }
+        let Some((si, owner)) = self.rack_owner() else { return };
+        let session_id = self.sessions[si].id;
+        let sr = self.sessions[si].sample_rate;
+        let owner_id = owner.map(|ti| self.sessions[si].tracks[ti].id);
+        let (slots, rack_on): (Vec<(usize, &'static str, bool)>, bool) = {
+            let s = &self.sessions[si];
+            let (fx, on) = match owner {
+                Some(ti) => (&s.tracks[ti].fx, s.tracks[ti].fx_on),
+                None => (&s.master_fx, s.master_fx_on),
+            };
+            (fx.iter().map(|f| (effects.iter().position(|e| e.id == f.effect).unwrap_or(0), f.effect, f.on)).collect(), on)
+        };
+        enum Op {
+            Toggle(usize),
+            Remove(usize),
+            Swap(usize, usize),
+            Add(usize),
+            Edit(usize),
+            Power,
+        }
+        let mut op: Option<Op> = None;
+        let list_h = (ui.available_height() - 64.0).max(80.0);
+        egui::Frame::none().fill(BG_LIST).inner_margin(egui::Margin::same(2.0)).show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(list_h).min_scrolled_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
+                let n = slots.len();
+                for i in 0..crate::app::RACK_SLOTS {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 3.0;
+                        if let Some((idx, _, on)) = slots.get(i).copied() {
+                            if icon_button_sized(ui, Icon::Power, on, if on { "Turn effect off" } else { "Turn effect on" }, vec2(18.0, 18.0), true).clicked() {
+                                op = Some(Op::Toggle(i));
+                            }
+                            ui.label(RichText::new(format!("{:>2}", i + 1)).monospace().color(TEXT_DIM));
+                            let def = &effects[idx];
+                            if ui.selectable_label(false, RichText::new(def.name).color(if on && rack_on { TEXT } else { TEXT_DIM })).on_hover_text("Click to edit settings").clicked() && !def.params.is_empty() {
+                                op = Some(Op::Edit(i));
+                            }
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.menu_button(RichText::new("▸").color(TEXT_DIM), |ui| {
+                                    if !def.params.is_empty() && ui.button("Edit Effect…").clicked() {
+                                        op = Some(Op::Edit(i));
+                                        ui.close_menu();
+                                    }
+                                    if i > 0 && ui.button("Move Up").clicked() {
+                                        op = Some(Op::Swap(i, i - 1));
+                                        ui.close_menu();
+                                    }
+                                    if i + 1 < n && ui.button("Move Down").clicked() {
+                                        op = Some(Op::Swap(i, i + 1));
+                                        ui.close_menu();
+                                    }
+                                    if ui.button("Remove Effect").clicked() {
+                                        op = Some(Op::Remove(i));
+                                        ui.close_menu();
+                                    }
+                                });
+                            });
+                        } else {
+                            icon_button_sized(ui, Icon::Power, false, "Empty slot", vec2(18.0, 18.0), false);
+                            ui.label(RichText::new(format!("{:>2}", i + 1)).monospace().color(Color32::from_rgb(0x66, 0x66, 0x66)));
+                            if i == n {
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    ui.menu_button(RichText::new("▸").color(TEXT), |ui| {
+                                        for cat in std::iter::once(crate::dsp::effects::Category::Basic).chain(crate::dsp::effects::Category::MENU_ORDER) {
+                                            let items: Vec<(usize, &str)> = effects
+                                                .iter()
+                                                .enumerate()
+                                                .filter(|(_, e)| e.category == cat && crate::dsp::effects::rt::supports(e.id))
+                                                .map(|(i, e)| (i, e.name))
+                                                .collect();
+                                            if items.is_empty() {
+                                                continue;
+                                            }
+                                            ui.menu_button(cat.name(), |ui| {
+                                                for (ei, name) in items {
+                                                    if ui.button(name).clicked() {
+                                                        op = Some(Op::Add(ei));
+                                                        ui.close_menu();
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text("Add an effect");
+                                });
+                            }
+                        }
+                    });
+                }
+            });
+        });
+        ui.add_space(3.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Effects run live, before the fader. Only real-time effects are listed.").color(TEXT_DIM).size(10.5));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let tip = if rack_on { "Rack power: on" } else { "Rack power: off (bypassed)" };
+                if icon_button_sized(ui, Icon::Power, rack_on, tip, vec2(22.0, 22.0), true).clicked() {
+                    op = Some(Op::Power);
+                }
+            });
+        });
+        let Some(op) = op else { return };
+        let s = &mut self.sessions[si];
+        let label = match op {
+            Op::Edit(_) => None,
+            Op::Add(_) => Some("Add Effect"),
+            Op::Remove(_) => Some("Remove Effect"),
+            Op::Swap(..) => Some("Reorder Effects"),
+            Op::Toggle(_) | Op::Power => Some("Effect On/Off"),
+        };
+        if let Some(l) = label {
+            s.push_undo(l);
+        }
+        let mut edit_slot: Option<usize> = None;
+        {
+            let (fx, on) = match owner {
+                Some(ti) => {
+                    let t = &mut s.tracks[ti];
+                    (&mut t.fx, &mut t.fx_on)
+                }
+                None => (&mut s.master_fx, &mut s.master_fx_on),
+            };
+            match op {
+                Op::Toggle(i) => fx[i].on = !fx[i].on,
+                Op::Remove(i) => {
+                    fx.remove(i);
+                }
+                Op::Swap(a, b) => fx.swap(a, b),
+                Op::Power => *on = !*on,
+                Op::Add(ei) => {
+                    let def = &effects[ei];
+                    if let Some(slot) = crate::session::FxSlot::new(def.id, def.default_params(), sr) {
+                        fx.push(slot);
+                        if !def.params.is_empty() {
+                            edit_slot = Some(fx.len() - 1);
+                        }
+                    }
+                }
+                Op::Edit(i) => edit_slot = Some(i),
+            }
+        }
+        s.touch();
+        if let Some(i) = edit_slot {
+            let slot = match owner {
+                Some(ti) => s.tracks[ti].fx.get(i).cloned(),
+                None => s.master_fx.get(i).cloned(),
+            };
+            if let Some(slot) = slot {
+                let idx = effects.iter().position(|e| e.id == slot.effect).unwrap_or(0);
+                let slot_id = slot.id;
+                self.mt.fx_undo_for = None;
+                self.close_effect_dialog();
+                self.dialog = Some(Dialog::Effect(crate::app::EffectDialog {
+                    idx,
+                    params: slot.params,
+                    preset: "(Custom)".into(),
+                    previewing: false,
+                    bypass: false,
+                    rendered: None,
+                    last_change: std::time::Instant::now(),
+                    drag_handle: None,
+                    dry: None,
+                    wet: None,
+                    error: None,
+                    rack_slot: None,
+                    track_fx: Some((session_id, owner_id, slot_id)),
+                }));
+            }
+        }
     }
 
     // ------------------------------------------------------------ UI
@@ -1171,6 +1426,12 @@ impl App {
             let lane = Rect::from_min_max(pos2(lanes_x, row.top()), row.max);
             let bg = if ti == s.selected_track { Color32::from_rgb(0x1a, 0x20, 0x26) } else { LANE_BG };
             clip_painter.rect_filled(lane, 0.0, bg);
+            if t.is_bus() {
+                clip_painter.rect_filled(lane, 0.0, Color32::from_rgba_unmultiplied(0x9a, 0x9a, 0xa8, 14));
+                let feeds: Vec<&str> = s.tracks.iter().filter(|x| x.output == Some(t.id) || x.sends.iter().any(|sd| sd.bus == t.id)).map(|x| x.name.as_str()).collect();
+                let text = if feeds.is_empty() { "Bus track: set a track's Out to this bus, or add a send in the Mixer".to_string() } else { format!("Bus track, fed by: {}", feeds.join(", ")) };
+                clip_painter.text(pos2(lanes.left() + 8.0, lane.center().y), Align2::LEFT_CENTER, text, FontId::proportional(11.0), TEXT_DIM);
+            }
             if let Some((a, b)) = sel {
                 let x0 = v.x(a as f64).max(lane.left());
                 let x1 = v.x(b as f64).min(lane.right());
@@ -1673,6 +1934,9 @@ impl App {
         let mut changed = false;
         let mut toggles: Vec<(usize, bool)> = Vec::new(); // (track, true = mute / false = solo)
         let mut view_changed = false;
+        let buses: Vec<(u64, String)> = s.tracks.iter().filter(|t| t.is_bus()).map(|t| (t.id, t.name.clone())).collect();
+        let mut route: Vec<(usize, Option<u64>)> = Vec::new();
+        let mut show_rack: Option<usize> = None;
         for ti in 0..n_tracks {
             let row = rows[ti];
             if row.bottom() < body.top() || row.top() > body.bottom() {
@@ -1710,12 +1974,16 @@ impl App {
                 if r.changed() {
                     changed = true;
                 }
+                let is_bus = t.is_bus();
                 for (label, on, tip, col) in [
                     ("M", t.mute, "Mute", Color32::from_rgb(0x4d, 0xa3, 0xff)),
                     ("S", t.solo, "Solo", Color32::from_rgb(0xe8, 0xc4, 0x3a)),
                     ("R", t.arm, "Arm for Record", RECORD),
                     ("A", t.show_env, "Show volume (yellow) and pan (blue) automation", VOL_ENV_COL),
                 ] {
+                    if is_bus && (label == "S" || label == "R") {
+                        continue;
+                    }
                     let btn = egui::Button::new(RichText::new(label).font(bold(11.0)).color(if on { Color32::BLACK } else { TEXT }))
                         .fill(if on { col } else { Color32::from_rgb(0x2c, 0x2c, 0x2c) })
                         .min_size(vec2(20.0, 18.0));
@@ -1762,6 +2030,33 @@ impl App {
                     }
                 });
             }
+            if inner.height() > 62.0 {
+                child.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    if t.is_bus() {
+                        ui.label(RichText::new("BUS  → Master").color(TEXT_DIM).size(11.0));
+                    } else {
+                        ui.label(RichText::new("Out").color(TEXT_DIM).size(11.0));
+                        let current = t.output.and_then(|id| buses.iter().find(|b| b.0 == id)).map(|b| b.1.clone()).unwrap_or_else(|| "Master".into());
+                        egui::ComboBox::from_id_source(("mt_out", t.id)).width(78.0).selected_text(current).show_ui(ui, |ui| {
+                            if ui.selectable_label(t.output.is_none(), "Master").clicked() {
+                                route.push((ti, None));
+                            }
+                            for (bid, bname) in &buses {
+                                if ui.selectable_label(t.output == Some(*bid), bname).clicked() {
+                                    route.push((ti, Some(*bid)));
+                                }
+                            }
+                        });
+                    }
+                    let n = t.fx.len();
+                    let label = if n == 0 { "fx".to_string() } else { format!("fx {n}") };
+                    let col = if n > 0 && t.fx_on { Color32::from_rgb(0xc7, 0x7d, 0xff) } else { TEXT_DIM };
+                    if ui.add(egui::Button::new(RichText::new(label).color(col).size(11.0)).min_size(vec2(30.0, 18.0))).on_hover_text("Show this track's effects rack").clicked() {
+                        show_rack = Some(ti);
+                    }
+                });
+            }
             // Drag the bottom edge to resize the track.
             let edge = Rect::from_min_max(pos2(row.left(), row.bottom() - 3.0), pos2(lanes_x, row.bottom() + 2.0));
             let er = ui.interact(edge, ui.id().with(("mt_resize", s.id, ti)), Sense::drag()).on_hover_cursor(CursorIcon::ResizeVertical);
@@ -1786,6 +2081,16 @@ impl App {
         }
         if view_changed {
             s.dirty = true;
+        }
+        for (ti, out) in route {
+            s.push_undo("Track Output");
+            s.tracks[ti].output = out;
+            s.touch();
+        }
+        if let Some(ti) = show_rack {
+            s.selected_track = ti;
+            self.mt.rack_master = false;
+            self.actions.push(Action::Status("__show_rack".into()));
         }
         // Empty area under the last track.
         let below = Rect::from_min_max(pos2(body.left(), y.max(body.top())), pos2(lanes_x - 1.0, body.bottom()));
@@ -1923,121 +2228,178 @@ impl App {
         let master_meter = self.meter_db;
         let meters = self.mt.meters.clone();
         let s = &mut self.sessions[si];
+        let buses: Vec<(u64, String)> = s.tracks.iter().filter(|t| t.is_bus()).map(|t| (t.id, t.name.clone())).collect();
+        // Routing and send edits are undoable: keep the state from before this frame.
+        let before = s.tracks.clone();
         let mut changed = false;
+        let mut undo: Option<&'static str> = None;
         let mut toggles: Vec<(usize, bool)> = Vec::new();
-        let fader_h = (rect.height() - 230.0).max(80.0);
-        #[allow(clippy::too_many_arguments)]
-        let strip = |ui: &mut Ui,
-                     name: &mut String,
-                     col: Color32,
-                     vol: &mut f32,
-                     vol_auto: bool,
-                     pan: Option<(&mut f32, bool)>,
-                     flags: Option<(bool, bool, &mut bool)>,
-                     meter: [f32; 2],
-                     changed: &mut bool|
-         -> (bool, bool) {
-            let mut clicked = (false, false);
-            egui::Frame::none().fill(BG_PANEL).inner_margin(egui::Margin::same(6.0)).rounding(3.0).show(ui, |ui| {
-                ui.set_width(96.0);
-                ui.set_min_height(rect.height() - 24.0);
-                ui.vertical_centered(|ui| {
-                    let (r, _) = ui.allocate_exact_size(vec2(92.0, 4.0), Sense::hover());
-                    ui.painter().rect_filled(r, 1.0, col);
-                    if ui.add(egui::TextEdit::singleline(name).desired_width(90.0).horizontal_align(Align::Center)).changed() {
-                        *changed = true;
-                    }
-                    match pan {
-                        Some((p, auto)) => {
-                            ui.label(RichText::new("Pan").color(TEXT_DIM).size(10.5));
-                            if auto {
-                                ui.label(RichText::new("Auto").color(PAN_ENV_COL));
-                            } else {
-                                let r = hot_drag(ui, egui::DragValue::new(p).speed(0.5).range(-100.0..=100.0).fixed_decimals(0));
-                                if r.double_clicked() {
-                                    *p = 0.0;
-                                }
-                                *changed |= r.changed() || r.double_clicked();
-                            }
-                        }
-                        None => {
-                            ui.add_space(34.0);
-                        }
-                    }
-                    match flags {
-                        Some((m, so, arm)) => {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 2.0;
-                                ui.add_space(6.0);
-                                for (label, on, c) in [("M", m, Color32::from_rgb(0x4d, 0xa3, 0xff)), ("S", so, Color32::from_rgb(0xe8, 0xc4, 0x3a)), ("R", *arm, RECORD)] {
-                                    let b = egui::Button::new(RichText::new(label).font(bold(11.0)).color(if on { Color32::BLACK } else { TEXT })).fill(if on { c } else { Color32::from_rgb(0x2c, 0x2c, 0x2c) }).min_size(vec2(26.0, 20.0));
-                                    if ui.add(b).clicked() {
-                                        match label {
-                                            "M" => clicked.0 = true,
-                                            "S" => clicked.1 = true,
-                                            _ => *arm = !*arm,
-                                        }
-                                    }
-                                }
-                            });
-                        }
-                        None => {
-                            ui.add_space(24.0);
-                        }
-                    }
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(10.0);
-                        ui.spacing_mut().slider_width = fader_h;
-                        let r = ui.add_enabled(!vol_auto, egui::Slider::new(vol, -60.0..=12.0).vertical().show_value(false));
-                        if r.double_clicked() {
-                            *vol = 0.0;
-                        }
-                        *changed |= r.changed() || r.double_clicked();
-                        let (mr, _) = ui.allocate_exact_size(vec2(12.0, fader_h), Sense::hover());
-                        draw_meter(ui.painter(), mr, meter);
-                    });
-                    if vol_auto {
-                        ui.label(RichText::new("Auto").color(VOL_ENV_COL));
-                    } else {
-                        let r = hot_drag(ui, egui::DragValue::new(vol).speed(0.2).range(-96.0..=12.0).fixed_decimals(1).suffix(" dB"));
-                        *changed |= r.changed();
-                    }
-                });
+        let mut open_rack: Option<Option<usize>> = None;
+        let fader_h = (rect.height() - 330.0).max(70.0);
+        let strip_h = rect.height() - 24.0;
+        let mute_col = Color32::from_rgb(0x4d, 0xa3, 0xff);
+        let solo_col = Color32::from_rgb(0xe8, 0xc4, 0x3a);
+        let fx_col = Color32::from_rgb(0xc7, 0x7d, 0xff);
+        let small_btn = |ui: &mut Ui, label: &str, on: bool, col: Color32| -> bool {
+            ui.add(egui::Button::new(RichText::new(label).font(bold(11.0)).color(if on { Color32::BLACK } else { TEXT })).fill(if on { col } else { Color32::from_rgb(0x2c, 0x2c, 0x2c) }).min_size(vec2(26.0, 20.0))).clicked()
+        };
+        let fader = |ui: &mut Ui, vol: &mut f32, auto: bool, meter: [f32; 2], changed: &mut bool| {
+            ui.horizontal(|ui| {
+                ui.add_space(10.0);
+                ui.spacing_mut().slider_width = fader_h;
+                let r = ui.add_enabled(!auto, egui::Slider::new(vol, -60.0..=12.0).vertical().show_value(false));
+                if r.double_clicked() {
+                    *vol = 0.0;
+                }
+                *changed |= r.changed() || r.double_clicked();
+                let (mr, _) = ui.allocate_exact_size(vec2(12.0, fader_h), Sense::hover());
+                draw_meter(ui.painter(), mr, meter);
             });
-            clicked
+            if auto {
+                ui.label(RichText::new("Auto").color(VOL_ENV_COL));
+            } else {
+                *changed |= hot_drag(ui, egui::DragValue::new(vol).speed(0.2).range(-96.0..=12.0).fixed_decimals(1).suffix(" dB")).changed();
+            }
         };
         ui.allocate_ui_at_rect(rect.shrink(6.0), |ui| {
             egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     for (ti, t) in s.tracks.iter_mut().enumerate() {
-                        let col = colour(t.colour);
-                        let (va, pa) = (!t.vol_env.is_empty(), !t.pan_env.is_empty());
-                        let (mute_c, solo_c) = strip(
-                            ui,
-                            &mut t.name,
-                            col,
-                            &mut t.volume_db,
-                            va,
-                            Some((&mut t.pan, pa)),
-                            Some((t.mute, t.solo, &mut t.arm)),
-                            meters.get(ti).copied().unwrap_or([-120.0; 2]),
-                            &mut changed,
-                        );
-                        if mute_c {
-                            toggles.push((ti, true));
-                        }
-                        if solo_c {
-                            toggles.push((ti, false));
-                        }
+                        let meter = meters.get(ti).copied().unwrap_or([-120.0; 2]);
+                        egui::Frame::none().fill(if t.is_bus() { Color32::from_rgb(0x34, 0x34, 0x3c) } else { BG_PANEL }).inner_margin(egui::Margin::same(6.0)).rounding(3.0).show(ui, |ui| {
+                            ui.set_width(112.0);
+                            ui.set_min_height(strip_h);
+                            ui.vertical_centered(|ui| {
+                                let (r, _) = ui.allocate_exact_size(vec2(108.0, 4.0), Sense::hover());
+                                ui.painter().rect_filled(r, 1.0, colour(t.colour));
+                                if ui.add(egui::TextEdit::singleline(&mut t.name).desired_width(104.0).horizontal_align(Align::Center)).changed() {
+                                    changed = true;
+                                }
+                                // Effects rack summary.
+                                let names: Vec<&str> = t.fx.iter().map(|f| f.effect).collect();
+                                let label = if names.is_empty() { "fx: none".to_string() } else { format!("fx: {}", names.len()) };
+                                if ui.add(egui::Button::new(RichText::new(label).size(11.0).color(if names.is_empty() || !t.fx_on { TEXT_DIM } else { fx_col })).min_size(vec2(100.0, 18.0))).on_hover_text("Open this track's effects rack").clicked() {
+                                    open_rack = Some(Some(ti));
+                                }
+                                // Sends.
+                                if !t.is_bus() {
+                                    let mut remove: Option<usize> = None;
+                                    for (k, sd) in t.sends.iter_mut().enumerate() {
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 2.0;
+                                            let name = buses.iter().find(|b| b.0 == sd.bus).map(|b| b.1.clone()).unwrap_or_else(|| "?".into());
+                                            egui::ComboBox::from_id_source(("send_bus", t.id, k)).width(44.0).selected_text(RichText::new(name).size(10.5)).show_ui(ui, |ui| {
+                                                for (bid, bname) in &buses {
+                                                    if ui.selectable_label(sd.bus == *bid, bname).clicked() {
+                                                        sd.bus = *bid;
+                                                        changed = true;
+                                                    }
+                                                }
+                                            });
+                                            changed |= hot_drag(ui, egui::DragValue::new(&mut sd.level_db).speed(0.2).range(-60.0..=12.0).fixed_decimals(0)).on_hover_text("Send level (dB)").changed();
+                                            if ui.selectable_label(sd.pre, RichText::new("pre").size(10.0)).on_hover_text("Pre-fader send (unaffected by the track's volume)").clicked() {
+                                                sd.pre = !sd.pre;
+                                                changed = true;
+                                            }
+                                            if ui.small_button("×").clicked() {
+                                                remove = Some(k);
+                                            }
+                                        });
+                                    }
+                                    if let Some(k) = remove {
+                                        t.sends.remove(k);
+                                        changed = true;
+                                        undo = Some("Remove Send");
+                                    }
+                                    let can_send = !buses.is_empty();
+                                    if ui.add_enabled(can_send, egui::Button::new(RichText::new("+ Send").size(11.0))).on_hover_text(if can_send { "Send to a bus" } else { "Add a bus track first (Multitrack > Add Bus Track)" }).clicked() {
+                                        t.sends.push(crate::session::Send { bus: buses[0].0, level_db: -6.0, pre: false });
+                                        changed = true;
+                                        undo = Some("Add Send");
+                                    }
+                                } else {
+                                    ui.label(RichText::new("Bus").color(TEXT_DIM).size(11.0));
+                                }
+                                ui.separator();
+                                // Pan.
+                                ui.label(RichText::new("Pan").color(TEXT_DIM).size(10.5));
+                                if t.pan_env.is_empty() {
+                                    let r = hot_drag(ui, egui::DragValue::new(&mut t.pan).speed(0.5).range(-100.0..=100.0).fixed_decimals(0));
+                                    if r.double_clicked() {
+                                        t.pan = 0.0;
+                                    }
+                                    changed |= r.changed() || r.double_clicked();
+                                } else {
+                                    ui.label(RichText::new("Auto").color(PAN_ENV_COL));
+                                }
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 2.0;
+                                    ui.add_space(8.0);
+                                    if small_btn(ui, "M", t.mute, mute_col) {
+                                        toggles.push((ti, true));
+                                    }
+                                    if !t.is_bus() {
+                                        if small_btn(ui, "S", t.solo, solo_col) {
+                                            toggles.push((ti, false));
+                                        }
+                                        if small_btn(ui, "R", t.arm, RECORD) {
+                                            t.arm = !t.arm;
+                                        }
+                                    }
+                                });
+                                ui.add_space(4.0);
+                                fader(ui, &mut t.volume_db, !t.vol_env.is_empty(), meter, &mut changed);
+                                // Output.
+                                if !t.is_bus() {
+                                    let current = t.output.and_then(|id| buses.iter().find(|b| b.0 == id)).map(|b| b.1.clone()).unwrap_or_else(|| "Master".into());
+                                    egui::ComboBox::from_id_source(("mix_out", t.id)).width(96.0).selected_text(format!("→ {current}")).show_ui(ui, |ui| {
+                                        if ui.selectable_label(t.output.is_none(), "Master").clicked() {
+                                            t.output = None;
+                                            changed = true;
+                                            undo = Some("Track Output");
+                                        }
+                                        for (bid, bname) in &buses {
+                                            if ui.selectable_label(t.output == Some(*bid), bname).clicked() {
+                                                t.output = Some(*bid);
+                                                changed = true;
+                                                undo = Some("Track Output");
+                                            }
+                                        }
+                                    });
+                                } else {
+                                    ui.label(RichText::new("→ Master").color(TEXT_DIM).size(11.0));
+                                }
+                            });
+                        });
                     }
                     ui.add_space(12.0);
-                    let mut name = "Mix".to_string();
-                    strip(ui, &mut name, Color32::WHITE, &mut s.master_db, false, None, None, master_meter, &mut changed);
+                    // Master strip.
+                    egui::Frame::none().fill(BG_PANEL).inner_margin(egui::Margin::same(6.0)).rounding(3.0).show(ui, |ui| {
+                        ui.set_width(112.0);
+                        ui.set_min_height(strip_h);
+                        ui.vertical_centered(|ui| {
+                            let (r, _) = ui.allocate_exact_size(vec2(108.0, 4.0), Sense::hover());
+                            ui.painter().rect_filled(r, 1.0, Color32::WHITE);
+                            ui.label(RichText::new("Mix").font(bold(12.0)).color(Color32::WHITE));
+                            let n = s.master_fx.len();
+                            let label = if n == 0 { "fx: none".to_string() } else { format!("fx: {n}") };
+                            if ui.add(egui::Button::new(RichText::new(label).size(11.0).color(if n == 0 || !s.master_fx_on { TEXT_DIM } else { fx_col })).min_size(vec2(100.0, 18.0))).on_hover_text("Open the master effects rack").clicked() {
+                                open_rack = Some(None);
+                            }
+                            ui.add_space(fader_h.min(10.0));
+                            ui.separator();
+                            ui.add_space(70.0);
+                            fader(ui, &mut s.master_db, false, master_meter, &mut changed);
+                        });
+                    });
                 });
             });
         });
+        // Mute/solo and structural changes are undoable; levels just mark the session.
+        if let Some(l) = undo {
+            s.push_undo_from(l, before);
+        }
         for (ti, mute) in toggles {
             s.push_undo(if mute { "Mute Track" } else { "Solo Track" });
             let t = &mut s.tracks[ti];
@@ -2050,6 +2412,16 @@ impl App {
         }
         if changed {
             s.touch();
+        }
+        if let Some(owner) = open_rack {
+            match owner {
+                Some(ti) => {
+                    s.selected_track = ti;
+                    self.mt.rack_master = false;
+                }
+                None => self.mt.rack_master = true,
+            }
+            self.show_panel(crate::app::Panel::EffectsRack);
         }
     }
 }

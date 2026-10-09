@@ -158,6 +158,7 @@ impl App {
                         let in_mt = has_session && self.mode == Mode::Multitrack;
                         let has_time_sel = self.session().and_then(|s| s.sel_range()).is_some();
                         if item(ui, "Add Audio Track", "Alt+A", has_session) { self.actions.push(Action::MtAddTrack); }
+                        if item(ui, "Add Bus Track", "Alt+B", has_session) { self.actions.push(Action::MtAddBus); }
                         if item(ui, "Delete Selected Track", "", has_session) { self.actions.push(Action::MtDeleteTrack); }
                         ui.separator();
                         if item(ui, "Insert Files…", "", has_session) { self.actions.push(Action::MtInsertFiles); }

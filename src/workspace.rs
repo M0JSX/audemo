@@ -205,6 +205,11 @@ impl App {
     }
 
     pub fn effects_rack(&mut self, ui: &mut Ui) {
+        // In the Multitrack editor the panel shows the selected track's rack.
+        if self.mode == crate::app::Mode::Multitrack && self.session().is_some() {
+            self.track_rack(ui);
+            return;
+        }
         let effects = self.effects.clone();
         let mut changed = false;
         let mut edit: Option<usize> = None;
@@ -377,6 +382,7 @@ impl App {
                 wet: None,
                 error: None,
                 rack_slot: Some(i),
+                track_fx: None,
             }));
         }
     }

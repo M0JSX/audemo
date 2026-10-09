@@ -109,6 +109,7 @@ impl NativeMenu {
 
         let multitrack = Submenu::new("Multitrack", true);
         let _ = multitrack.append(&item("mt_add_track", "Add Audio Track", acc_mods(Modifiers::ALT, Code::KeyA)));
+        let _ = multitrack.append(&item("mt_add_bus", "Add Bus Track", acc_mods(Modifiers::ALT, Code::KeyB)));
         let _ = multitrack.append(&item("mt_delete_track", "Delete Selected Track", None));
         let _ = multitrack.append(&sep());
         let _ = multitrack.append(&item("mt_insert", "Insert Files…", None));
@@ -288,6 +289,7 @@ impl App {
             "new_session" => Action::NewSession,
             "mt_add_track" => Action::MtAddTrack,
             "mt_delete_track" => Action::MtDeleteTrack,
+            "mt_add_bus" => Action::MtAddBus,
             "mt_insert" => Action::MtInsertFiles,
             "mt_insert_doc" => match self.doc() {
                 Some(d) => Action::MtInsertDoc(d.id),

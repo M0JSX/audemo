@@ -14,7 +14,7 @@ The interface uses Adobe's open-source Source Sans 3 and Source Code Pro typefac
 - **Open** WAV, AIFF, FLAC, MP3, OGG/Vorbis, M4A/AAC, ALAC, CAF and MKV/WebM audio (drag files onto the window, or pass them on the command line).
 - **Save** WAV as 16-bit, 24-bit or 32-bit integer, or 32-bit float, with optional TPDF dither.
 - **Workspace** laid out like Audition's default: Files / Favorites, then Media Browser / Effects Rack / Markers / Properties, then History down the left; the Editor in the centre with its transport bar; Levels / Frequency Analysis / Phase Meter and Selection/View along the bottom; History / Match Loudness at the bottom left. Panel groups resize, and Window > Workspace > Reset to Default restores the layout.
-- **Multitrack editor** (toolbar *Multitrack*, or 0): sessions of tracks with volume, pan, mute, solo and record-arm; drag files from the Files panel (or the desktop) onto tracks; move clips between tracks, trim their edges, drag fade handles, set clip gain, split at the playhead (Ctrl+K), with snapping to clip edges, the cursor and the selection. The mix plays live as you edit. Arm a track and record onto it while the other tracks play. **Volume and pan automation**: press A on a track to show its yellow (volume) and blue (pan) lines; drag or double-click a line to add points, drag points, double-click one to delete it, right-click to clear. Overlapping clips on a track **crossfade automatically** (equal-power). Peak **meters** on every track. **Recording latency compensation** (Preferences) lines overdubs up with what you heard. A **Mixer** view with faders, pan and meters for every track and the master. **Mixdown Session to New File** (entire session or time selection). Clips stay linked to their files, so edits made in the Waveform editor (double-click a clip) are heard in the session. Sessions save as `.audemo` files, with any unsaved audio written to a folder beside them.
+- **Multitrack editor** (toolbar *Multitrack*, or 0): sessions of tracks with volume, pan, mute, solo and record-arm; drag files from the Files panel (or the desktop) onto tracks; move clips between tracks, trim their edges, drag fade handles, set clip gain, split at the playhead (Ctrl+K), with snapping to clip edges, the cursor and the selection. The mix plays live as you edit. Arm a track and record onto it while the other tracks play. **Volume and pan automation**: press A on a track to show its yellow (volume) and blue (pan) lines; drag or double-click a line to add points, drag points, double-click one to delete it, right-click to clear. Overlapping clips on a track **crossfade automatically** (equal-power). Peak **meters** on every track. **Recording latency compensation** (Preferences) lines overdubs up with what you heard. **Track effects racks**: every track, bus and the master has a 16-slot rack of real-time effects (EQs and filters, compressors, limiter, gate, de-esser, delay, echo, chorus/flanger, reverb, distortion, stereo tools), edited in the Effects Rack panel and heard live as the session plays. **Bus tracks** (Alt+B) take tracks routed to them (Out) and **sends** (pre- or post-fader) and have their own rack and fader. A **Mixer** view with faders, pan, meters, sends, output routing and rack access for every track, bus and the master. **Mixdown Session to New File** (entire session or time selection). Clips stay linked to their files, so edits made in the Waveform editor (double-click a clip) are heard in the session. Sessions save as `.audemo` files, with any unsaved audio written to a folder beside them.
 - **Waveform editor** with an overview/zoom navigator, time ruler, per-channel lanes, amplitude ruler in dB, sample-level zoom and channel enable toggles (edit L or R only).
 - **Spectral frequency display** (Shift+D) shown under the waveform.
 - **Edit**: cut, copy, paste, paste to new, delete, crop, select all, convert sample rate and channel count.
@@ -79,7 +79,7 @@ All processing is 32-bit float. Effects run on a background thread, so the windo
 | Capture noise print | Shift+P |
 | New multitrack session / new audio file | Ctrl+N / Ctrl+Shift+N |
 | Waveform / Multitrack editor | 9 / 0 |
-| Add audio track (Multitrack) | Alt+A |
+| Add audio track / bus track (Multitrack) | Alt+A / Alt+B |
 | Split clip at playhead (Multitrack) | Ctrl+K |
 | Snap off while dragging clips | hold Alt |
 | Scroll tracks | wheel over the track headers, or Alt+wheel |
@@ -149,6 +149,7 @@ src/
   workspace.rs   Favorites, Media Browser, Effects Rack and Properties panels
   analysis_ui.rs Frequency Analysis, Phase Meter, Match Loudness, Amplitude Statistics
   liverack.rs    real-time Effects Rack renderer (and the shared stream renderer)
+  dsp/effects/rt.rs  streaming versions of 24 effects for track, bus and master racks
   session.rs     multitrack sessions: tracks, clips, mixing, undo, .audemo files
   mt_ui.rs       Multitrack editor, Mixer, recording to tracks, mixdown
   prefs.rs       saved preferences (audio devices, recent files)
@@ -171,6 +172,6 @@ preview are generated from that definition.
 
 1. ~~Recording fixes, Audio Hardware preferences, Audition workspace layout~~ (done)
 2. ~~Real-time Effects Rack, remaining Audition effects, Match Loudness, analysis panels~~ (done)
-3. Multitrack sessions: ~~tracks, clips, Mixer, mixdown, recording~~ (0.6), ~~automation, crossfades, track meters, latency compensation~~ (0.6.5); next: per-track effects racks, buses and sends
+3. Multitrack sessions: ~~tracks, clips, Mixer, mixdown, recording~~ (0.6), ~~automation, crossfades, track meters, latency compensation~~ (0.6.5), ~~track/bus/master effects racks, bus tracks, sends~~ (0.7) — done
 4. Spectral selection/healing tools, Diagnostics panel, batch processing
 5. MP3/FLAC/AAC export, metadata, VST3/AU plug-in hosting

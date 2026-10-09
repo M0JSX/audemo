@@ -48,18 +48,18 @@ pub fn defs() -> Vec<EffectDef> {
     ]
 }
 
-struct Comb {
+pub(super) struct Comb {
     buf: Vec<f32>,
     idx: usize,
     store: f32,
 }
 
 impl Comb {
-    fn new(len: usize) -> Self {
+    pub(super) fn new(len: usize) -> Self {
         Comb { buf: vec![0.0; len.max(1)], idx: 0, store: 0.0 }
     }
     #[inline]
-    fn process(&mut self, x: f32, feedback: f32, damp: f32) -> f32 {
+    pub(super) fn process(&mut self, x: f32, feedback: f32, damp: f32) -> f32 {
         let out = self.buf[self.idx];
         self.store = out * (1.0 - damp) + self.store * damp;
         self.buf[self.idx] = x + self.store * feedback;
@@ -68,17 +68,17 @@ impl Comb {
     }
 }
 
-struct AllPass {
+pub(super) struct AllPass {
     buf: Vec<f32>,
     idx: usize,
 }
 
 impl AllPass {
-    fn new(len: usize) -> Self {
+    pub(super) fn new(len: usize) -> Self {
         AllPass { buf: vec![0.0; len.max(1)], idx: 0 }
     }
     #[inline]
-    fn process(&mut self, x: f32) -> f32 {
+    pub(super) fn process(&mut self, x: f32) -> f32 {
         let b = self.buf[self.idx];
         let out = -x + b;
         self.buf[self.idx] = x + b * 0.5;
@@ -87,9 +87,9 @@ impl AllPass {
     }
 }
 
-const COMBS: [usize; 8] = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617];
-const ALLPASSES: [usize; 4] = [556, 441, 341, 225];
-const SPREAD: usize = 23;
+pub(super) const COMBS: [usize; 8] = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617];
+pub(super) const ALLPASSES: [usize; 4] = [556, 441, 341, 225];
+pub(super) const SPREAD: usize = 23;
 
 pub(super) fn studio_reverb(i: &[Vec<f32>], c: &Ctx, p: &Params) -> Res {
     let sr = c.sample_rate as f32;

@@ -10,6 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::dsp::effects::fade_shape;
+use crate::dsp::effects::rt::{self, RtEffect};
+use crate::dsp::effects::EffectDef;
+use crate::dsp::params::Params;
+use std::sync::Mutex;
 use crate::dsp::peaks::PeakCache;
 use crate::dsp::util::db_to_lin;
 use crate::engine::Buffer;
@@ -224,6 +228,88 @@ pub fn crossfade_pairs(clips: &[Clip]) -> Vec<(usize, usize)> {
     out
 }
 
+/// A live effect instance shared between the session and the audio thread.
+pub type SharedFx = Arc<Mutex<Box<dyn RtEffect>>>;
+
+/// One slot of a track, bus or master effects rack.
+#[derive(Clone)]
+pub struct FxSlot {
+    /// Stable identity (effect windows find their slot by it).
+    pub id: u64,
+    pub effect: &'static str,
+    pub params: Params,
+    pub on: bool,
+    pub rt: SharedFx,
+}
+
+impl FxSlot {
+    pub fn new(effect: &'static str, params: Params, sample_rate: u32) -> Option<Self> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let e = rt::make(effect, &params, sample_rate)?;
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(FxSlot { id, effect, params, on: true, rt: Arc::new(Mutex::new(e)) })
+    }
+
+    /// New parameters, applied to the running instance without resetting it.
+    pub fn set_params(&mut self, p: Params) {
+        if let Ok(mut e) = self.rt.lock() {
+            e.set_params(&p);
+        }
+        self.params = p;
+    }
+
+    /// Push this slot's stored parameters to its instance (after undo).
+    pub fn sync(&self) {
+        if let Ok(mut e) = self.rt.lock() {
+            e.set_params(&self.params);
+        }
+    }
+
+    pub fn reset(&self) {
+        if let Ok(mut e) = self.rt.lock() {
+            e.reset();
+        }
+    }
+
+    /// The same effect and settings with its own, fresh state (for mixdown).
+    fn fresh(&self, sample_rate: u32) -> FxSlot {
+        let mut s = self.clone();
+        if let Some(e) = rt::make(self.effect, &self.params, sample_rate) {
+            s.rt = Arc::new(Mutex::new(e));
+        }
+        s
+    }
+}
+
+impl PartialEq for FxSlot {
+    fn eq(&self, o: &Self) -> bool {
+        self.effect == o.effect && self.params == o.params && self.on == o.on
+    }
+}
+
+impl std::fmt::Debug for FxSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FxSlot({}, on={})", self.effect, self.on)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TrackKind {
+    #[default]
+    Audio,
+    /// No clips: mixes the tracks routed or sent to it.
+    Bus,
+}
+
+/// A send from a track to a bus.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Send {
+    pub bus: u64,
+    pub level_db: f32,
+    /// Taken before the track's fader (true) or after it.
+    pub pre: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Track {
     pub id: u64,
@@ -243,6 +329,14 @@ pub struct Track {
     pub pan_env: Envelope,
     /// Show the automation lines over the track.
     pub show_env: bool,
+    pub kind: TrackKind,
+    /// Bus track this track feeds (None = the master).
+    pub output: Option<u64>,
+    pub sends: Vec<Send>,
+    /// Effects rack (runs before the fader).
+    pub fx: Vec<FxSlot>,
+    /// Rack power.
+    pub fx_on: bool,
 }
 
 impl Track {
@@ -261,7 +355,16 @@ impl Track {
             vol_env: Envelope::default(),
             pan_env: Envelope::default(),
             show_env: false,
+            kind: TrackKind::Audio,
+            output: None,
+            sends: Vec::new(),
+            fx: Vec::new(),
+            fx_on: true,
         }
+    }
+
+    pub fn is_bus(&self) -> bool {
+        self.kind == TrackKind::Bus
     }
 
     pub fn pan_gains(&self) -> (f32, f32) {
@@ -283,6 +386,8 @@ pub struct SessionSnapshot {
     pub label: String,
     pub tracks: Vec<Track>,
     pub master_db: f32,
+    pub master_fx: Vec<FxSlot>,
+    pub master_fx_on: bool,
 }
 
 /// Everything the mixer needs, cheap to clone and share with a render thread.
@@ -292,6 +397,22 @@ pub struct MixState {
     pub tracks: Vec<Track>,
     pub sources: BTreeMap<u64, Arc<Source>>,
     pub master_db: f32,
+    pub master_fx: Vec<FxSlot>,
+    pub master_fx_on: bool,
+}
+
+impl MixState {
+    /// A copy whose effects have their own fresh state, so an offline render
+    /// (mixdown) neither hears nor disturbs the live instances.
+    pub fn with_fresh_fx(&self) -> MixState {
+        let sr = self.sample_rate;
+        let mut m = self.clone();
+        for t in m.tracks.iter_mut() {
+            t.fx = t.fx.iter().map(|s| s.fresh(sr)).collect();
+        }
+        m.master_fx = m.master_fx.iter().map(|s| s.fresh(sr)).collect();
+        m
+    }
 }
 
 pub struct Session {
@@ -302,6 +423,8 @@ pub struct Session {
     pub tracks: Vec<Track>,
     pub sources: BTreeMap<u64, Arc<Source>>,
     pub master_db: f32,
+    pub master_fx: Vec<FxSlot>,
+    pub master_fx_on: bool,
     pub cursor: usize,
     pub sel: Option<(usize, usize)>,
     pub view_start: f64,
@@ -327,6 +450,8 @@ impl Session {
             tracks: Vec::new(),
             sources: BTreeMap::new(),
             master_db: 0.0,
+            master_fx: Vec::new(),
+            master_fx_on: true,
             cursor: 0,
             sel: None,
             view_start: 0.0,
@@ -413,7 +538,29 @@ impl Session {
     // ------------------------------------------------------------ undo
 
     pub fn push_undo(&mut self, label: &str) {
-        self.undo.push(SessionSnapshot { label: label.to_string(), tracks: self.tracks.clone(), master_db: self.master_db });
+        self.undo.push(SessionSnapshot {
+            label: label.to_string(),
+            tracks: self.tracks.clone(),
+            master_db: self.master_db,
+            master_fx: self.master_fx.clone(),
+            master_fx_on: self.master_fx_on,
+        });
+        if self.undo.len() > MAX_SESSION_UNDO {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+    }
+
+    /// Record an undo step for a change already made, given the tracks as
+    /// they were before it.
+    pub fn push_undo_from(&mut self, label: &str, tracks_before: Vec<Track>) {
+        self.undo.push(SessionSnapshot {
+            label: label.to_string(),
+            tracks: tracks_before,
+            master_db: self.master_db,
+            master_fx: self.master_fx.clone(),
+            master_fx_on: self.master_fx_on,
+        });
         if self.undo.len() > MAX_SESSION_UNDO {
             self.undo.remove(0);
         }
@@ -421,8 +568,20 @@ impl Session {
     }
 
     fn restore(&mut self, s: SessionSnapshot) -> SessionSnapshot {
-        let cur = SessionSnapshot { label: s.label.clone(), tracks: std::mem::replace(&mut self.tracks, s.tracks), master_db: self.master_db };
+        let cur = SessionSnapshot {
+            label: s.label.clone(),
+            tracks: std::mem::replace(&mut self.tracks, s.tracks),
+            master_db: self.master_db,
+            master_fx: std::mem::replace(&mut self.master_fx, s.master_fx),
+            master_fx_on: self.master_fx_on,
+        };
         self.master_db = s.master_db;
+        self.master_fx_on = s.master_fx_on;
+        // Live effect instances are shared with the snapshot: give them back
+        // the restored settings.
+        for slot in self.tracks.iter().flat_map(|t| t.fx.iter()).chain(self.master_fx.iter()) {
+            slot.sync();
+        }
         self.selected_track = self.selected_track.min(self.tracks.len().saturating_sub(1));
         self.selected_clips.retain(|id| self.tracks.iter().any(|t| t.clips.iter().any(|c| c.id == *id)));
         self.touch();
@@ -454,6 +613,39 @@ impl Session {
         i
     }
 
+    /// Index of the first audio (non-bus) track at or after `i`, adding one
+    /// if there isn't any.
+    pub fn audio_track_at_or_after(&mut self, i: usize) -> usize {
+        if let Some(j) = (i..self.tracks.len()).chain(0..i.min(self.tracks.len())).find(|&j| !self.tracks[j].is_bus()) {
+            return j;
+        }
+        let id = self.new_id();
+        let n = self.tracks.len();
+        self.tracks.push(Track::new(id, format!("Track {}", n + 1), TRACK_COLOURS[n % TRACK_COLOURS.len()]));
+        self.touch();
+        n
+    }
+
+    pub fn add_bus(&mut self) -> usize {
+        self.push_undo("Add Bus Track");
+        let id = self.new_id();
+        let n = self.tracks.iter().filter(|t| t.is_bus()).count();
+        let letter = (b'A' + (n % 26) as u8) as char;
+        let mut t = Track::new(id, format!("Bus {letter}"), [0x9a, 0x9a, 0xa8]);
+        t.kind = TrackKind::Bus;
+        t.height = 64.0;
+        self.tracks.push(t);
+        self.touch();
+        self.tracks.len() - 1
+    }
+
+    /// Clear every effect's state (before playback starts).
+    pub fn reset_fx(&self) {
+        for slot in self.tracks.iter().flat_map(|t| t.fx.iter()).chain(self.master_fx.iter()) {
+            slot.reset();
+        }
+    }
+
     pub fn remove_track(&mut self, i: usize) {
         if i >= self.tracks.len() {
             return;
@@ -478,7 +670,7 @@ impl Session {
     /// Place a whole source on `track` at `at`; returns the clip id.
     pub fn insert_clip(&mut self, track: usize, source: u64, at: usize) -> Option<u64> {
         let len = self.source_len(source);
-        if len == 0 || track >= self.tracks.len() {
+        if len == 0 || track >= self.tracks.len() || self.tracks[track].is_bus() {
             return None;
         }
         let name = self.sources[&source].name.clone();
@@ -523,6 +715,8 @@ impl Session {
     pub fn move_clip(&mut self, id: u64, start: usize, track: usize) {
         let Some((t, c)) = self.find_clip(id) else { return };
         let track = track.min(self.tracks.len() - 1);
+        // Clips can't live on bus tracks.
+        let track = if self.tracks[track].is_bus() { t } else { track };
         if t == track {
             if self.tracks[t].clips[c].start != start {
                 self.tracks[t].clips[c].start = start;
@@ -671,74 +865,236 @@ impl Session {
                 t
             })
             .collect();
-        MixState { sample_rate: self.sample_rate, tracks, sources: self.sources.clone(), master_db: self.master_db }
+        MixState {
+            sample_rate: self.sample_rate,
+            tracks,
+            sources: self.sources.clone(),
+            master_db: self.master_db,
+            master_fx: self.master_fx.clone(),
+            master_fx_on: self.master_fx_on,
+        }
     }
 }
 
 // ---------------------------------------------------------------- mixing
 
-/// Render frames [a, b) of the stereo mix.
+/// Render frames [a, b) of the stereo mix offline (mixdown), with fresh
+/// effect state, in blocks.
 pub fn mix_range(m: &MixState, a: usize, b: usize) -> Vec<Vec<f32>> {
-    let mut out = vec![Vec::new(), Vec::new()];
-    mix_into(m, a, b, &mut out, &mut []);
+    let fresh = m.with_fresh_fx();
+    let mut out = vec![Vec::with_capacity(b.saturating_sub(a)), Vec::with_capacity(b.saturating_sub(a))];
+    let mut tmp = vec![Vec::new(), Vec::new()];
+    let mut scratch = MixScratch::default();
+    let mut c = a;
+    while c < b {
+        let e = (c + 8192).min(b);
+        mix_into(&fresh, c, e, &mut tmp, &mut [], &mut scratch);
+        out[0].extend_from_slice(&tmp[0]);
+        out[1].extend_from_slice(&tmp[1]);
+        c = e;
+    }
     out
 }
 
-/// Render frames [a, b) of the mix into `out` (two channels), reusing its
-/// allocation: this runs inside the audio callback during playback. Each
-/// track's peak (L, R) is max-ed into `peaks[track]` when there is room.
-pub fn mix_into(m: &MixState, a: usize, b: usize, out: &mut [Vec<f32>], peaks: &mut [[f32; 2]]) {
+/// Per-track working buffers, kept between blocks so mixing in the audio
+/// callback doesn't allocate.
+#[derive(Default)]
+pub struct MixScratch {
+    bufs: Vec<[Vec<f32>; 2]>,
+}
+
+impl MixScratch {
+    /// Make room for `tracks` tracks of `n` frames (call off the audio thread).
+    pub fn reserve(&mut self, tracks: usize, n: usize) {
+        let want = tracks + 8;
+        if self.bufs.len() < want {
+            self.bufs.resize_with(want, || [Vec::new(), Vec::new()]);
+        }
+        for b in self.bufs.iter_mut() {
+            for c in b.iter_mut() {
+                if c.capacity() < n {
+                    c.reserve(n - c.len());
+                }
+            }
+        }
+    }
+
+    fn prepare(&mut self, tracks: usize, n: usize) {
+        if self.bufs.len() < tracks {
+            self.bufs.resize_with(tracks, || [Vec::new(), Vec::new()]);
+        }
+        for b in self.bufs[..tracks].iter_mut() {
+            for c in b.iter_mut() {
+                c.clear();
+                c.resize(n, 0.0);
+            }
+        }
+    }
+
+    /// bufs[dst] += bufs[src] * g
+    fn add(&mut self, src: usize, dst: usize, g: f32) {
+        if src == dst {
+            return;
+        }
+        let (s, d) = if src < dst {
+            let (lo, hi) = self.bufs.split_at_mut(dst);
+            (&lo[src], &mut hi[0])
+        } else {
+            let (lo, hi) = self.bufs.split_at_mut(src);
+            (&hi[0], &mut lo[dst])
+        };
+        for c in 0..2 {
+            for (o, i) in d[c].iter_mut().zip(&s[c]) {
+                *o += i * g;
+            }
+        }
+    }
+}
+
+/// Run a rack over a stereo block. A slot the UI is busy updating is
+/// skipped for this block rather than waited for.
+fn run_rack(fx: &[FxSlot], on: bool, l: &mut [f32], r: &mut [f32]) {
+    if !on {
+        return;
+    }
+    for slot in fx.iter().filter(|s| s.on) {
+        // The UI only holds a slot's lock for a few microseconds while it
+        // updates settings, so spin briefly rather than skip the effect.
+        for _ in 0..20_000 {
+            if let Ok(mut e) = slot.rt.try_lock() {
+                e.process(l, r);
+                break;
+            }
+            std::hint::spin_loop();
+        }
+    }
+}
+
+/// Apply a track's (or bus's) volume and pan, with automation.
+fn fader(t: &Track, a: usize, l: &mut [f32], r: &mut [f32]) {
+    if t.vol_env.is_empty() && t.pan_env.is_empty() {
+        let g = db_to_lin(t.volume_db);
+        let (pl, pr) = t.pan_gains();
+        l.iter_mut().for_each(|s| *s *= g * pl);
+        r.iter_mut().for_each(|s| *s *= g * pr);
+        return;
+    }
+    for k in 0..l.len() {
+        let pos = a + k;
+        let g = if t.vol_env.is_empty() { db_to_lin(t.volume_db) } else { env_gain(t.volume_at(pos)) };
+        let (pl, pr) = pan_gains(t.pan_at(pos));
+        l[k] *= g * pl;
+        r[k] *= g * pr;
+    }
+}
+
+fn peak_into(peaks: &mut [[f32; 2]], ti: usize, l: &[f32], r: &[f32]) {
+    if let Some(p) = peaks.get_mut(ti) {
+        p[0] = l.iter().fold(p[0], |m, s| m.max(s.abs()));
+        p[1] = r.iter().fold(p[1], |m, s| m.max(s.abs()));
+    }
+}
+
+/// Render frames [a, b) of the mix into `out` (two channels): each audio
+/// track's clips, its effects rack, sends, fader and routing; then each bus;
+/// then the master rack and fader. Reuses `out` and `scratch` so it doesn't
+/// allocate in the audio callback. Each track's post-fader peak (L, R) is
+/// max-ed into `peaks[track]` when there is room.
+pub fn mix_into(m: &MixState, a: usize, b: usize, out: &mut [Vec<f32>], peaks: &mut [[f32; 2]], scratch: &mut MixScratch) {
     let n = b.saturating_sub(a);
     for ch in out.iter_mut() {
         ch.clear();
         ch.resize(n, 0.0);
     }
-    let any_solo = m.tracks.iter().any(|t| t.solo);
-    let master = db_to_lin(m.master_db);
+    scratch.prepare(m.tracks.len(), n);
+    let any_solo = m.tracks.iter().any(|t| !t.is_bus() && t.solo);
+    let bus_index = |id: u64| m.tracks.iter().position(|t| t.id == id && t.is_bus());
     for (ti, t) in m.tracks.iter().enumerate() {
-        if t.mute || (any_solo && !t.solo) {
+        if t.is_bus() {
             continue;
         }
-        let (pl, pr) = t.pan_gains();
-        let tg = db_to_lin(t.volume_db) * master;
-        let automated = !t.vol_env.is_empty() || !t.pan_env.is_empty();
-        let mut pk = [0.0f32; 2];
-        for c in &t.clips {
-            if c.mute || c.end() <= a || c.start >= b {
-                continue;
-            }
-            let Some(src) = m.sources.get(&c.source) else { continue };
-            let sl = &src.audio[0];
-            let sr = &src.audio[src.audio.len().min(2) - 1];
-            let cg = db_to_lin(c.gain_db) * tg;
-            let s0 = c.start.max(a);
-            let s1 = c.end().min(b);
-            for t_pos in s0..s1 {
-                let i = t_pos - c.start;
-                let idx = c.offset + i;
-                if idx >= sl.len() {
-                    break;
+        let silent = t.mute || (any_solo && !t.solo);
+        // A silent track with no effects has nothing to keep running.
+        if silent && (t.fx.is_empty() || !t.fx_on) {
+            continue;
+        }
+        {
+            let [bl, br] = &mut scratch.bufs[ti];
+            for c in &t.clips {
+                if c.mute || c.end() <= a || c.start >= b {
+                    continue;
                 }
-                let k = t_pos - a;
-                let (vl, vr) = if automated {
-                    let vol = if t.vol_env.is_empty() { db_to_lin(t.volume_db) } else { env_gain(t.volume_at(t_pos)) };
-                    let g = db_to_lin(c.gain_db) * master * vol * c.envelope(i);
-                    let (al, ar) = pan_gains(t.pan_at(t_pos));
-                    (sl[idx] * g * al, sr[idx] * g * ar)
-                } else {
+                let Some(src) = m.sources.get(&c.source) else { continue };
+                let sl = &src.audio[0];
+                let sr = &src.audio[src.audio.len().min(2) - 1];
+                let cg = db_to_lin(c.gain_db);
+                for t_pos in c.start.max(a)..c.end().min(b) {
+                    let i = t_pos - c.start;
+                    let idx = c.offset + i;
+                    if idx >= sl.len() {
+                        break;
+                    }
                     let g = cg * c.envelope(i);
-                    (sl[idx] * g * pl, sr[idx] * g * pr)
-                };
-                out[0][k] += vl;
-                out[1][k] += vr;
-                pk[0] = pk[0].max(vl.abs());
-                pk[1] = pk[1].max(vr.abs());
+                    let k = t_pos - a;
+                    bl[k] += sl[idx] * g;
+                    br[k] += sr[idx] * g;
+                }
+            }
+            run_rack(&t.fx, t.fx_on, bl, br);
+        }
+        if silent {
+            // Muted after its effects, as in Audition: tails continue, unheard.
+            continue;
+        }
+        for s in t.sends.iter().filter(|s| s.pre) {
+            if let Some(bi) = bus_index(s.bus) {
+                scratch.add(ti, bi, db_to_lin(s.level_db));
             }
         }
-        if let Some(p) = peaks.get_mut(ti) {
-            p[0] = p[0].max(pk[0]);
-            p[1] = p[1].max(pk[1]);
+        {
+            let [bl, br] = &mut scratch.bufs[ti];
+            fader(t, a, bl, br);
+            peak_into(peaks, ti, bl, br);
         }
+        for s in t.sends.iter().filter(|s| !s.pre) {
+            if let Some(bi) = bus_index(s.bus) {
+                scratch.add(ti, bi, db_to_lin(s.level_db));
+            }
+        }
+        match t.output.and_then(bus_index) {
+            Some(bi) => scratch.add(ti, bi, 1.0),
+            None => {
+                let [bl, br] = &scratch.bufs[ti];
+                for (o, v) in out[0].iter_mut().zip(bl) {
+                    *o += v;
+                }
+                for (o, v) in out[1].iter_mut().zip(br) {
+                    *o += v;
+                }
+            }
+        }
+    }
+    for (bi, t) in m.tracks.iter().enumerate() {
+        if !t.is_bus() || t.mute {
+            continue;
+        }
+        let [bl, br] = &mut scratch.bufs[bi];
+        run_rack(&t.fx, t.fx_on, bl, br);
+        fader(t, a, bl, br);
+        peak_into(peaks, bi, bl, br);
+        for (o, v) in out[0].iter_mut().zip(bl.iter()) {
+            *o += v;
+        }
+        for (o, v) in out[1].iter_mut().zip(br.iter()) {
+            *o += v;
+        }
+    }
+    if let [ol, or, ..] = out {
+        run_rack(&m.master_fx, m.master_fx_on, ol, or);
+    }
+    let master = db_to_lin(m.master_db);
+    if master != 1.0 {
+        out.iter_mut().for_each(|c| c.iter_mut().for_each(|s| *s *= master));
     }
 }
 
@@ -760,7 +1116,11 @@ fn rel_path(p: &Path, base: Option<&Path>) -> String {
 /// Serialise the session. `paths` gives the file used for each source.
 pub fn to_text(s: &Session, paths: &BTreeMap<u64, PathBuf>, base: Option<&Path>) -> String {
     let mut o = String::from("AUDEMO-SESSION 1\n");
-    o.push_str(&format!("name\t{}\nrate\t{}\nmaster\t{}\n", clean(&s.name), s.sample_rate, s.master_db));
+    o.push_str(&format!("name\t{}\nrate\t{}\nmaster\t{}\nmasterfx\t{}\n", clean(&s.name), s.sample_rate, s.master_db, s.master_fx_on as u8));
+    let fx_line = |key: &str, f: &FxSlot| format!("{key}\t{}\t{}\t{}\n", f.effect, f.on as u8, f.params.to_text());
+    for f in &s.master_fx {
+        o.push_str(&fx_line("mfx", f));
+    }
     for (id, src) in &s.sources {
         if let Some(p) = paths.get(id) {
             o.push_str(&format!("source\t{id}\t{}\t{}\n", rel_path(p, base), clean(&src.name)));
@@ -768,9 +1128,28 @@ pub fn to_text(s: &Session, paths: &BTreeMap<u64, PathBuf>, base: Option<&Path>)
     }
     for t in &s.tracks {
         o.push_str(&format!(
-            "track\t{}\t{}\t{}\t{}\t{}\t{}\t{},{},{}\t{}\t{}\n",
-            t.id, clean(&t.name), t.volume_db, t.pan, t.mute as u8, t.solo as u8, t.colour[0], t.colour[1], t.colour[2], t.height, t.show_env as u8
+            "track\t{}\t{}\t{}\t{}\t{}\t{}\t{},{},{}\t{}\t{}\t{}\t{}\t{}\n",
+            t.id,
+            clean(&t.name),
+            t.volume_db,
+            t.pan,
+            t.mute as u8,
+            t.solo as u8,
+            t.colour[0],
+            t.colour[1],
+            t.colour[2],
+            t.height,
+            t.show_env as u8,
+            t.is_bus() as u8,
+            t.fx_on as u8,
+            t.output.unwrap_or(0)
         ));
+        for f in &t.fx {
+            o.push_str(&fx_line("fx", f));
+        }
+        for sd in &t.sends {
+            o.push_str(&format!("send\t{}\t{}\t{}\n", sd.bus, sd.level_db, sd.pre as u8));
+        }
         if !t.vol_env.is_empty() {
             o.push_str(&format!("venv\t{}\n", t.vol_env.to_text()));
         }
@@ -807,7 +1186,9 @@ pub struct ParsedSession {
     pub sources: Vec<(u64, PathBuf, String)>,
 }
 
-pub fn from_text(id: u64, text: &str, base: Option<&Path>) -> Result<ParsedSession, String> {
+/// Parse a session file. `effects` (the effect registry) is used to read
+/// effects-rack settings.
+pub fn from_text(id: u64, text: &str, base: Option<&Path>, effects: &[EffectDef]) -> Result<ParsedSession, String> {
     let mut lines = text.lines();
     if lines.next().map(|l| l.trim()) != Some("AUDEMO-SESSION 1") {
         return Err("Not an Audemo session file.".into());
@@ -853,6 +1234,11 @@ pub fn from_text(id: u64, text: &str, base: Option<&Path>) -> Result<ParsedSessi
                 if let Ok(v) = num(9) {
                     t.show_env = v != 0.0;
                 }
+                if num(10).map(|v| v != 0.0).unwrap_or(false) {
+                    t.kind = TrackKind::Bus;
+                }
+                t.fx_on = num(11).map(|v| v != 0.0).unwrap_or(true);
+                t.output = num(12).ok().map(|v| v as u64).filter(|v| *v != 0);
                 max_id = max_id.max(tid);
                 s.tracks.push(t);
             }
@@ -892,6 +1278,28 @@ pub fn from_text(id: u64, text: &str, base: Option<&Path>) -> Result<ParsedSessi
                 } else {
                     t.pan_env = e;
                 }
+            }
+            "masterfx" => s.master_fx_on = num(1).map(|v| v != 0.0).unwrap_or(true),
+            "fx" | "mfx" => {
+                // Effects this version doesn't know are skipped.
+                let sr = s.sample_rate;
+                let slot = f.get(1).and_then(|eid| effects.iter().find(|e| e.id == *eid)).and_then(|def| {
+                    let params = Params::from_text(&def.params, f.get(3).unwrap_or(&""));
+                    let mut slot = FxSlot::new(def.id, params, sr)?;
+                    slot.on = f.get(2).map(|v| *v != "0").unwrap_or(true);
+                    Some(slot)
+                });
+                if let Some(slot) = slot {
+                    if f[0] == "mfx" {
+                        s.master_fx.push(slot);
+                    } else if let Some(t) = s.tracks.last_mut() {
+                        t.fx.push(slot);
+                    }
+                }
+            }
+            "send" => {
+                let t = s.tracks.last_mut().ok_or_else(|| bad(line))?;
+                t.sends.push(Send { bus: num(1)? as u64, level_db: num(2)? as f32, pre: num(3).map(|v| v != 0.0).unwrap_or(false) });
             }
             "" => {}
             _ => {} // unknown keys from newer versions are ignored
@@ -1004,7 +1412,7 @@ mod tests {
         }
         // A corrupt file with a zero-length clip and oversized fades loads safely.
         let text = "AUDEMO-SESSION 1\nrate\t1000\ntrack\t2\tT\t0\t0\t0\t0\t1,2,3\t96\nclip\t3\t1\t100\t0\t0\t0\t50\t70\t0\tx\n";
-        let mut p = from_text(1, text, None).unwrap();
+        let mut p = from_text(1, text, None, &[]).unwrap();
         let k = p.session.tracks[0].clips[0].clone();
         assert_eq!((k.len, k.fade_in, k.fade_out), (1, 1, 0));
         p.session.trim_start(k.id, 0);
@@ -1030,7 +1438,7 @@ mod tests {
         s.tracks[0].pan_env.insert(0, 100.0);
         let mut peaks = [[0.0f32; 2]; 2];
         let mut out = vec![Vec::new(), Vec::new()];
-        mix_into(&s.mix_state(), 0, 200, &mut out, &mut peaks);
+        mix_into(&s.mix_state(), 0, 200, &mut out, &mut peaks, &mut MixScratch::default());
         assert!((out[1][0] - 0.5).abs() < 1e-5 && out[0][0].abs() < 1e-6, "hard right");
         assert!(out[1][150].abs() < 1e-9, "silent after the envelope reaches the bottom");
         assert!((peaks[0][1] - 0.5).abs() < 1e-5 && peaks[1] == [0.0, 0.0]);
@@ -1056,7 +1464,7 @@ mod tests {
         s.tracks[1].show_env = true;
         let mut paths = BTreeMap::new();
         paths.insert(src, PathBuf::from("/x/tone.wav"));
-        let p = from_text(2, &to_text(&s, &paths, None), None).unwrap();
+        let p = from_text(2, &to_text(&s, &paths, None), None, &[]).unwrap();
         assert_eq!(p.session.tracks[1].vol_env, s.tracks[1].vol_env);
         assert!(p.session.tracks[1].show_env);
     }
@@ -1084,6 +1492,91 @@ mod tests {
     }
 
     #[test]
+    fn track_racks_buses_and_sends() {
+        let reg = crate::dsp::effects::registry();
+        let def = |id: &str| reg.iter().find(|e| e.id == id).unwrap();
+        let (mut s, src) = session_with(vec![vec![0.5; 400]]);
+        s.insert_clip(0, src, 0).unwrap();
+        // Track 0 rack: Amplify -6 dB.
+        let mut p = def("amplify").default_params();
+        p.set("left", crate::dsp::params::Value::F(-6.0206));
+        s.tracks[0].fx.push(FxSlot::new("amplify", p, 1000).unwrap());
+        let m = mix_range(&s.mix_state(), 0, 400);
+        assert!((m[0][100] - 0.25).abs() < 1e-4, "{}", m[0][100]);
+        // Route track 0 to a bus at -6 dB with its own Amplify +6 dB.
+        let bi = s.add_bus();
+        let bus_id = s.tracks[bi].id;
+        s.tracks[0].output = Some(bus_id);
+        s.tracks[bi].volume_db = -6.0206;
+        let mut p = def("amplify").default_params();
+        p.set("left", crate::dsp::params::Value::F(6.0206));
+        s.tracks[bi].fx.push(FxSlot::new("amplify", p, 1000).unwrap());
+        let m = mix_range(&s.mix_state(), 0, 400);
+        assert!((m[0][100] - 0.25).abs() < 1e-4, "{}", m[0][100]);
+        // A post-fader send to the bus doubles the signal when the track also goes to the master.
+        s.tracks[0].output = None;
+        s.tracks[bi].fx.clear();
+        s.tracks[bi].volume_db = 0.0;
+        s.tracks[0].sends.push(Send { bus: bus_id, level_db: 0.0, pre: false });
+        let m = mix_range(&s.mix_state(), 0, 400);
+        assert!((m[0][100] - 0.5).abs() < 1e-4, "{}", m[0][100]);
+        // Muting the bus leaves only the direct path; clips can't go on a bus.
+        s.tracks[bi].mute = true;
+        assert!((mix_range(&s.mix_state(), 0, 400)[0][100] - 0.25).abs() < 1e-4);
+        assert!(s.insert_clip(bi, src, 0).is_none());
+        // Master rack.
+        s.tracks[bi].mute = false;
+        s.master_fx.push(FxSlot::new("amplify", def("amplify").default_params(), 1000).unwrap());
+        // Round trip.
+        let mut paths = BTreeMap::new();
+        paths.insert(src, PathBuf::from("/x/a.wav"));
+        let p2 = from_text(3, &to_text(&s, &paths, None), None, &reg).unwrap().session;
+        assert_eq!(p2.tracks, s.tracks);
+        assert_eq!(p2.master_fx, s.master_fx);
+        // Undo restores rack settings to the live instance too.
+        s.push_undo("x");
+        let mut p = def("amplify").default_params();
+        p.set("left", crate::dsp::params::Value::F(-40.0));
+        s.tracks[0].fx[0].set_params(p);
+        s.undo();
+        let st = s.mix_state();
+        let mut out = vec![Vec::new(), Vec::new()];
+        mix_into(&st, 0, 400, &mut out, &mut [], &mut MixScratch::default());
+        assert!((out[0][100] - 0.5).abs() < 1e-4, "live instance kept the undone setting: {}", out[0][100]);
+    }
+
+    #[test]
+    fn live_blocks_match_mixdown_with_stateful_effects() {
+        let reg = crate::dsp::effects::registry();
+        let echo = reg.iter().find(|e| e.id == "echo").unwrap();
+        let audio: Vec<f32> = (0..6000).map(|i| ((i as f32) * 0.05).sin() * if i < 500 { 1.0 } else { 0.0 }).collect();
+        let (mut s, src) = session_with(vec![audio]);
+        s.sample_rate = 8000;
+        s.insert_clip(0, src, 100).unwrap();
+        let mut p = echo.default_params();
+        p.set("delay_ms", crate::dsp::params::Value::F(50.0));
+        s.tracks[0].fx.push(FxSlot::new("echo", p, 8000).unwrap());
+        let st = s.mix_state();
+        let want = mix_range(&st, 0, 7000);
+        // The live path: consecutive blocks through the shared instances.
+        s.reset_fx();
+        let mut scratch = MixScratch::default();
+        scratch.reserve(st.tracks.len(), 1024);
+        let mut out = vec![Vec::new(), Vec::new()];
+        let mut got = vec![Vec::new(), Vec::new()];
+        let mut a = 0;
+        while a < 7000 {
+            let b = (a + 1024).min(7000);
+            mix_into(&st, a, b, &mut out, &mut [], &mut scratch);
+            got[0].extend_from_slice(&out[0]);
+            got[1].extend_from_slice(&out[1]);
+            a = b;
+        }
+        assert_eq!(got, want);
+        assert!(want[0][100 + 400 + 600].abs() > 0.01, "echo tail present");
+    }
+
+    #[test]
     fn session_text_round_trip() {
         let (mut s, src) = session_with(vec![vec![0.1; 50]]);
         let c = s.insert_clip(1, src, 7).unwrap();
@@ -1103,7 +1596,7 @@ mod tests {
         paths.insert(src, base.join("Test Files/tone.wav"));
         let text = to_text(&s, &paths, Some(&base));
         assert!(text.contains("source\t") && text.contains("Test Files/tone.wav"));
-        let p = from_text(9, &text, Some(&base)).unwrap();
+        let p = from_text(9, &text, Some(&base), &[]).unwrap();
         assert_eq!(p.session.tracks, s.tracks.iter().map(|t| {
             let mut t = t.clone();
             for c in t.clips.iter_mut() {
@@ -1115,6 +1608,6 @@ mod tests {
         assert_eq!(p.sources, vec![(src, base.join("Test Files/tone.wav"), "tone".to_string())]);
         let mut s2 = p.session;
         assert!(s2.new_id() > c);
-        assert!(from_text(1, "nope", None).is_err());
+        assert!(from_text(1, "nope", None, &[]).is_err());
     }
 }

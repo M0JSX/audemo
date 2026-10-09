@@ -31,6 +31,16 @@ impl Biquad {
         Biquad { b0, b1, b2, a1, a2, z1: 0.0, z2: 0.0 }
     }
 
+    /// Take `o`'s coefficients but keep this filter's state (for smooth
+    /// parameter changes while audio runs).
+    pub fn copy_coeffs(&mut self, o: &Biquad) {
+        self.b0 = o.b0;
+        self.b1 = o.b1;
+        self.b2 = o.b2;
+        self.a1 = o.a1;
+        self.a2 = o.a2;
+    }
+
     pub fn identity() -> Self {
         Biquad { b0: 1.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0, z1: 0.0, z2: 0.0 }
     }

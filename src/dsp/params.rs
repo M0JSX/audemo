@@ -161,6 +161,47 @@ impl Params {
         }
     }
 
+    /// `key=<type><value>;…` for session files (f float, c choice, b bool, s text).
+    pub fn to_text(&self) -> String {
+        self.values
+            .iter()
+            .map(|(k, v)| {
+                let v = match v {
+                    Value::F(x) => format!("f{x}"),
+                    Value::C(c) => format!("c{c}"),
+                    Value::B(b) => format!("b{}", *b as u8),
+                    Value::S(s) => format!("s{}", s.replace([';', '=', '\t', '\n', '\r'], " ")),
+                };
+                format!("{k}={v}")
+            })
+            .collect::<Vec<_>>()
+            .join(";")
+    }
+
+    /// Parse [`Params::to_text`] output against an effect's parameters
+    /// (unknown keys are ignored, missing ones keep their defaults).
+    pub fn from_text(defs: &[ParamDef], text: &str) -> Self {
+        let mut p = Params::defaults(defs);
+        for kv in text.split(';') {
+            let Some((k, v)) = kv.split_once('=') else { continue };
+            let Some(d) = defs.iter().find(|d| d.key == k.trim()) else { continue };
+            let mut chars = v.chars();
+            let t = chars.next();
+            let rest = chars.as_str();
+            let val = match t {
+                Some('f') => rest.parse().ok().map(Value::F),
+                Some('c') => rest.parse().ok().map(Value::C),
+                Some('b') => Some(Value::B(rest == "1")),
+                Some('s') => Some(Value::S(rest.to_string())),
+                _ => None,
+            };
+            if let Some(val) = val {
+                p.set(d.key, val);
+            }
+        }
+        p
+    }
+
     /// Defaults with a preset's overrides applied.
     pub fn with_preset(defs: &[ParamDef], preset: &[(&'static str, Value)]) -> Self {
         let mut p = Params::defaults(defs);
