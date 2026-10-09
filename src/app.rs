@@ -1488,6 +1488,34 @@ impl App {
         }
     }
 
+    /// Save every unsaved session and file, asking for a name where one is
+    /// needed. Returns true when nothing is left unsaved.
+    pub fn save_everything(&mut self) -> bool {
+        let (prev_session, prev_doc) = (self.active_session, self.active);
+        // Sessions first: saving one can also save the files it uses.
+        for i in 0..self.sessions.len() {
+            if self.sessions[i].dirty {
+                self.active_session = Some(i);
+                self.save_session(false);
+            }
+        }
+        for i in 0..self.docs.len() {
+            if !self.docs[i].dirty {
+                continue;
+            }
+            self.active = Some(i);
+            let d = &self.docs[i];
+            let fmt = WavFormat::from_bits(d.source_bits);
+            let wav = d.path.clone().filter(|p| p.extension().map(|e| e.eq_ignore_ascii_case("wav") || e.eq_ignore_ascii_case("wave")).unwrap_or(false));
+            if let Some(p) = wav.or_else(|| self.pick_save_path()) {
+                self.write_wav(p, fmt, fmt == WavFormat::Pcm16, false);
+            }
+        }
+        self.active_session = prev_session;
+        self.active = prev_doc;
+        !self.docs.iter().any(|d| d.dirty) && !self.sessions.iter().any(|s| s.dirty)
+    }
+
     pub fn pick_save_path(&self) -> Option<PathBuf> {
         let doc = self.doc()?;
         let stem = Path::new(&doc.name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled".into());

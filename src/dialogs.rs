@@ -381,6 +381,15 @@ impl App {
                     }
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
+                        if ui.button("Save All and Quit").on_hover_text("Save everything (you'll be asked to name new files), then quit").clicked() {
+                            if self.save_everything() {
+                                self.allow_quit = true;
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                keep = false;
+                            } else {
+                                self.set_status("Some files weren't saved, so Audemo is still open.");
+                            }
+                        }
                         if ui.button("Quit without saving").clicked() {
                             self.allow_quit = true;
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
