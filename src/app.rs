@@ -642,7 +642,7 @@ impl App {
 
     pub fn frame(&mut self, ctx: &egui::Context) {
         #[cfg(any(target_os = "macos", audemo_check_menu))]
-        self.poll_native_menu();
+        self.poll_native_menu(ctx);
         self.poll_loads();
         self.poll_job();
         self.handle_dropped_files(ctx);

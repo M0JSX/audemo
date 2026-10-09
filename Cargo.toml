@@ -29,6 +29,7 @@ libc = "0.2"
 # Native menu bar at the top of the screen on macOS.
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = "0.15"
+arboard = "3.4"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(audemo_check_menu)'] }

@@ -19,6 +19,10 @@ fn acc(shift: bool, code: Code) -> Option<Accelerator> {
     Some(Accelerator::new(Some(m), code))
 }
 
+fn acc_mods(m: Modifiers, code: Code) -> Option<Accelerator> {
+    Some(Accelerator::new(Some(m), code))
+}
+
 fn item(id: &str, text: &str, accel: Option<Accelerator>) -> MenuItem {
     MenuItem::with_id(id, text, true, accel)
 }
@@ -69,25 +73,25 @@ impl NativeMenu {
         let _ = file.append(&item("save_sel", "Save Selection As…", None));
         let _ = file.append(&item("save_all", "Save All", None));
 
-        // Cut/Copy/Paste carry no key equivalents here so text fields keep
-        // their own ⌘C/⌘V; Audemo still handles those keys in the editor.
+        // Clipboard commands go to the focused text box when there is one
+        // (see `text_command`), otherwise to the audio.
         let edit = Submenu::new("Edit", true);
         let _ = edit.append(&item("undo", "Undo", acc(false, Code::KeyZ)));
         let _ = edit.append(&item("redo", "Redo", acc(true, Code::KeyZ)));
         let _ = edit.append(&item("repeat", "Repeat Previous Command", None));
         let _ = edit.append(&sep());
-        let _ = edit.append(&item("cut", "Cut", None));
-        let _ = edit.append(&item("copy", "Copy", None));
-        let _ = edit.append(&item("copy_new", "Copy to New", None));
-        let _ = edit.append(&item("paste", "Paste", None));
-        let _ = edit.append(&item("paste_new", "Paste to New", None));
-        let _ = edit.append(&item("mix_paste", "Mix Paste…", None));
+        let _ = edit.append(&item("cut", "Cut", acc(false, Code::KeyX)));
+        let _ = edit.append(&item("copy", "Copy", acc(false, Code::KeyC)));
+        let _ = edit.append(&item("copy_new", "Copy to New", acc_mods(Modifiers::ALT | Modifiers::SHIFT, Code::KeyC)));
+        let _ = edit.append(&item("paste", "Paste", acc(false, Code::KeyV)));
+        let _ = edit.append(&item("paste_new", "Paste to New", acc_mods(Modifiers::SUPER | Modifiers::ALT, Code::KeyV)));
+        let _ = edit.append(&item("mix_paste", "Mix Paste…", acc(true, Code::KeyV)));
         let _ = edit.append(&sep());
         let _ = edit.append(&item("delete", "Delete", None));
         let _ = edit.append(&item("crop", "Crop", acc(false, Code::KeyT)));
         let _ = edit.append(&sep());
         let select = Submenu::new("Select", true);
-        let _ = select.append(&item("select_all", "Select All", None));
+        let _ = select.append(&item("select_all", "Select All", acc(false, Code::KeyA)));
         let _ = select.append(&item("deselect", "Deselect All", None));
         let _ = edit.append(&select);
         let insert = Submenu::new("Insert", true);
@@ -176,13 +180,16 @@ impl App {
     }
 
     /// Handle native menu clicks; rebuild when the recent list changes.
-    pub fn poll_native_menu(&mut self) {
+    pub fn poll_native_menu(&mut self, ctx: &eframe::egui::Context) {
         let stale = self.native_menu.as_ref().map(|m| m.recent != self.prefs.recent).unwrap_or(false);
         if stale {
             self.native_menu = NativeMenu::build(self);
         }
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
             let id = ev.id.0.clone();
+            if ctx.wants_keyboard_input() && text_command(ctx, &id) {
+                continue;
+            }
             self.native_menu_command(&id);
         }
     }
@@ -295,4 +302,25 @@ impl App {
         };
         self.actions.push(action);
     }
+}
+
+/// Send a clipboard/undo menu command to the focused text box as the
+/// equivalent egui input. Returns false for commands that aren't text edits.
+fn text_command(ctx: &eframe::egui::Context, id: &str) -> bool {
+    use eframe::egui::{Event, Key, Modifiers as M};
+    let key = |k: Key, m: M| Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: m };
+    let ev = match id {
+        "cut" => Event::Cut,
+        "copy" => Event::Copy,
+        "paste" => match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+            Ok(t) => Event::Paste(t),
+            Err(_) => return true,
+        },
+        "select_all" => key(Key::A, M::COMMAND),
+        "undo" => key(Key::Z, M::COMMAND),
+        "redo" => key(Key::Z, M::COMMAND | M::SHIFT),
+        _ => return false,
+    };
+    ctx.input_mut(|i| i.events.push(ev));
+    true
 }
