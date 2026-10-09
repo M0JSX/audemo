@@ -4,6 +4,7 @@
 use eframe::egui::{self, pos2, vec2, Align2, Color32, CursorIcon, FontId, Pos2, Rect, RichText, Rounding, Sense, Shape, Stroke, Ui};
 
 use crate::app::{Action, App, SpecTex, Tool};
+use crate::dsp::spectral::SpecShape;
 use crate::dsp::spectrogram::{heat_colour, spectrogram_range};
 use crate::dsp::util::format_time;
 use crate::theme::*;
@@ -389,10 +390,103 @@ impl App {
         let mods = ui.input(|i| i.modifiers);
         let middle = ui.input(|i| i.pointer.middle_down());
         let to_sample = |x: f32| v.s(x).round().clamp(0.0, len as f64) as usize;
-        if resp.hovered() {
-            ui.ctx().set_cursor_icon(if tool == Tool::Hand || self.hand_anchor.is_some() { CursorIcon::Grab } else { CursorIcon::Text });
+
+        // ------------------------------------------------ spectral tools
+        let nyq = (sr / 2.0) as f32;
+        let spec_lane_at = |p: Pos2| -> Option<Rect> { spec_area.and_then(|area| (0..n_ch).map(|c| lane_rect(area, c)).find(|r| r.contains(p))) };
+        let to_tf = |p: Pos2, r: Rect| -> (f64, f32) { (v.s(p.x).clamp(0.0, len as f64), ((r.bottom() - p.y) / r.height()).clamp(0.0, 1.0) * nyq) };
+        let origin = ui.input(|i| i.pointer.press_origin());
+        let hover = ui.input(|i| i.pointer.hover_pos());
+        let spectral_tool = tool.spectral() && !middle && spec_area.is_some();
+        // Drags and clicks that start in the spectral display belong to the spectral tool.
+        let spec_busy = spectral_tool && (self.spec_drag.is_some() || origin.or(hover).and_then(spec_lane_at).is_some());
+        let brush_r = |r: Rect| -> (f64, f32) { ((self.brush_px as f64 / 2.0) * v.spp(), self.brush_px / 2.0 / r.height().max(1.0) * nyq) };
+        if spectral_tool {
+            if resp.drag_started() {
+                if let Some(o) = origin.filter(|o| spec_lane_at(*o).is_some()) {
+                    let r = spec_lane_at(o).unwrap();
+                    self.spec_drag = Some((tool, vec![to_tf(o, r)]));
+                }
+            }
+            if let (Some((dtool, pts)), Some(o)) = (&mut self.spec_drag, origin) {
+                if let (Some(r), Some(p)) = (spec_lane_at(o).or(spec_area), resp.interact_pointer_pos()) {
+                    let tf = to_tf(p, r);
+                    match dtool {
+                        Tool::Marquee => {
+                            pts.truncate(1);
+                            pts.push(tf);
+                        }
+                        _ => {
+                            // Add a point once the pointer has moved a couple of pixels.
+                            let far = pts.last().map(|q| (v.x(q.0) - p.x).abs() + ((q.1 - tf.1) / nyq * r.height()).abs() > 2.0).unwrap_or(true);
+                            if far {
+                                pts.push(tf);
+                            }
+                        }
+                    }
+                }
+            }
+            if resp.drag_stopped() {
+                if let (Some((dtool, pts)), Some(r)) = (self.spec_drag.take(), origin.and_then(spec_lane_at).or(spec_area.map(|a| lane_rect(a, 0)))) {
+                    let (rt, rf) = brush_r(r);
+                    if let Some(shape) = build_spec_shape(dtool, pts, rt, rf) {
+                        if dtool == Tool::SpotHeal {
+                            self.actions.push(Action::SpectralHeal(Some(shape)));
+                        } else {
+                            doc.spec_sel = Some(shape);
+                            doc.sel = None;
+                        }
+                    }
+                }
+            }
+            if resp.clicked() && hover.and_then(spec_lane_at).is_some() {
+                doc.spec_sel = None;
+            }
         }
-        if resp.drag_started() {
+        // Drop a half-drawn shape if the tool changed or the drag ended elsewhere.
+        if self.spec_drag.is_some() && (!spectral_tool || !(resp.dragged() || resp.drag_started())) {
+            self.spec_drag = None;
+        }
+        // An invisible spectral selection would still steer effects: drop it.
+        if !show_spec {
+            doc.spec_sel = None;
+        }
+        // Spectral selection (and the one being drawn) over the spectral display.
+        if let Some(area) = spec_area {
+            let drawing = self.spec_drag.as_ref().and_then(|(t, pts)| {
+                let r = lane_rect(area, 0);
+                let (rt, rf) = brush_r(r);
+                build_spec_shape(*t, pts.clone(), rt, rf).map(|s| (s, *t == Tool::SpotHeal))
+            });
+            for c in 0..n_ch {
+                let r = lane_rect(area, c);
+                let p = painter.with_clip_rect(r);
+                if let Some(shape) = &doc.spec_sel {
+                    draw_spec_shape(&p, shape, r, &v, nyq, Color32::WHITE);
+                }
+                if let Some((shape, heal)) = &drawing {
+                    draw_spec_shape(&p, shape, r, &v, nyq, if *heal { Color32::from_rgb(0xf2, 0xc2, 0x30) } else { Color32::WHITE });
+                }
+            }
+            // Brush outline under the pointer.
+            if matches!(tool, Tool::Brush | Tool::SpotHeal) {
+                if let Some(h) = hover.filter(|h| spec_lane_at(*h).is_some()) {
+                    painter.circle_stroke(h, self.brush_px / 2.0, Stroke::new(1.0_f32, if tool == Tool::SpotHeal { Color32::from_rgb(0xf2, 0xc2, 0x30) } else { Color32::WHITE }));
+                }
+            }
+        }
+
+        if resp.hovered() {
+            let icon = if spec_busy {
+                CursorIcon::Crosshair
+            } else if tool == Tool::Hand || self.hand_anchor.is_some() {
+                CursorIcon::Grab
+            } else {
+                CursorIcon::Text
+            };
+            ui.ctx().set_cursor_icon(icon);
+        }
+        if resp.drag_started() && !spec_busy {
             let origin = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos()).unwrap_or(lanes.center());
             if tool == Tool::Hand || middle {
                 self.hand_anchor = Some((origin.x, doc.view_start, doc.view_end));
@@ -415,7 +509,7 @@ impl App {
                 self.drag_anchor = Some(anchor);
             }
         }
-        if resp.dragged() {
+        if resp.dragged() && !spec_busy {
             if let Some(p) = resp.interact_pointer_pos() {
                 if let Some((x0, vs, ve)) = self.hand_anchor {
                     let spp = (ve - vs) / v.width as f64;
@@ -441,6 +535,8 @@ impl App {
                     let s = to_sample(p.x);
                     doc.sel = if s != anchor { Some((anchor.min(s), anchor.max(s))) } else { None };
                     doc.cursor = anchor.min(s);
+                    // A time selection replaces any spectral selection.
+                    doc.spec_sel = None;
                 }
             }
         }
@@ -448,7 +544,7 @@ impl App {
             self.drag_anchor = None;
             self.hand_anchor = None;
         }
-        if resp.clicked() {
+        if resp.clicked() && !spec_busy {
             if let Some(p) = resp.interact_pointer_pos() {
                 let s = to_sample(p.x);
                 if mods.shift {
@@ -463,8 +559,9 @@ impl App {
                         None => (doc.cursor.min(s), doc.cursor.max(s)),
                     };
                     doc.sel = if b > a { Some((a, b)) } else { None };
-                } else if tool == Tool::Selection {
+                } else if tool == Tool::Selection || tool.spectral() {
                     doc.sel = None;
+                    doc.spec_sel = None;
                     self.actions.push(Action::SetCursor(s));
                 }
             }
@@ -654,6 +751,63 @@ impl App {
             Color32::from_rgb(0x6a, 0x6a, 0x6a),
         );
         ui.allocate_rect(rect, Sense::hover());
+    }
+}
+
+/// The shape for the points dragged out with a spectral tool.
+fn build_spec_shape(tool: Tool, pts: Vec<(f64, f32)>, rt: f64, rf: f32) -> Option<SpecShape> {
+    let shape = match tool {
+        Tool::Marquee => {
+            let (a, b) = (*pts.first()?, *pts.last()?);
+            SpecShape::Rect { a: a.0, b: b.0, f0: a.1, f1: b.1 }
+        }
+        Tool::Lasso => SpecShape::Lasso(pts),
+        Tool::Brush | Tool::SpotHeal => SpecShape::Brush { pts, rt, rf },
+        _ => return None,
+    };
+    (!shape.is_empty()).then_some(shape)
+}
+
+/// Draw a spectral selection on one channel's spectral display.
+fn draw_spec_shape(p: &egui::Painter, shape: &SpecShape, r: Rect, v: &View, nyq: f32, col: Color32) {
+    let y = |f: f32| r.bottom() - (f / nyq).clamp(0.0, 1.0) * r.height();
+    let fill = col.linear_multiply(0.22);
+    let stroke = Stroke::new(1.0_f32, col);
+    match shape {
+        SpecShape::Rect { a, b, f0, f1 } => {
+            let rr = Rect::from_min_max(pos2(v.x(a.min(*b)), y(f0.max(*f1))), pos2(v.x(a.max(*b)), y(f0.min(*f1))));
+            p.rect_filled(rr, 0.0, fill);
+            p.rect_stroke(rr, 0.0, stroke);
+        }
+        _ => {
+            // Fill on a coarse grid (any shape), then outline lassos.
+            let (lo, hi) = shape.bounds();
+            let x0 = v.x(lo).max(r.left());
+            let x1 = v.x(hi).min(r.right());
+            let cell = 4.0;
+            let mut x = x0.floor();
+            let mut cells = Vec::new();
+            while x < x1 {
+                let t = v.s(x + cell / 2.0);
+                let mut yy = r.top();
+                while yy < r.bottom() {
+                    let f = (r.bottom() - (yy + cell / 2.0)) / r.height() * nyq;
+                    if shape.contains(t, f) {
+                        cells.push(Shape::rect_filled(Rect::from_min_size(pos2(x, yy), vec2(cell, cell)), 0.0, fill));
+                    }
+                    yy += cell;
+                }
+                x += cell;
+            }
+            p.extend(cells);
+            if let SpecShape::Lasso(pts) = shape {
+                let mut line: Vec<Pos2> = pts.iter().map(|(t, f)| pos2(v.x(*t), y(*f))).collect();
+                if let Some(first) = line.first().copied() {
+                    line.push(first);
+                }
+                p.add(Shape::line(line, stroke));
+            }
+        }
     }
 }
 

@@ -63,6 +63,8 @@ pub struct Document {
     pub dirty: bool,
     pub active_ch: Vec<bool>,
     pub spec: Vec<Option<SpecTex>>,
+    /// Spectral (time × frequency) selection.
+    pub spec_sel: Option<crate::dsp::spectral::SpecShape>,
     /// Length (in this file's samples) of a recording in progress.
     pub pending: usize,
     pub recording: bool,
@@ -95,6 +97,7 @@ impl Document {
             dirty: false,
             active_ch: vec![true; n_ch],
             spec: Vec::new(),
+            spec_sel: None,
             pending: 0,
             recording: false,
         }
@@ -130,6 +133,7 @@ impl Document {
     }
 
     fn restore(&mut self, s: Snapshot) {
+        self.spec_sel = None;
         self.audio = s.audio;
         self.peaks = s.peaks;
         self.sample_rate = s.sample_rate;
@@ -272,6 +276,20 @@ impl Document {
 pub enum Tool {
     Selection,
     Hand,
+    /// Rectangular spectral selection.
+    Marquee,
+    /// Freehand spectral selection.
+    Lasso,
+    /// Paint a spectral selection.
+    Brush,
+    /// Paint over a problem and it is healed when you let go.
+    SpotHeal,
+}
+
+impl Tool {
+    pub fn spectral(self) -> bool {
+        matches!(self, Tool::Marquee | Tool::Lasso | Tool::Brush | Tool::SpotHeal)
+    }
 }
 
 /// Panels in the workspace, grouped into tabbed frames like Audition's
@@ -289,15 +307,19 @@ pub enum Panel {
     Levels,
     FrequencyAnalysis,
     PhaseMeter,
+    Diagnostics,
+    BatchProcess,
 }
 
 impl Panel {
     pub const TOP: [Panel; 2] = [Panel::Files, Panel::Favorites];
-    pub const MIDDLE: [Panel; 4] = [Panel::MediaBrowser, Panel::EffectsRack, Panel::Markers, Panel::Properties];
+    pub const MIDDLE: [Panel; 6] = [Panel::MediaBrowser, Panel::EffectsRack, Panel::Markers, Panel::Properties, Panel::Diagnostics, Panel::BatchProcess];
     pub const BOTTOM: [Panel; 2] = [Panel::History, Panel::MatchLoudness];
     pub const METERS: [Panel; 3] = [Panel::Levels, Panel::FrequencyAnalysis, Panel::PhaseMeter];
     /// Every panel, in Window-menu order.
-    pub const ALL: [Panel; 11] = [
+    pub const ALL: [Panel; 13] = [
+        Panel::BatchProcess,
+        Panel::Diagnostics,
         Panel::EffectsRack,
         Panel::Favorites,
         Panel::Files,
@@ -323,6 +345,8 @@ impl Panel {
             Panel::Levels => "Levels",
             Panel::FrequencyAnalysis => "Frequency Analysis",
             Panel::PhaseMeter => "Phase Meter",
+            Panel::Diagnostics => "Diagnostics",
+            Panel::BatchProcess => "Batch Process",
         }
     }
 }
@@ -490,6 +514,8 @@ pub enum Action {
     /// An open file dragged onto a track.
     MtInsertAt { session_id: u64, doc_id: u64, track: usize, at: usize },
     MtAddBus,
+    /// Heal a spectral region (None = the current spectral selection).
+    SpectralHeal(Option<crate::dsp::spectral::SpecShape>),
 }
 
 pub const FAVORITES: &[(&str, &str, &str)] = &[
@@ -528,6 +554,8 @@ pub struct App {
     pub tab_bot: Panel,
     pub tab_meter: Panel,
     pub analysis: crate::analysis_ui::AnalysisState,
+    pub diag: crate::tools_ui::DiagState,
+    pub batch: crate::tools_ui::BatchState,
     pub prefs: Prefs,
     pub rack: Vec<RackSlot>,
     pub rack_mix: f32,
@@ -563,6 +591,10 @@ pub struct App {
     pub fade_drag: Option<(bool, usize, f32, bool)>,
     pub play_origin: usize,
     pub allow_quit: bool,
+    /// Spectral brush diameter in pixels.
+    pub brush_px: f32,
+    /// Spectral selection being drawn: (tool, points or rect corners, spectral lane rect).
+    pub spec_drag: Option<(Tool, Vec<(f64, f32)>)>,
     pub mode: Mode,
     pub sessions: Vec<crate::session::Session>,
     pub active_session: Option<usize>,
@@ -605,6 +637,8 @@ impl App {
             tab_bot: Panel::History,
             tab_meter: Panel::Levels,
             analysis: Default::default(),
+            diag: Default::default(),
+            batch: Default::default(),
             prefs,
             rack: Vec::new(),
             rack_mix: 100.0,
@@ -636,6 +670,8 @@ impl App {
             fade_drag: None,
             play_origin: 0,
             allow_quit: false,
+            brush_px: 24.0,
+            spec_drag: None,
             mode: Mode::Waveform,
             sessions: Vec::new(),
             active_session: None,
@@ -695,6 +731,17 @@ impl App {
         self.next_id
     }
 
+    /// Choose an editing tool; the spectral tools turn on the spectral display.
+    pub fn set_tool(&mut self, t: Tool) {
+        self.tool = t;
+        if t.spectral() {
+            self.show_spectral = true;
+            if self.mode == Mode::Multitrack {
+                self.mode = Mode::Waveform;
+            }
+        }
+    }
+
     pub fn find_effect(&self, id: &str) -> Option<usize> {
         self.effects.iter().position(|e| e.id == id)
     }
@@ -730,6 +777,7 @@ impl App {
         self.sync_live_rack();
         self.sync_sessions();
         self.poll_analysis();
+        self.poll_tools();
     }
 
     /// Keep the target file's live length and view in step with the input.
@@ -812,6 +860,7 @@ impl App {
                 if i.consume_shortcut(&KS::new(cmd, Key::A)) { acts.push(Action::SelectAll); }
                 if i.consume_shortcut(&KS::new(cmd, Key::T)) { acts.push(Action::Crop); }
                 if i.consume_shortcut(&KS::new(cmd, Key::K)) { acts.push(Action::MtSplit); }
+                if i.consume_shortcut(&KS::new(cmd, Key::U)) { acts.push(Action::SpectralHeal(None)); }
                 if i.consume_key(M::ALT, Key::A) { acts.push(Action::MtAddTrack); }
                 if i.consume_key(M::ALT, Key::B) { acts.push(Action::MtAddBus); }
                 if i.consume_key(M::NONE, Key::Num9) { acts.push(Action::SetMode(Mode::Waveform)); }
@@ -831,6 +880,13 @@ impl App {
                 if i.consume_key(M::NONE, Key::Backslash) { acts.push(Action::ZoomFull); }
                 if i.consume_key(M::NONE, Key::ArrowLeft) { acts.push(Action::PrevMarker); }
                 if i.consume_key(M::NONE, Key::ArrowRight) { acts.push(Action::NextMarker); }
+                // Tool keys, as in Audition. Last, and only with no modifier
+                // held, so Shift+P, Shift+D, Alt+B etc. keep their meaning.
+                if i.modifiers.is_none() {
+                    for (key, tool) in [(Key::T, Tool::Selection), (Key::H, Tool::Hand), (Key::E, Tool::Marquee), (Key::D, Tool::Lasso), (Key::P, Tool::Brush), (Key::B, Tool::SpotHeal)] {
+                        if i.consume_key(M::NONE, key) { acts.push(Action::Status(format!("__tool:{}", tool as u8))); }
+                    }
+                }
             });
         }
         for a in acts {
@@ -1089,7 +1145,15 @@ impl App {
         let def_idx = d.idx;
         let params = d.params.clone();
         let generator = self.effects[def_idx].generator;
-        let (a, b) = doc.target_range();
+        let spec = doc.spec_sel.clone().filter(|_| !generator && !self.effects[def_idx].changes_length);
+        let (a, b) = match &spec {
+            Some(shape) => {
+                let (n, _) = crate::dsp::spectral::spec_size(doc.sample_rate);
+                let (lo, hi) = shape.bounds();
+                ((lo.max(0.0) as usize).saturating_sub(n), ((hi.max(0.0) as usize) + n).min(doc.len()))
+            }
+            None => doc.target_range(),
+        };
         let b = b.min(a + doc.sample_rate as usize * 20);
         let input = slice_range(&doc.audio, a, b);
         let sr = doc.sample_rate;
@@ -1105,6 +1169,9 @@ impl App {
             let ctx = Ctx { sample_rate: sr, channels: n_ch, noise_print: np.as_ref() };
             let input = if generator { vec![Vec::new(); n_ch] } else { input };
             let mut out = effects[def_idx].run(&input, &ctx, &p2)?;
+            if let Some(shape) = &spec {
+                out = crate::dsp::spectral::blend(&input, &out, &shape.shifted(-(a as f64)), sr);
+            }
             // Keep previews short for generators too.
             for c in out.iter_mut() {
                 c.truncate(sr as usize * 20);
@@ -1285,7 +1352,17 @@ impl App {
             self.set_status("Open or create a file first.");
             return;
         };
-        let (a, b) = if def.generator {
+        // With a spectral selection the effect only changes what's inside it.
+        if doc.spec_sel.is_some() && (def.generator || def.changes_length) {
+            self.set_status(format!("{} can't work inside a spectral selection. Press Esc to clear it, then make a time selection.", def.name));
+            return;
+        }
+        let spec = doc.spec_sel.clone().filter(|s| !s.is_empty());
+        let (a, b) = if let Some(shape) = &spec {
+            let (n, _) = crate::dsp::spectral::spec_size(doc.sample_rate);
+            let (lo, hi) = shape.bounds();
+            ((lo.max(0.0) as usize).saturating_sub(n), ((hi.max(0.0) as usize) + n).min(doc.len()))
+        } else if def.generator {
             doc.sel_range().unwrap_or((doc.cursor, doc.cursor))
         } else {
             doc.target_range()
@@ -1312,9 +1389,40 @@ impl App {
         if !def.generator || def.params.iter().any(|p| p.key == "duration") {
             self.last_effect = Some((idx, params.clone()));
         }
-        self.spawn_job(label, JobKind::Edit { doc_id, range: (a, b), active, new_rate: None, select: true }, move || {
+        let select = spec.is_none();
+        self.spawn_job(label, JobKind::Edit { doc_id, range: (a, b), active, new_rate: None, select }, move || {
             let ctx = Ctx { sample_rate: sr, channels: n_ch, noise_print: np.as_ref() };
-            effects2[idx].run(&input, &ctx, &params)
+            let out = effects2[idx].run(&input, &ctx, &params)?;
+            Ok(match spec {
+                Some(shape) => crate::dsp::spectral::blend(&input, &out, &shape.shifted(-(a as f64)), sr),
+                None => out,
+            })
+        });
+    }
+
+    /// Spot Healing / Auto Heal: rebuild a spectral region from its surroundings.
+    fn spectral_heal(&mut self, shape: Option<crate::dsp::spectral::SpecShape>) {
+        if self.busy() {
+            return;
+        }
+        let Some(doc) = self.doc() else { return };
+        let Some(shape) = shape.or_else(|| doc.spec_sel.clone()).filter(|s| !s.is_empty()) else {
+            self.set_status("Make a spectral selection first (Marquee, Lasso or Brush tool), or use the Spot Healing Brush.");
+            return;
+        };
+        let (n, _) = crate::dsp::spectral::spec_size(doc.sample_rate);
+        let (lo, hi) = shape.bounds();
+        let a = (lo.max(0.0) as usize).saturating_sub(2 * n);
+        let b = ((hi.max(0.0) as usize) + 2 * n).min(doc.len());
+        if b <= a {
+            return;
+        }
+        let input = slice_range(&doc.audio, a, b);
+        let (sr, doc_id, active) = (doc.sample_rate, doc.id, doc.active_ch.clone());
+        let rel = shape.shifted(-(a as f64));
+        self.engine.stop();
+        self.spawn_job("Spectral Heal".into(), JobKind::Edit { doc_id, range: (a, b), active, new_rate: None, select: false }, move || {
+            Ok(crate::dsp::spectral::heal(&input, &rel, sr))
         });
     }
 
@@ -1638,9 +1746,19 @@ impl App {
                     None => {}
                 }
             }
+            Action::Cut if self.doc().map(|d| d.spec_sel.is_some()).unwrap_or(false) => {
+                self.set_status("Cut works on time selections. With a spectral selection, use Delete to silence it (or Esc to clear it).");
+            }
             Action::Cut => {
                 self.actions.push(Action::Copy);
                 self.actions.push(Action::Delete);
+            }
+            Action::Delete if self.doc().map(|d| d.spec_sel.is_some()).unwrap_or(false) => {
+                // Delete inside a spectral selection silences just that area.
+                if let Some(idx) = self.find_effect("silence") {
+                    self.engine.stop();
+                    self.run_effect(idx, Params::default());
+                }
             }
             Action::Delete => {
                 self.engine.stop();
@@ -1704,13 +1822,16 @@ impl App {
                 if let Some(d) = self.doc_mut() {
                     let len = d.len();
                     d.sel = if len > 0 { Some((0, len)) } else { None };
+                    d.spec_sel = None;
                 }
             }
             Action::Deselect => {
                 if let Some(d) = self.doc_mut() {
                     d.sel = None;
+                    d.spec_sel = None;
                 }
             }
+            Action::SpectralHeal(shape) => self.spectral_heal(shape),
             Action::OpenEffect(idx) => {
                 if self.doc().is_none() {
                     self.set_status("Open or create a file first.");
@@ -1910,6 +2031,17 @@ impl App {
                 }
             }
             Action::Status(s) if s == "__show_rack" => self.show_panel(Panel::EffectsRack),
+            Action::Status(s) if s.starts_with("__tool:") => {
+                let t = match s[7..].parse::<u8>().unwrap_or(0) {
+                    1 => Tool::Hand,
+                    2 => Tool::Marquee,
+                    3 => Tool::Lasso,
+                    4 => Tool::Brush,
+                    5 => Tool::SpotHeal,
+                    _ => Tool::Selection,
+                };
+                self.set_tool(t);
+            }
             Action::Status(s) => self.set_status(s),
             Action::CloseAll => {
                 let dirty: Vec<usize> = (0..self.docs.len()).filter(|&i| self.docs[i].dirty).collect();
@@ -2126,6 +2258,10 @@ pub fn apply_edit(
     doc.push_undo(label);
     let (a, b) = (range.0.min(doc.len()), range.1.min(doc.len()));
     let out_len = out.first().map(|c| c.len()).unwrap_or(0);
+    // A spectral selection only survives edits that keep every sample in place.
+    if new_rate.is_some() || out_len != b - a {
+        doc.spec_sel = None;
+    }
     let whole = new_rate.is_some() || (out.len() != doc.n_ch() && a == 0 && b == doc.len());
     if whole {
         // Channel count or sample rate changed: replace everything.
@@ -2153,7 +2289,11 @@ pub fn apply_edit(
         let src = &out[c.min(out.len().saturating_sub(1))];
         ch.splice(a..b, src.iter().copied());
     }
-    doc.shift_markers(a, b - a, out_len);
+    // Same-length edits (effects, repairs) leave markers where they are;
+    // inserts and deletes move the ones after the edit.
+    if !same_len {
+        doc.shift_markers(a, b - a, out_len);
+    }
     doc.set_audio(audio);
     doc.sel = if select && out_len > 0 { Some((a, a + out_len)) } else { None };
     doc.cursor = a;
@@ -2221,6 +2361,16 @@ mod tests {
         assert_eq!(d.active_ch.len(), 1);
         d.undo();
         assert_eq!((d.n_ch(), d.sample_rate, d.len()), (2, 1000, 1000));
+    }
+
+    #[test]
+    fn effects_keep_markers_inside_the_range() {
+        let mut d = Document::new(1, "t".into(), None, vec![vec![0.1; 1000]], 1000, None, "t");
+        d.markers.push(Marker { pos: 500, name: "m".into() });
+        apply_edit(&mut d, "fx", (0, 1000), &[true], vec![vec![0.2; 1000]], None, false);
+        assert_eq!(d.markers.len(), 1, "same-length edit keeps the marker");
+        apply_edit(&mut d, "del", (100, 200), &[true], vec![Vec::new()], None, false);
+        assert_eq!(d.markers[0].pos, 400, "a delete before it moves it back");
     }
 
     #[test]

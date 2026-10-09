@@ -20,6 +20,7 @@ pub mod loudness;
 pub mod params;
 pub mod peaks;
 pub mod resample;
+pub mod spectral;
 pub mod spectrogram;
 pub mod stft;
 pub mod util;

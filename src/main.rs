@@ -16,6 +16,7 @@ mod panels;
 mod prefs;
 mod session;
 mod theme;
+mod tools_ui;
 mod workspace;
 
 use std::path::PathBuf;

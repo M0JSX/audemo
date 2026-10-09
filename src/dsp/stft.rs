@@ -111,3 +111,55 @@ pub fn apply_gains(buf: &mut [Complex], gains: &[f32]) {
         }
     }
 }
+
+/// Hann-windowed STFT frames of `x` (same framing as [`stft_process`]:
+/// frame `f` is centred on sample `f * hop`).
+pub fn stft_frames(x: &[f32], n: usize, hop: usize) -> Vec<Vec<Complex>> {
+    let w = hann(n);
+    let fft = Fft::new(n);
+    let pad = n / 2;
+    let mut frames = Vec::new();
+    let mut f = 0usize;
+    while f * hop < x.len() + hop {
+        let start = (f * hop) as i64 - pad as i64;
+        let mut buf: Vec<Complex> = (0..n)
+            .map(|i| {
+                let idx = start + i as i64;
+                let s = if idx >= 0 && (idx as usize) < x.len() { x[idx as usize] } else { 0.0 };
+                Complex::new(s * w[i], 0.0)
+            })
+            .collect();
+        fft.forward(&mut buf);
+        frames.push(buf);
+        f += 1;
+    }
+    frames
+}
+
+/// Weighted overlap-add resynthesis of [`stft_frames`] output to `len` samples.
+pub fn istft(frames: &mut [Vec<Complex>], n: usize, hop: usize, len: usize) -> Vec<f32> {
+    let w = hann(n);
+    let fft = Fft::new(n);
+    let pad = n / 2;
+    let total = frames.len() * hop + n + pad;
+    let mut out = vec![0.0f32; total];
+    let mut wsum = vec![0.0f32; total];
+    for (f, buf) in frames.iter_mut().enumerate() {
+        fft.inverse(buf);
+        let start = f * hop;
+        for i in 0..n {
+            out[start + i] += buf[i].re * w[i];
+            wsum[start + i] += w[i] * w[i];
+        }
+    }
+    (0..len)
+        .map(|i| {
+            let ws = wsum[i + pad];
+            if ws > 1e-4 {
+                out[i + pad] / ws
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}

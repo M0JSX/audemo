@@ -3,6 +3,7 @@
 
 mod amplitude;
 mod delay;
+pub mod diagnose;
 mod filter;
 mod generate;
 mod modulation;

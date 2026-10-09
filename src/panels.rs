@@ -128,6 +128,8 @@ impl App {
                         ui.separator();
                         if item(ui, "Delete", "Del", has_sel) { self.actions.push(Action::Delete); }
                         if item(ui, "Crop", "Ctrl+T", has_sel) { self.actions.push(Action::Crop); }
+                        let has_spec = self.doc().map(|d| d.spec_sel.is_some()).unwrap_or(false);
+                        if item(ui, "Auto Heal Selection", "Ctrl+U", has_spec) { self.actions.push(Action::SpectralHeal(None)); }
                         ui.separator();
                         ui.menu_button("Select", |ui| {
                             if item(ui, "Select All", "Ctrl+A", has_doc) { self.actions.push(Action::SelectAll); }
@@ -288,15 +290,22 @@ impl App {
                         self.actions.push(Action::MtSplit);
                     }
                     icon_button_sized(ui, Icon::Slip, false, "Slip editing arrives in a later release", vec2(24.0, 22.0), false);
-                    if icon_button(ui, Icon::Selection, self.tool == Tool::Selection, "Time Selection Tool (T)").clicked() {
-                        self.tool = Tool::Selection;
+                    for (icon, t, tip) in [
+                        (Icon::Selection, Tool::Selection, "Time Selection Tool (T)"),
+                        (Icon::Hand, Tool::Hand, "Hand Tool (H; middle-drag works with any tool)"),
+                        (Icon::Marquee, Tool::Marquee, "Marquee Selection Tool (E): drag a rectangle on the spectral display"),
+                        (Icon::Lasso, Tool::Lasso, "Lasso Selection Tool (D): draw around an area of the spectral display"),
+                        (Icon::Brush, Tool::Brush, "Paintbrush Selection Tool (P): paint an area of the spectral display"),
+                        (Icon::Healing, Tool::SpotHeal, "Spot Healing Brush Tool (B): paint over a click, cough or noise and it's repaired when you let go"),
+                    ] {
+                        if icon_button(ui, icon, self.tool == t, tip).clicked() {
+                            self.set_tool(t);
+                        }
                     }
-                    if icon_button(ui, Icon::Hand, self.tool == Tool::Hand, "Hand Tool (drag to scroll; middle-drag works with any tool)").clicked() {
-                        self.tool = Tool::Hand;
-                    }
-                    let later_sp = "Spectral editing tool: arrives with spectral editing";
-                    for (icon, tip) in [(Icon::Marquee, later_sp), (Icon::Lasso, later_sp), (Icon::Brush, later_sp), (Icon::Healing, later_sp)] {
-                        icon_button_sized(ui, icon, false, tip, vec2(24.0, 22.0), false);
+                    if matches!(self.tool, Tool::Brush | Tool::SpotHeal) {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("Size").color(TEXT_DIM).size(11.0));
+                        hot_drag(ui, egui::DragValue::new(&mut self.brush_px).speed(0.5).range(4.0..=200.0).fixed_decimals(0).suffix(" px"));
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         self.search_box(ui);
@@ -403,6 +412,8 @@ impl App {
                         Panel::MediaBrowser => self.media_browser(ui),
                         Panel::Markers => self.markers_tab(ui),
                         Panel::Properties => self.properties_panel(ui),
+                        Panel::Diagnostics => self.diagnostics_panel(ui),
+                        Panel::BatchProcess => self.batch_panel(ui),
                         _ => self.effects_rack(ui),
                     }
                 });
@@ -937,29 +948,77 @@ pub fn tab_strip_named(ui: &mut Ui, names: &[&str], current: &mut usize) {
     let header = Rect::from_min_size(pos2(full.left() - m, full.top() - m), vec2(full.width() + 2.0 * m, h));
     let p = ui.painter().clone();
     p.rect_filled(header, Rounding { nw: 3.0, ne: 3.0, sw: 0.0, se: 0.0 }, BG_HEADER);
-    let mut x = header.left() + 2.0;
-    for (i, n) in names.iter().enumerate() {
-        let active = i == *current;
-        let font = if active { bold(12.0) } else { FontId::proportional(12.0) };
-        let w = ui.fonts(|f| f.layout_no_wrap(n.to_string(), font.clone(), TEXT).size().x) + 18.0;
-        if x + w > header.right() - 20.0 && i > 0 {
+    // Which tabs fit; the active one always shows (in place of the last that fits).
+    let font_of = |active: bool| if active { bold(12.0) } else { FontId::proportional(12.0) };
+    let widths: Vec<f32> = names.iter().enumerate().map(|(i, n)| ui.fonts(|f| f.layout_no_wrap(n.to_string(), font_of(i == *current), TEXT).size().x) + 18.0).collect();
+    let avail = header.width() - 26.0;
+    let mut shown: Vec<usize> = Vec::new();
+    let mut used = 0.0;
+    for (i, w) in widths.iter().enumerate() {
+        if used + w > avail && !shown.is_empty() {
             break;
         }
+        used += w + 1.0;
+        shown.push(i);
+    }
+    if !shown.contains(current) && *current < names.len() {
+        while shown.len() > 1 && shown.iter().map(|i| widths[*i] + 1.0).sum::<f32>() + widths[*current] > avail {
+            shown.pop();
+        }
+        shown.push(*current);
+    }
+    let hidden: Vec<usize> = (0..names.len()).filter(|i| !shown.contains(i)).collect();
+    let mut x = header.left() + 2.0;
+    for &i in &shown {
+        let n = names[i];
+        let active = i == *current;
+        let w = widths[i];
         let r = Rect::from_min_max(pos2(x, header.top() + 2.0), pos2(x + w, header.bottom()));
-        let resp = ui.interact(r, ui.id().with(("tab", *n)), Sense::click());
+        let resp = ui.interact(r, ui.id().with(("tab", n)), Sense::click());
         if active {
             p.rect_filled(r, Rounding { nw: 3.0, ne: 3.0, sw: 0.0, se: 0.0 }, BG_PANEL);
         } else if resp.hovered() {
             p.rect_filled(r, Rounding { nw: 3.0, ne: 3.0, sw: 0.0, se: 0.0 }, Color32::from_rgb(0x33, 0x33, 0x33));
         }
-        p.text(r.center(), Align2::CENTER_CENTER, *n, font, if active { Color32::WHITE } else { TEXT_DIM });
+        p.text(r.center(), Align2::CENTER_CENTER, n, font_of(active), if active { Color32::WHITE } else { TEXT_DIM });
         if resp.clicked() {
             *current = i;
         }
         x += w + 1.0;
     }
+    // Panel menu: lists the tabs that don't fit.
     let menu = Rect::from_center_size(pos2(header.right() - 11.0, header.center().y + 1.0), vec2(10.0, 8.0));
-    draw_icon(&p, menu, Icon::Menu, TEXT_DIM);
+    let menu_hit = menu.expand2(vec2(6.0, 6.0));
+    let mresp = ui.interact(menu_hit, ui.id().with("tab_menu"), Sense::click());
+    draw_icon(&p, menu, Icon::Menu, if !hidden.is_empty() { HOT } else if mresp.hovered() { TEXT } else { TEXT_DIM });
+    let open_id = ui.id().with("tab_menu_open");
+    let mut open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+    if mresp.clicked() {
+        open = !open;
+    }
+    if !hidden.is_empty() {
+        let mresp = mresp.on_hover_text(format!("More panels: {}", hidden.iter().map(|i| names[*i]).collect::<Vec<_>>().join(", ")));
+        if open {
+            let area = egui::Area::new(open_id.with("area")).order(egui::Order::Foreground).fixed_pos(pos2(menu_hit.right() - 160.0, menu_hit.bottom() + 2.0));
+            let inner = area.show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(150.0);
+                    for &i in &hidden {
+                        if ui.selectable_label(false, names[i]).clicked() {
+                            *current = i;
+                            open = false;
+                        }
+                    }
+                });
+            });
+            if ui.input(|i| i.pointer.any_click()) && !inner.response.hovered() && !mresp.clicked() && !mresp.hovered() {
+                open = false;
+            }
+        }
+    } else {
+        open = false;
+    }
+    ui.data_mut(|d| d.insert_temp(open_id, open));
     ui.add_space(h - m + 4.0);
 }
 

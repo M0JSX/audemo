@@ -227,7 +227,7 @@ fn dehummer(i: &[Vec<f32>], c: &Ctx, p: &Params) -> Res {
 }
 
 /// Cubic Hermite fill of x[i0+1 .. i1) from the endpoints and their slopes.
-fn hermite_fill(x: &mut [f32], i0: usize, i1: usize) {
+pub(super) fn hermite_fill(x: &mut [f32], i0: usize, i1: usize) {
     if i0 == 0 || i1 + 1 >= x.len() || i1 <= i0 + 1 {
         return;
     }

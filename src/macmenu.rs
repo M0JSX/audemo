@@ -90,6 +90,7 @@ impl NativeMenu {
         let _ = edit.append(&sep());
         let _ = edit.append(&item("delete", "Delete", None));
         let _ = edit.append(&item("crop", "Crop", acc(false, Code::KeyT)));
+        let _ = edit.append(&item("heal", "Auto Heal Selection", acc(false, Code::KeyU)));
         let _ = edit.append(&sep());
         let select = Submenu::new("Select", true);
         let _ = select.append(&item("select_all", "Select All", acc(false, Code::KeyA)));
@@ -318,6 +319,7 @@ impl App {
             "paste_new" => Action::PasteNew,
             "delete" => Action::Delete,
             "crop" => Action::Crop,
+            "heal" => Action::SpectralHeal(None),
             "select_all" => Action::SelectAll,
             "deselect" => Action::Deselect,
             "marker" => Action::AddMarker,
