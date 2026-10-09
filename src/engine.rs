@@ -111,6 +111,8 @@ pub struct Shared {
     mix: Option<Arc<crate::session::MixState>>,
     /// Bumped whenever `mix` is replaced, so the callback refreshes its window.
     mix_gen: u64,
+    /// Per-track (L, R) peaks of the session mix since the UI last read them.
+    track_peaks: Vec<[f32; 2]>,
     src_rate: f64,
     pos: f64,
     start: f64,
@@ -249,6 +251,7 @@ impl Engine {
             stream: None,
             mix: None,
             mix_gen: 0,
+            track_peaks: Vec::new(),
             src_rate: 48000.0,
             pos: 0.0,
             start: 0.0,
@@ -346,6 +349,7 @@ impl Engine {
             s.playing = s.end > s.start;
             s.stream = None;
             s.mix_gen += 1;
+            s.track_peaks = vec![[0.0; 2]; state.tracks.len()];
             s.mix.replace(state)
         } else {
             None
@@ -360,11 +364,26 @@ impl Engine {
             Ok(mut s) if s.mix.is_some() => {
                 s.end = s.end.max(s.pos);
                 s.mix_gen += 1;
+                if s.track_peaks.len() != state.tracks.len() {
+                    s.track_peaks = vec![[0.0; 2]; state.tracks.len()];
+                }
                 s.mix.replace(state)
             }
             _ => None,
         };
         drop(old);
+    }
+
+    /// Per-track peaks of the playing session since the last call.
+    pub fn take_track_peaks(&self) -> Vec<[f32; 2]> {
+        match self.shared.lock() {
+            Ok(mut s) => {
+                let v = s.track_peaks.clone();
+                s.track_peaks.iter_mut().for_each(|p| *p = [0.0; 2]);
+                v
+            }
+            Err(_) => Vec::new(),
+        }
     }
 
     /// Change the end of the range being played (a session grew).
@@ -615,8 +634,9 @@ where
                         }
                         if let Some(m) = &st.mix {
                             if i0 < win.0 || i0 + 1 >= win.1 {
-                                let len = 4096;
-                                crate::session::mix_into(m, i0, i0 + len, &mut scratch);
+                                // ~20 ms ahead keeps edits and meters close to what you hear.
+                                let len = 1024;
+                                crate::session::mix_into(m, i0, i0 + len, &mut scratch, &mut st.track_peaks);
                                 win = (i0, i0 + len);
                             }
                         }

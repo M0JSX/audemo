@@ -15,7 +15,7 @@ use crate::dsp::util::{db_to_lin, format_time};
 use crate::editor::{ruler_label, RULER_STEPS};
 use crate::engine::Buffer;
 use crate::io::{self, WavFormat};
-use crate::session::{self, mix_range, Clip, Session, Source, SESSION_EXT};
+use crate::session::{self, crossfade_pairs, mix_range, Clip, Envelope, Session, Source, Track, SESSION_EXT, VOL_ENV_MAX, VOL_ENV_MIN};
 use crate::theme::*;
 
 const HEADER_W: f32 = 214.0;
@@ -53,6 +53,14 @@ pub enum MtDrag {
     FadeIn(u64),
     FadeOut(u64),
     Select(usize),
+    /// An automation point: (track, pan envelope?, point index).
+    EnvPoint(usize, bool, usize),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum EnvHit {
+    Point(usize),
+    Line,
 }
 
 pub struct MtRec {
@@ -73,6 +81,66 @@ pub struct MtState {
     pub sent_version: u64,
     context_clip: Option<u64>,
     context_track: Option<usize>,
+    /// Right-clicked automation: (track, pan?, point)
+    context_env: Option<(usize, bool, Option<usize>)>,
+    /// Per-track meter levels in dB (L, R), decayed.
+    pub meters: Vec<[f32; 2]>,
+    meter_at: Option<std::time::Instant>,
+}
+
+/// Where the automation lines are drawn inside a lane (below the clip names).
+fn env_area(lane: Rect) -> Rect {
+    Rect::from_min_max(pos2(lane.left(), lane.top() + CLIP_BAR + 2.0), pos2(lane.right(), lane.bottom() - 3.0))
+}
+
+fn env_y(pan: bool, v: f32, area: Rect) -> f32 {
+    let frac = if pan { (v + 100.0) / 200.0 } else { 1.0 - (v - VOL_ENV_MIN) / (VOL_ENV_MAX - VOL_ENV_MIN) };
+    area.top() + frac.clamp(0.0, 1.0) * area.height()
+}
+
+fn env_value(pan: bool, y: f32, area: Rect) -> f32 {
+    let frac = ((y - area.top()) / area.height().max(1.0)).clamp(0.0, 1.0);
+    if pan {
+        (frac * 200.0 - 100.0).round()
+    } else {
+        let db = VOL_ENV_MAX - frac * (VOL_ENV_MAX - VOL_ENV_MIN);
+        (db * 10.0).round() / 10.0
+    }
+}
+
+fn env_of(t: &Track, pan: bool) -> &Envelope {
+    if pan {
+        &t.pan_env
+    } else {
+        &t.vol_env
+    }
+}
+
+fn env_of_mut(t: &mut Track, pan: bool) -> &mut Envelope {
+    if pan {
+        &mut t.pan_env
+    } else {
+        &mut t.vol_env
+    }
+}
+
+const VOL_ENV_COL: Color32 = Color32::from_rgb(0xf2, 0xc2, 0x30);
+const PAN_ENV_COL: Color32 = Color32::from_rgb(0x4d, 0xa3, 0xff);
+
+/// Vertical stereo peak meter (levels in dB).
+fn draw_meter(p: &egui::Painter, r: Rect, db: [f32; 2]) {
+    p.rect_filled(r, 1.0, Color32::from_rgb(0x0c, 0x0e, 0x12));
+    let w = (r.width() - 1.0) / 2.0;
+    for (c, d) in db.iter().enumerate() {
+        let frac = ((d + 60.0) / 60.0).clamp(0.0, 1.0);
+        if frac <= 0.0 {
+            continue;
+        }
+        let x0 = r.left() + c as f32 * (w + 1.0);
+        let top = r.bottom() - frac * r.height();
+        let col = if *d > -0.1 { RECORD } else if *d > -6.0 { Color32::from_rgb(0xe8, 0xd2, 0x3a) } else { Color32::from_rgb(0x2f, 0xd4, 0x8c) };
+        p.rect_filled(Rect::from_min_max(pos2(x0, top), pos2(x0 + w, r.bottom())), 0.0, col);
+    }
 }
 
 /// Session-rate, at most stereo audio for a document (shared when possible).
@@ -176,13 +244,14 @@ impl App {
         id
     }
 
-    /// Place open document `doc_id` on a track of session `session_id`.
-    pub fn mt_insert_doc(&mut self, session_id: u64, track: usize, at: usize, doc_id: u64) {
-        let Some(doc) = self.docs.iter().find(|d| d.id == doc_id) else { return };
-        let Some(si) = self.sessions.iter().position(|s| s.id == session_id) else { return };
+    /// Place open document `doc_id` on a track of session `session_id`;
+    /// returns the new clip's id.
+    pub fn mt_insert_doc(&mut self, session_id: u64, track: usize, at: usize, doc_id: u64) -> Option<u64> {
+        let doc = self.docs.iter().find(|d| d.id == doc_id)?;
+        let si = self.sessions.iter().position(|s| s.id == session_id)?;
         if doc.len() == 0 {
             self.set_status(format!("{} is empty.", doc.name));
-            return;
+            return None;
         }
         let rate = self.sessions[si].sample_rate;
         let existing = self.sessions[si].sources.values().find(|s| s.doc_id == Some(doc_id)).map(|s| s.id);
@@ -201,7 +270,8 @@ impl App {
         while s.tracks.len() <= track {
             s.add_track();
         }
-        if s.insert_clip(track, src_id, at).is_some() {
+        let clip = s.insert_clip(track, src_id, at);
+        if clip.is_some() {
             s.selected_track = track;
             let end = s.end() as f64;
             if end > s.view_end && s.tracks.iter().map(|t| t.clips.len()).sum::<usize>() == 1 {
@@ -213,6 +283,7 @@ impl App {
         }
         self.active_session = Some(si);
         self.mode = Mode::Multitrack;
+        clip
     }
 
     /// A source referenced by a session file has loaded as `doc_id`.
@@ -414,6 +485,20 @@ impl App {
             }
             return;
         }
+        // Track meters fall at 24 dB/s between peaks.
+        let now = std::time::Instant::now();
+        let dt = self.mt.meter_at.map(|t| (now - t).as_secs_f32()).unwrap_or(0.0).min(0.1);
+        self.mt.meter_at = Some(now);
+        let n_tracks = self.session().map(|s| s.tracks.len()).unwrap_or(0);
+        let active_playing = self.session().map(|s| st.playing && st.tag == s.id).unwrap_or(false);
+        let peaks = if active_playing { self.engine.take_track_peaks() } else { Vec::new() };
+        self.mt.meters.resize(n_tracks, [-120.0; 2]);
+        for (i, m) in self.mt.meters.iter_mut().enumerate() {
+            for c in 0..2 {
+                let db = peaks.get(i).map(|p| crate::dsp::util::lin_to_db(p[c])).unwrap_or(-120.0).max(-120.0);
+                m[c] = db.max(m[c] - 24.0 * dt);
+            }
+        }
         let follow = self.follow;
         let recording = self.engine.is_recording();
         let rec_head = self.transport_info().map(|t| t.0);
@@ -540,8 +625,21 @@ impl App {
             self.active = Some(self.docs.len() - 1);
         }
         match target {
-            Some((_, ti)) => {
-                self.mt_insert_doc(rec.session_id, ti, rec.start, id);
+            Some((si, ti)) => {
+                if let Some(cid) = self.mt_insert_doc(rec.session_id, ti, rec.start, id) {
+                    // Latency compensation: the take arrived late, so move it earlier.
+                    let shift = (self.prefs.rec_offset_ms as f64 * self.sessions[si].sample_rate as f64 / 1000.0) as usize;
+                    if let Some(c) = self.sessions[si].clip_mut(cid).filter(|_| shift > 0) {
+                        if c.start >= shift {
+                            c.start -= shift;
+                        } else {
+                            let d = (shift - c.start).min(c.len - 1);
+                            c.start = 0;
+                            c.offset += d;
+                            c.len -= d;
+                        }
+                    }
+                }
                 self.set_status(format!("Recorded {secs:.1} s onto {tname}"));
             }
             // The track went away: keep the take as a file rather than lose it.
@@ -1087,6 +1185,55 @@ impl App {
                 let selected = s.selected_clips.contains(&c.id);
                 draw_clip(&clip_painter, r, c, s.sources.get(&c.source).map(|a| a.as_ref()), colour(t.colour), selected, t.mute || c.mute, &v, lane);
             }
+            // Automatic crossfades where clips overlap.
+            for (ia, ib) in crossfade_pairs(&t.clips) {
+                let (ca, cb) = (&t.clips[ia], &t.clips[ib]);
+                let (x0, x1) = (v.x(cb.start as f64), v.x(ca.end() as f64));
+                if x1 < lane.left() || x0 > lane.right() || x1 - x0 < 2.0 {
+                    continue;
+                }
+                let area = Rect::from_min_max(pos2(x0, lane.top() + CLIP_BAR + 1.0), pos2(x1, lane.bottom() - 1.0));
+                clip_painter.rect_filled(area, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 70));
+                let n = 20;
+                let curve = |up: bool| -> Vec<egui::Pos2> {
+                    (0..=n)
+                        .map(|k| {
+                            let f = k as f32 / n as f32;
+                            let g = if up { (std::f32::consts::FRAC_PI_2 * f).sin() } else { (std::f32::consts::FRAC_PI_2 * (1.0 - f)).sin() };
+                            pos2(area.left() + f * area.width(), area.bottom() - g * area.height())
+                        })
+                        .collect()
+                };
+                clip_painter.add(Shape::line(curve(true), Stroke::new(1.0_f32, VOL_ENV_COL)));
+                clip_painter.add(Shape::line(curve(false), Stroke::new(1.0_f32, VOL_ENV_COL)));
+            }
+            // Automation lines.
+            if t.show_env {
+                let area = env_area(lane);
+                for pan in [true, false] {
+                    let env = env_of(t, pan);
+                    let col = if pan { PAN_ENV_COL } else { VOL_ENV_COL };
+                    let constant = if pan { t.pan } else { t.volume_db };
+                    if env.is_empty() {
+                        let y = env_y(pan, constant, area);
+                        clip_painter.line_segment([pos2(lane.left(), y), pos2(lane.right(), y)], Stroke::new(1.0_f32, col.linear_multiply(0.6)));
+                        continue;
+                    }
+                    let mut pts = vec![pos2(lane.left(), env_y(pan, env.points[0].1, area))];
+                    for (p, val) in &env.points {
+                        pts.push(pos2(v.x(*p as f64), env_y(pan, *val, area)));
+                    }
+                    pts.push(pos2(lane.right(), env_y(pan, env.points.last().unwrap().1, area)));
+                    clip_painter.add(Shape::line(pts, Stroke::new(1.5_f32, col)));
+                    for (p, val) in &env.points {
+                        let c = pos2(v.x(*p as f64), env_y(pan, *val, area));
+                        if c.x >= lane.left() - 4.0 && c.x <= lane.right() + 4.0 {
+                            clip_painter.rect_filled(Rect::from_center_size(c, vec2(7.0, 7.0)), 1.0, col);
+                            clip_painter.rect_stroke(Rect::from_center_size(c, vec2(7.0, 7.0)), 1.0, Stroke::new(1.0_f32, Color32::BLACK));
+                        }
+                    }
+                }
+            }
             // Live recording on this track.
             if let Some((rec_track, rec_start, in_rate)) = rec_info {
                 if rec_track == t.id {
@@ -1156,9 +1303,43 @@ impl App {
             }
             Some((ti, best))
         };
+        // Automation points and lines take priority over clips when shown.
+        let env_hit = |p: egui::Pos2, s: &Session| -> Option<(usize, bool, EnvHit)> {
+            let ti = track_at(p.y)?;
+            let t = &s.tracks[ti];
+            if !t.show_env {
+                return None;
+            }
+            let area = env_area(Rect::from_min_max(pos2(lanes_x, rows[ti].top()), rows[ti].max));
+            for pan in [false, true] {
+                for (i, (pp, val)) in env_of(t, pan).points.iter().enumerate() {
+                    let c = pos2(v.x(*pp as f64), env_y(pan, *val, area));
+                    if (c.x - p.x).abs() <= 6.0 && (c.y - p.y).abs() <= 6.0 {
+                        return Some((ti, pan, EnvHit::Point(i)));
+                    }
+                }
+            }
+            let over_clip = matches!(hit(p, s), Some((_, Some(_))));
+            for pan in [false, true] {
+                let env = env_of(t, pan);
+                // An empty envelope's flat line only catches clicks away from clips,
+                // so selecting a clip doesn't create automation by accident.
+                if env.is_empty() && over_clip {
+                    continue;
+                }
+                let val = env.value_at(v.s(p.x).max(0.0) as usize).unwrap_or(if pan { t.pan } else { t.volume_db });
+                if (env_y(pan, val, area) - p.y).abs() <= 5.0 {
+                    return Some((ti, pan, EnvHit::Line));
+                }
+            }
+            None
+        };
+        let env_area_of = |ti: usize| env_area(Rect::from_min_max(pos2(lanes_x, rows[ti].top()), rows[ti].max));
         // Cursor shape.
         if let Some(p) = pointer.filter(|p| lane_area.contains(*p)) {
-            if self.mt.drag.is_none() {
+            if self.mt.drag.is_none() && env_hit(p, s).is_some() {
+                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+            } else if self.mt.drag.is_none() {
                 match hit(p, s) {
                     Some((_, Some((_, Zone::Left | Zone::Right)))) => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),
                     Some((_, Some((_, Zone::FadeIn | Zone::FadeOut)))) => ui.ctx().set_cursor_icon(CursorIcon::PointingHand),
@@ -1184,7 +1365,21 @@ impl App {
         if resp.drag_started() {
             if let Some(p) = resp.interact_pointer_pos() {
                 let pos = v.s(p.x).max(0.0);
-                match hit(p, s) {
+                let env = env_hit(p, s);
+                if let Some((ti, pan, h)) = env {
+                    s.selected_track = ti;
+                    s.push_undo(if pan { "Pan Automation" } else { "Volume Automation" });
+                    let idx = match h {
+                        EnvHit::Point(i) => i,
+                        EnvHit::Line => {
+                            let val = env_value(pan, p.y, env_area_of(ti));
+                            env_of_mut(&mut s.tracks[ti], pan).insert(pos as usize, val)
+                        }
+                    };
+                    s.touch();
+                    self.mt.drag = Some(MtDrag::EnvPoint(ti, pan, idx));
+                }
+                match if env.is_some() { None } else { hit(p, s) } {
                     Some((ti, Some((id, zone)))) => {
                         s.selected_track = ti;
                         if !s.selected_clips.contains(&id) {
@@ -1279,6 +1474,23 @@ impl App {
                         }
                         s.touch();
                     }
+                    MtDrag::EnvPoint(ti, pan, idx) => {
+                        let (ti, pan, idx) = (*ti, *pan, *idx);
+                        if ti < s.tracks.len() {
+                            let area = env_area_of(ti);
+                            let val = env_value(pan, p.y, area);
+                            env_of_mut(&mut s.tracks[ti], pan).move_point(idx, pos as usize, val);
+                            s.touch();
+                            let label = if pan {
+                                if val.abs() < 0.5 { "C".to_string() } else if val < 0.0 { format!("L {:.0}", -val) } else { format!("R {val:.0}") }
+                            } else if val <= VOL_ENV_MIN {
+                                "-∞ dB".to_string()
+                            } else {
+                                format!("{val:+.1} dB")
+                            };
+                            painter.text(p + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, label, FontId::monospace(11.0), if pan { PAN_ENV_COL } else { VOL_ENV_COL });
+                        }
+                    }
                     MtDrag::Select(anchor) => {
                         let b = snap(pos, s, None) as usize;
                         let (lo, hi) = if b < *anchor { (b, *anchor) } else { (*anchor, b) };
@@ -1300,7 +1512,8 @@ impl App {
         }
         if resp.clicked() {
             if let Some(p) = resp.interact_pointer_pos() {
-                match hit(p, s) {
+                let env = env_hit(p, s);
+                match if env.is_some() { None } else { hit(p, s) } {
                     Some((ti, Some((id, _)))) => {
                         s.selected_track = ti;
                         if mods.command || mods.shift {
@@ -1325,12 +1538,27 @@ impl App {
             }
         }
         if resp.double_clicked() {
-            if let Some((_, Some((id, _)))) = resp.interact_pointer_pos().and_then(|p| hit(p, s)) {
-                self.actions.push(Action::MtEditSource(id));
+            let p = resp.interact_pointer_pos();
+            let env = p.and_then(|p| env_hit(p, s));
+            if let Some((ti, pan, EnvHit::Point(i))) = env {
+                s.push_undo("Delete Automation Point");
+                env_of_mut(&mut s.tracks[ti], pan).points.remove(i);
+                s.touch();
+            } else if let (Some((ti, pan, EnvHit::Line)), Some(p)) = (env, p) {
+                s.push_undo(if pan { "Pan Automation" } else { "Volume Automation" });
+                let val = env_value(pan, p.y, env_area_of(ti));
+                env_of_mut(&mut s.tracks[ti], pan).insert(v.s(p.x).max(0.0) as usize, val);
+                s.touch();
+            } else if env.is_none() {
+                if let Some((_, Some((id, _)))) = resp.interact_pointer_pos().and_then(|p| hit(p, s)) {
+                    self.actions.push(Action::MtEditSource(id));
+                }
             }
         }
         if resp.secondary_clicked() {
-            let h = resp.interact_pointer_pos().and_then(|p| hit(p, s));
+            let env = resp.interact_pointer_pos().and_then(|p| env_hit(p, s));
+            self.mt.context_env = env.map(|(ti, pan, h)| (ti, pan, if let EnvHit::Point(i) = h { Some(i) } else { None }));
+            let h = if env.is_some() { None } else { resp.interact_pointer_pos().and_then(|p| hit(p, s)) };
             self.mt.context_clip = h.and_then(|h| h.1.map(|c| c.0));
             self.mt.context_track = h.map(|h| h.0);
             if let Some(id) = self.mt.context_clip {
@@ -1414,6 +1642,7 @@ impl App {
         let n_tracks = s.tracks.len();
         let mut changed = false;
         let mut toggles: Vec<(usize, bool)> = Vec::new(); // (track, true = mute / false = solo)
+        let mut view_changed = false;
         for ti in 0..n_tracks {
             let row = rows[ti];
             if row.bottom() < body.top() || row.top() > body.bottom() {
@@ -1438,13 +1667,16 @@ impl App {
                     ui.close_menu();
                 }
             });
-            let inner = Rect::from_min_max(pos2(hr.left() + 10.0, hr.top() + 4.0), pos2(hr.right() - 4.0, hr.bottom() - 2.0));
+            // Track meter down the right-hand edge.
+            let meter_r = Rect::from_min_max(pos2(hr.right() - 10.0, hr.top() + 4.0), pos2(hr.right() - 3.0, hr.bottom() - 4.0));
+            draw_meter(&hp, meter_r, self.mt.meters.get(ti).copied().unwrap_or([-120.0; 2]));
+            let inner = Rect::from_min_max(pos2(hr.left() + 10.0, hr.top() + 4.0), pos2(hr.right() - 13.0, hr.bottom() - 2.0));
             let mut child = ui.child_ui(inner, Layout::top_down(Align::Min), None);
             child.set_clip_rect(inner.intersect(header_clip));
             let t = &mut s.tracks[ti];
             child.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
-                let r = ui.add(egui::TextEdit::singleline(&mut t.name).desired_width(118.0).font(FontId::proportional(12.0)));
+                let r = ui.add(egui::TextEdit::singleline(&mut t.name).desired_width(88.0).font(FontId::proportional(12.0)));
                 if r.changed() {
                     changed = true;
                 }
@@ -1452,6 +1684,7 @@ impl App {
                     ("M", t.mute, "Mute", Color32::from_rgb(0x4d, 0xa3, 0xff)),
                     ("S", t.solo, "Solo", Color32::from_rgb(0xe8, 0xc4, 0x3a)),
                     ("R", t.arm, "Arm for Record", RECORD),
+                    ("A", t.show_env, "Show volume (yellow) and pan (blue) automation", VOL_ENV_COL),
                 ] {
                     let btn = egui::Button::new(RichText::new(label).font(bold(11.0)).color(if on { Color32::BLACK } else { TEXT }))
                         .fill(if on { col } else { Color32::from_rgb(0x2c, 0x2c, 0x2c) })
@@ -1460,6 +1693,10 @@ impl App {
                         match label {
                             "M" => toggles.push((ti, true)),
                             "S" => toggles.push((ti, false)),
+                            "A" => {
+                                t.show_env = !t.show_env;
+                                view_changed = true;
+                            }
                             _ => t.arm = !t.arm,
                         }
                     }
@@ -1468,21 +1705,30 @@ impl App {
             if inner.height() > 40.0 {
                 child.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 3.0;
+                    let auto_tip = "Automated: edit the line on the track (A shows it), or right-click the line to clear it";
                     ui.label(RichText::new("Vol").color(TEXT_DIM).size(11.0));
-                    let r = hot_drag(ui, egui::DragValue::new(&mut t.volume_db).speed(0.2).range(-96.0..=12.0).fixed_decimals(1).suffix(" dB"));
-                    if r.double_clicked() {
-                        t.volume_db = 0.0;
-                    }
-                    if r.changed() || r.double_clicked() {
-                        changed = true;
+                    if t.vol_env.is_empty() {
+                        let r = hot_drag(ui, egui::DragValue::new(&mut t.volume_db).speed(0.2).range(-96.0..=12.0).fixed_decimals(1).suffix(" dB"));
+                        if r.double_clicked() {
+                            t.volume_db = 0.0;
+                        }
+                        if r.changed() || r.double_clicked() {
+                            changed = true;
+                        }
+                    } else {
+                        ui.label(RichText::new("Auto").color(VOL_ENV_COL).size(11.5)).on_hover_text(auto_tip);
                     }
                     ui.label(RichText::new("Pan").color(TEXT_DIM).size(11.0));
-                    let r = hot_drag(ui, egui::DragValue::new(&mut t.pan).speed(0.5).range(-100.0..=100.0).fixed_decimals(0));
-                    if r.double_clicked() {
-                        t.pan = 0.0;
-                    }
-                    if r.changed() || r.double_clicked() {
-                        changed = true;
+                    if t.pan_env.is_empty() {
+                        let r = hot_drag(ui, egui::DragValue::new(&mut t.pan).speed(0.5).range(-100.0..=100.0).fixed_decimals(0));
+                        if r.double_clicked() {
+                            t.pan = 0.0;
+                        }
+                        if r.changed() || r.double_clicked() {
+                            changed = true;
+                        }
+                    } else {
+                        ui.label(RichText::new("Auto").color(PAN_ENV_COL).size(11.5)).on_hover_text(auto_tip);
                     }
                 });
             }
@@ -1507,6 +1753,9 @@ impl App {
         }
         if changed {
             s.touch();
+        }
+        if view_changed {
+            s.dirty = true;
         }
         // Empty area under the last track.
         let below = Rect::from_min_max(pos2(body.left(), y.max(body.top())), pos2(lanes_x - 1.0, body.bottom()));
@@ -1543,9 +1792,34 @@ impl App {
 
         // ------------------------------------------------ clip context menu
         let ctx_clip = self.mt.context_clip;
+        let ctx_env = self.mt.context_env;
         let mut menu_action: Option<Action> = None;
         resp.context_menu(|ui| {
-            if let Some(id) = ctx_clip {
+            if let Some((ti, pan, point)) = ctx_env.filter(|e| e.0 < s.tracks.len()) {
+                let what = if pan { "Pan" } else { "Volume" };
+                if let Some(i) = point {
+                    if ui.button("Delete Point").clicked() {
+                        s.push_undo("Delete Automation Point");
+                        let e = env_of_mut(&mut s.tracks[ti], pan);
+                        if i < e.points.len() {
+                            e.points.remove(i);
+                        }
+                        s.touch();
+                        ui.close_menu();
+                    }
+                }
+                if ui.button(format!("Clear {what} Automation")).clicked() {
+                    s.push_undo(if pan { "Clear Pan Automation" } else { "Clear Volume Automation" });
+                    env_of_mut(&mut s.tracks[ti], pan).points.clear();
+                    s.touch();
+                    ui.close_menu();
+                }
+                if ui.button("Hide Automation").clicked() {
+                    s.tracks[ti].show_env = false;
+                    s.dirty = true;
+                    ui.close_menu();
+                }
+            } else if let Some(id) = ctx_clip {
                 if ui.button("Split at Playhead            Ctrl+K").clicked() {
                     menu_action = Some(Action::MtSplit);
                     ui.close_menu();
@@ -1616,68 +1890,134 @@ impl App {
     fn mt_mixer(&mut self, ui: &mut Ui, si: usize) {
         let rect = ui.available_rect_before_wrap();
         ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(0x2b, 0x2b, 0x2b));
+        let master_meter = self.meter_db;
+        let meters = self.mt.meters.clone();
         let s = &mut self.sessions[si];
         let mut changed = false;
-        let strip = |ui: &mut Ui, name: &mut String, col: Color32, vol: &mut f32, pan: Option<&mut f32>, flags: Option<(&mut bool, &mut bool, &mut bool)>, changed: &mut bool| {
+        let mut toggles: Vec<(usize, bool)> = Vec::new();
+        let fader_h = (rect.height() - 230.0).max(80.0);
+        #[allow(clippy::too_many_arguments)]
+        let strip = |ui: &mut Ui,
+                     name: &mut String,
+                     col: Color32,
+                     vol: &mut f32,
+                     vol_auto: bool,
+                     pan: Option<(&mut f32, bool)>,
+                     flags: Option<(bool, bool, &mut bool)>,
+                     meter: [f32; 2],
+                     changed: &mut bool|
+         -> (bool, bool) {
+            let mut clicked = (false, false);
             egui::Frame::none().fill(BG_PANEL).inner_margin(egui::Margin::same(6.0)).rounding(3.0).show(ui, |ui| {
-                ui.set_width(92.0);
+                ui.set_width(96.0);
                 ui.set_min_height(rect.height() - 24.0);
                 ui.vertical_centered(|ui| {
-                    let (r, _) = ui.allocate_exact_size(vec2(88.0, 4.0), Sense::hover());
+                    let (r, _) = ui.allocate_exact_size(vec2(92.0, 4.0), Sense::hover());
                     ui.painter().rect_filled(r, 1.0, col);
-                    if ui.add(egui::TextEdit::singleline(name).desired_width(86.0).horizontal_align(Align::Center)).changed() {
+                    if ui.add(egui::TextEdit::singleline(name).desired_width(90.0).horizontal_align(Align::Center)).changed() {
                         *changed = true;
                     }
-                    if let Some(p) = pan {
-                        ui.label(RichText::new("Pan").color(TEXT_DIM).size(10.5));
-                        let r = hot_drag(ui, egui::DragValue::new(p).speed(0.5).range(-100.0..=100.0).fixed_decimals(0));
-                        if r.double_clicked() {
-                            *p = 0.0;
-                        }
-                        *changed |= r.changed() || r.double_clicked();
-                    } else {
-                        ui.add_space(34.0);
-                    }
-                    if let Some((m, so, a)) = flags {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 2.0;
-                            for (label, on, c) in [("M", m, Color32::from_rgb(0x4d, 0xa3, 0xff)), ("S", so, Color32::from_rgb(0xe8, 0xc4, 0x3a)), ("R", a, RECORD)] {
-                                let b = egui::Button::new(RichText::new(label).font(bold(11.0)).color(if *on { Color32::BLACK } else { TEXT })).fill(if *on { c } else { Color32::from_rgb(0x2c, 0x2c, 0x2c) }).min_size(vec2(26.0, 20.0));
-                                if ui.add(b).clicked() {
-                                    *on = !*on;
-                                    *changed = true;
+                    match pan {
+                        Some((p, auto)) => {
+                            ui.label(RichText::new("Pan").color(TEXT_DIM).size(10.5));
+                            if auto {
+                                ui.label(RichText::new("Auto").color(PAN_ENV_COL));
+                            } else {
+                                let r = hot_drag(ui, egui::DragValue::new(p).speed(0.5).range(-100.0..=100.0).fixed_decimals(0));
+                                if r.double_clicked() {
+                                    *p = 0.0;
                                 }
+                                *changed |= r.changed() || r.double_clicked();
                             }
-                        });
-                    } else {
-                        ui.add_space(24.0);
+                        }
+                        None => {
+                            ui.add_space(34.0);
+                        }
+                    }
+                    match flags {
+                        Some((m, so, arm)) => {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 2.0;
+                                ui.add_space(6.0);
+                                for (label, on, c) in [("M", m, Color32::from_rgb(0x4d, 0xa3, 0xff)), ("S", so, Color32::from_rgb(0xe8, 0xc4, 0x3a)), ("R", *arm, RECORD)] {
+                                    let b = egui::Button::new(RichText::new(label).font(bold(11.0)).color(if on { Color32::BLACK } else { TEXT })).fill(if on { c } else { Color32::from_rgb(0x2c, 0x2c, 0x2c) }).min_size(vec2(26.0, 20.0));
+                                    if ui.add(b).clicked() {
+                                        match label {
+                                            "M" => clicked.0 = true,
+                                            "S" => clicked.1 = true,
+                                            _ => *arm = !*arm,
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        None => {
+                            ui.add_space(24.0);
+                        }
                     }
                     ui.add_space(6.0);
-                    ui.spacing_mut().slider_width = (rect.height() - 230.0).max(80.0);
-                    let r = ui.add(egui::Slider::new(vol, -60.0..=12.0).vertical().show_value(false));
-                    if r.double_clicked() {
-                        *vol = 0.0;
+                    ui.horizontal(|ui| {
+                        ui.add_space(10.0);
+                        ui.spacing_mut().slider_width = fader_h;
+                        let r = ui.add_enabled(!vol_auto, egui::Slider::new(vol, -60.0..=12.0).vertical().show_value(false));
+                        if r.double_clicked() {
+                            *vol = 0.0;
+                        }
+                        *changed |= r.changed() || r.double_clicked();
+                        let (mr, _) = ui.allocate_exact_size(vec2(12.0, fader_h), Sense::hover());
+                        draw_meter(ui.painter(), mr, meter);
+                    });
+                    if vol_auto {
+                        ui.label(RichText::new("Auto").color(VOL_ENV_COL));
+                    } else {
+                        let r = hot_drag(ui, egui::DragValue::new(vol).speed(0.2).range(-96.0..=12.0).fixed_decimals(1).suffix(" dB"));
+                        *changed |= r.changed();
                     }
-                    *changed |= r.changed() || r.double_clicked();
-                    let r = hot_drag(ui, egui::DragValue::new(vol).speed(0.2).range(-96.0..=12.0).fixed_decimals(1).suffix(" dB"));
-                    *changed |= r.changed();
                 });
             });
+            clicked
         };
         ui.allocate_ui_at_rect(rect.shrink(6.0), |ui| {
             egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    for t in s.tracks.iter_mut() {
+                    for (ti, t) in s.tracks.iter_mut().enumerate() {
                         let col = colour(t.colour);
-                        strip(ui, &mut t.name, col, &mut t.volume_db, Some(&mut t.pan), Some((&mut t.mute, &mut t.solo, &mut t.arm)), &mut changed);
+                        let (va, pa) = (!t.vol_env.is_empty(), !t.pan_env.is_empty());
+                        let (mute_c, solo_c) = strip(
+                            ui,
+                            &mut t.name,
+                            col,
+                            &mut t.volume_db,
+                            va,
+                            Some((&mut t.pan, pa)),
+                            Some((t.mute, t.solo, &mut t.arm)),
+                            meters.get(ti).copied().unwrap_or([-120.0; 2]),
+                            &mut changed,
+                        );
+                        if mute_c {
+                            toggles.push((ti, true));
+                        }
+                        if solo_c {
+                            toggles.push((ti, false));
+                        }
                     }
                     ui.add_space(12.0);
                     let mut name = "Mix".to_string();
-                    strip(ui, &mut name, Color32::WHITE, &mut s.master_db, None, None, &mut changed);
+                    strip(ui, &mut name, Color32::WHITE, &mut s.master_db, false, None, None, master_meter, &mut changed);
                 });
             });
         });
+        for (ti, mute) in toggles {
+            s.push_undo(if mute { "Mute Track" } else { "Solo Track" });
+            let t = &mut s.tracks[ti];
+            if mute {
+                t.mute = !t.mute;
+            } else {
+                t.solo = !t.solo;
+            }
+            changed = true;
+        }
         if changed {
             s.touch();
         }

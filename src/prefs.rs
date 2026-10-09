@@ -14,6 +14,8 @@ pub struct Prefs {
     pub recent: Vec<PathBuf>,
     pub browser_dir: Option<PathBuf>,
     pub browser_autoplay: bool,
+    /// Recording latency compensation for multitrack overdubs, in ms.
+    pub rec_offset_ms: f32,
 }
 
 pub fn config_dir() -> Option<PathBuf> {
@@ -86,6 +88,7 @@ impl Prefs {
                 "recent" if !v.is_empty() => p.recent.push(PathBuf::from(v)),
                 "browser_dir" if !v.is_empty() => p.browser_dir = Some(PathBuf::from(v)),
                 "browser_autoplay" => p.browser_autoplay = v == "1" || v == "true",
+                "rec_offset_ms" => p.rec_offset_ms = v.parse::<f32>().unwrap_or(0.0).clamp(0.0, 1000.0),
                 _ => {}
             }
         }
@@ -105,6 +108,7 @@ impl Prefs {
             s += &format!("browser_dir={}\n", d.display());
         }
         s += &format!("browser_autoplay={}\n", if self.browser_autoplay { 1 } else { 0 });
+        s += &format!("rec_offset_ms={}\n", self.rec_offset_ms);
         for r in &self.recent {
             s += &format!("recent={}\n", r.display());
         }
@@ -140,7 +144,7 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let mut p = Prefs { input_device: Some("MacBook Air Microphone".into()), browser_autoplay: false, ..Default::default() };
+        let mut p = Prefs { input_device: Some("MacBook Air Microphone".into()), browser_autoplay: false, rec_offset_ms: 12.5, ..Default::default() };
         p.add_recent(PathBuf::from("/a/b.wav"));
         p.add_recent(PathBuf::from("/c d/e=f.wav"));
         p.add_recent(PathBuf::from("/a/b.wav"));

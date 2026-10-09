@@ -381,7 +381,7 @@ pub enum Dialog {
     /// New Audio File; `then_record` starts recording into it on OK.
     NewFile { name: String, rate: u32, channels: usize, bits: Option<u32>, seconds: f32, then_record: bool },
     Export { format: WavFormat, dither: bool, path: Option<PathBuf>, selection: bool },
-    Preferences { input: Option<String>, output: Option<String>, inputs: Vec<String>, outputs: Vec<String> },
+    Preferences { input: Option<String>, output: Option<String>, inputs: Vec<String>, outputs: Vec<String>, latency_ms: f32 },
     MixPaste { mode: usize, clip_db: f32, orig_db: f32 },
     Convert { rate: u32, channels: usize },
     Shortcuts,
@@ -1959,6 +1959,7 @@ impl App {
                     output: self.prefs.output_device.clone(),
                     inputs,
                     outputs,
+                    latency_ms: self.prefs.rec_offset_ms,
                 });
             }
             Action::ApplyRack => self.apply_rack(),

@@ -42,6 +42,9 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Multitrack: split clip at playhead", "Ctrl+K"),
     ("Multitrack: move / trim / fade a clip", "Drag the clip / its edges / its yellow handles"),
     ("Multitrack: snap off while dragging", "Hold Alt"),
+    ("Multitrack: show automation", "A on the track header"),
+    ("Multitrack: add / move / delete automation point", "Double-click or drag the line / drag a point / double-click a point"),
+    ("Multitrack: crossfade two clips", "Overlap them on the same track"),
     ("Multitrack: scroll tracks", "Wheel over the track headers, or Alt+wheel"),
     ("Multitrack: open a clip's file", "Double-click the clip"),
 ];
@@ -159,7 +162,7 @@ impl App {
                     next = Some(Dialog::Export { format, dither, path, selection });
                 }
             }
-            Dialog::Preferences { mut input, mut output, inputs, outputs } => {
+            Dialog::Preferences { mut input, mut output, inputs, outputs, mut latency_ms } => {
                 let mut open = true;
                 centered(egui::Window::new("Preferences: Audio Hardware").open(&mut open)).show(ctx, |ui| {
                     ui.set_min_width(460.0);
@@ -185,6 +188,12 @@ impl App {
                         ui.label("Output in use");
                         ui.label(RichText::new(format!("{} @ {} Hz, {} ch", self.engine.device_name, self.engine.out_rate, self.engine.out_channels)).color(TEXT_DIM));
                         ui.end_row();
+                        ui.label("Recording latency");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::DragValue::new(&mut latency_ms).speed(0.5).range(0.0..=1000.0).fixed_decimals(1).suffix(" ms"));
+                            ui.label(RichText::new("moves multitrack takes earlier to line up with what you heard").color(TEXT_DIM).size(11.0));
+                        });
+                        ui.end_row();
                     });
                     ui.label(RichText::new("Recordings are captured at the input device's native rate and converted to the file's sample rate when you stop.").color(TEXT_DIM).size(11.0));
                     ui.add_space(6.0);
@@ -201,6 +210,7 @@ impl App {
                             let out_changed = self.prefs.output_device != output;
                             self.prefs.input_device = input.clone();
                             self.prefs.output_device = output.clone();
+                            self.prefs.rec_offset_ms = latency_ms;
                             self.prefs.save();
                             if out_changed {
                                 match self.engine.set_output(output.clone()) {
@@ -212,7 +222,7 @@ impl App {
                     });
                 });
                 if open && keep {
-                    next = Some(Dialog::Preferences { input, output, inputs, outputs });
+                    next = Some(Dialog::Preferences { input, output, inputs, outputs, latency_ms });
                 }
             }
             Dialog::MixPaste { mut mode, mut clip_db, mut orig_db } => {

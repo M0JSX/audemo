@@ -89,6 +89,135 @@ impl Clip {
     }
 }
 
+/// Volume automation below this many dB means silence.
+pub const VOL_ENV_MIN: f32 = -60.0;
+pub const VOL_ENV_MAX: f32 = 12.0;
+
+/// Automation: (timeline position, value) points, kept sorted by position.
+/// Between points the value is interpolated linearly; before the first and
+/// after the last it holds.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Envelope {
+    pub points: Vec<(usize, f32)>,
+}
+
+impl Envelope {
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty()
+    }
+
+    pub fn value_at(&self, pos: usize) -> Option<f32> {
+        let p = &self.points;
+        if p.is_empty() {
+            return None;
+        }
+        let i = p.partition_point(|q| q.0 <= pos);
+        if i == 0 {
+            return Some(p[0].1);
+        }
+        if i == p.len() {
+            return Some(p[i - 1].1);
+        }
+        let ((x0, y0), (x1, y1)) = (p[i - 1], p[i]);
+        if x1 <= x0 {
+            return Some(y1);
+        }
+        let t = (pos - x0) as f32 / (x1 - x0) as f32;
+        Some(y0 + (y1 - y0) * t)
+    }
+
+    /// Add a point; returns its index.
+    pub fn insert(&mut self, pos: usize, v: f32) -> usize {
+        let i = self.points.partition_point(|q| q.0 < pos);
+        self.points.insert(i, (pos, v));
+        i
+    }
+
+    /// Move point `i`, keeping it between its neighbours.
+    pub fn move_point(&mut self, i: usize, pos: usize, v: f32) {
+        if i >= self.points.len() {
+            return;
+        }
+        let lo = if i > 0 { self.points[i - 1].0 } else { 0 };
+        let hi = self.points.get(i + 1).map(|q| q.0).unwrap_or(usize::MAX);
+        self.points[i] = (pos.clamp(lo, hi), v);
+    }
+
+    fn to_text(&self) -> String {
+        self.points.iter().map(|(p, v)| format!("{p}:{v}")).collect::<Vec<_>>().join(",")
+    }
+
+    fn parse(s: &str) -> Self {
+        let mut points: Vec<(usize, f32)> = s
+            .split(',')
+            .filter_map(|kv| {
+                let (k, v) = kv.split_once(':')?;
+                Some((k.trim().parse().ok()?, v.trim().parse().ok()?))
+            })
+            .collect();
+        points.sort_by_key(|p| p.0);
+        Envelope { points }
+    }
+}
+
+/// Pan gains for -100 (left) .. +100 (right): the centre is unity and panning
+/// attenuates the opposite side (Audition's default pan law).
+pub fn pan_gains(pan: f32) -> (f32, f32) {
+    let p = (pan / 100.0).clamp(-1.0, 1.0);
+    let cut = |x: f32| (std::f32::consts::FRAC_PI_2 * x).cos();
+    if p >= 0.0 {
+        (cut(p), 1.0)
+    } else {
+        (1.0, cut(-p))
+    }
+}
+
+/// Linear gain for an automation volume in dB (silence at the bottom).
+pub fn env_gain(db: f32) -> f32 {
+    if db <= VOL_ENV_MIN {
+        0.0
+    } else {
+        db_to_lin(db)
+    }
+}
+
+/// Overlapping clips on one track cross-fade automatically, as in Audition:
+/// where clip B starts inside clip A and runs past its end, A fades out and
+/// B fades in across the overlap. Returns the clips with those fades applied.
+pub fn effective_clips(clips: &[Clip]) -> Vec<Clip> {
+    let mut v = clips.to_vec();
+    for (a, b) in crossfade_pairs(clips) {
+        let x = v[a].end() - v[b].start;
+        v[a].fade_out = v[a].fade_out.max(x);
+        v[b].fade_in = v[b].fade_in.max(x);
+    }
+    for c in v.iter_mut() {
+        let total = c.fade_in + c.fade_out;
+        if total > c.len && total > 0 {
+            c.fade_in = (c.fade_in as u64 * c.len as u64 / total as u64) as usize;
+            c.fade_out = c.len - c.fade_in;
+        }
+    }
+    v
+}
+
+/// (earlier, later) index pairs of partially overlapping, unmuted clips.
+pub fn crossfade_pairs(clips: &[Clip]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for (i, a) in clips.iter().enumerate() {
+        for (j, b) in clips.iter().enumerate() {
+            if i == j || a.mute || b.mute {
+                continue;
+            }
+            let b_after = b.start > a.start || (b.start == a.start && j > i);
+            if b_after && b.start < a.end() && b.end() > a.end() {
+                out.push((i, j));
+            }
+        }
+    }
+    out
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Track {
     pub id: u64,
@@ -102,23 +231,44 @@ pub struct Track {
     pub arm: bool,
     pub height: f32,
     pub clips: Vec<Clip>,
+    /// Volume automation in dB (overrides `volume_db` when not empty).
+    pub vol_env: Envelope,
+    /// Pan automation (overrides `pan` when not empty).
+    pub pan_env: Envelope,
+    /// Show the automation lines over the track.
+    pub show_env: bool,
 }
 
 impl Track {
     pub fn new(id: u64, name: String, colour: [u8; 3]) -> Self {
-        Track { id, name, colour, volume_db: 0.0, pan: 0.0, mute: false, solo: false, arm: false, height: 96.0, clips: Vec::new() }
+        Track {
+            id,
+            name,
+            colour,
+            volume_db: 0.0,
+            pan: 0.0,
+            mute: false,
+            solo: false,
+            arm: false,
+            height: 96.0,
+            clips: Vec::new(),
+            vol_env: Envelope::default(),
+            pan_env: Envelope::default(),
+            show_env: false,
+        }
     }
 
-    /// Left/right gains for the pan position: the centre is unity and
-    /// panning attenuates the opposite side (Audition's default pan law).
     pub fn pan_gains(&self) -> (f32, f32) {
-        let p = (self.pan / 100.0).clamp(-1.0, 1.0);
-        let cut = |x: f32| (std::f32::consts::FRAC_PI_2 * x).cos();
-        if p >= 0.0 {
-            (cut(p), 1.0)
-        } else {
-            (1.0, cut(-p))
-        }
+        pan_gains(self.pan)
+    }
+
+    /// Volume (dB) at `pos`, from the automation when there is any.
+    pub fn volume_at(&self, pos: usize) -> f32 {
+        self.vol_env.value_at(pos).unwrap_or(self.volume_db)
+    }
+
+    pub fn pan_at(&self, pos: usize) -> f32 {
+        self.pan_env.value_at(pos).unwrap_or(self.pan)
     }
 }
 
@@ -491,7 +641,16 @@ impl Session {
     }
 
     pub fn mix_state(&self) -> MixState {
-        MixState { sample_rate: self.sample_rate, tracks: self.tracks.clone(), sources: self.sources.clone(), master_db: self.master_db }
+        let tracks = self
+            .tracks
+            .iter()
+            .map(|t| {
+                let mut t = t.clone();
+                t.clips = effective_clips(&t.clips);
+                t
+            })
+            .collect();
+        MixState { sample_rate: self.sample_rate, tracks, sources: self.sources.clone(), master_db: self.master_db }
     }
 }
 
@@ -500,13 +659,14 @@ impl Session {
 /// Render frames [a, b) of the stereo mix.
 pub fn mix_range(m: &MixState, a: usize, b: usize) -> Vec<Vec<f32>> {
     let mut out = vec![Vec::new(), Vec::new()];
-    mix_into(m, a, b, &mut out);
+    mix_into(m, a, b, &mut out, &mut []);
     out
 }
 
 /// Render frames [a, b) of the mix into `out` (two channels), reusing its
-/// allocation: this runs inside the audio callback during playback.
-pub fn mix_into(m: &MixState, a: usize, b: usize, out: &mut [Vec<f32>]) {
+/// allocation: this runs inside the audio callback during playback. Each
+/// track's peak (L, R) is max-ed into `peaks[track]` when there is room.
+pub fn mix_into(m: &MixState, a: usize, b: usize, out: &mut [Vec<f32>], peaks: &mut [[f32; 2]]) {
     let n = b.saturating_sub(a);
     for ch in out.iter_mut() {
         ch.clear();
@@ -514,12 +674,14 @@ pub fn mix_into(m: &MixState, a: usize, b: usize, out: &mut [Vec<f32>]) {
     }
     let any_solo = m.tracks.iter().any(|t| t.solo);
     let master = db_to_lin(m.master_db);
-    for t in &m.tracks {
+    for (ti, t) in m.tracks.iter().enumerate() {
         if t.mute || (any_solo && !t.solo) {
             continue;
         }
         let (pl, pr) = t.pan_gains();
         let tg = db_to_lin(t.volume_db) * master;
+        let automated = !t.vol_env.is_empty() || !t.pan_env.is_empty();
+        let mut pk = [0.0f32; 2];
         for c in &t.clips {
             if c.mute || c.end() <= a || c.start >= b {
                 continue;
@@ -536,11 +698,25 @@ pub fn mix_into(m: &MixState, a: usize, b: usize, out: &mut [Vec<f32>]) {
                 if idx >= sl.len() {
                     break;
                 }
-                let g = cg * c.envelope(i);
                 let k = t_pos - a;
-                out[0][k] += sl[idx] * g * pl;
-                out[1][k] += sr[idx] * g * pr;
+                let (vl, vr) = if automated {
+                    let vol = if t.vol_env.is_empty() { db_to_lin(t.volume_db) } else { env_gain(t.volume_at(t_pos)) };
+                    let g = db_to_lin(c.gain_db) * master * vol * c.envelope(i);
+                    let (al, ar) = pan_gains(t.pan_at(t_pos));
+                    (sl[idx] * g * al, sr[idx] * g * ar)
+                } else {
+                    let g = cg * c.envelope(i);
+                    (sl[idx] * g * pl, sr[idx] * g * pr)
+                };
+                out[0][k] += vl;
+                out[1][k] += vr;
+                pk[0] = pk[0].max(vl.abs());
+                pk[1] = pk[1].max(vr.abs());
             }
+        }
+        if let Some(p) = peaks.get_mut(ti) {
+            p[0] = p[0].max(pk[0]);
+            p[1] = p[1].max(pk[1]);
         }
     }
 }
@@ -571,9 +747,15 @@ pub fn to_text(s: &Session, paths: &BTreeMap<u64, PathBuf>, base: Option<&Path>)
     }
     for t in &s.tracks {
         o.push_str(&format!(
-            "track\t{}\t{}\t{}\t{}\t{}\t{}\t{},{},{}\t{}\n",
-            t.id, clean(&t.name), t.volume_db, t.pan, t.mute as u8, t.solo as u8, t.colour[0], t.colour[1], t.colour[2], t.height
+            "track\t{}\t{}\t{}\t{}\t{}\t{}\t{},{},{}\t{}\t{}\n",
+            t.id, clean(&t.name), t.volume_db, t.pan, t.mute as u8, t.solo as u8, t.colour[0], t.colour[1], t.colour[2], t.height, t.show_env as u8
         ));
+        if !t.vol_env.is_empty() {
+            o.push_str(&format!("venv\t{}\n", t.vol_env.to_text()));
+        }
+        if !t.pan_env.is_empty() {
+            o.push_str(&format!("penv\t{}\n", t.pan_env.to_text()));
+        }
         for c in &t.clips {
             o.push_str(&format!(
                 "clip\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
@@ -634,6 +816,9 @@ pub fn from_text(id: u64, text: &str, base: Option<&Path>) -> Result<ParsedSessi
                 if let Ok(h) = num(8) {
                     t.height = (h as f32).clamp(40.0, 400.0);
                 }
+                if let Ok(v) = num(9) {
+                    t.show_env = v != 0.0;
+                }
                 max_id = max_id.max(tid);
                 s.tracks.push(t);
             }
@@ -657,6 +842,18 @@ pub fn from_text(id: u64, text: &str, base: Option<&Path>) -> Result<ParsedSessi
                 c.fade_out = c.fade_out.min(c.len - c.fade_in);
                 max_id = max_id.max(c.id);
                 t.clips.push(c);
+            }
+            "venv" | "penv" => {
+                let t = s.tracks.last_mut().ok_or_else(|| bad(line))?;
+                let mut e = Envelope::parse(f.get(1).unwrap_or(&""));
+                for p in e.points.iter_mut() {
+                    p.1 = if f[0] == "venv" { p.1.clamp(VOL_ENV_MIN, VOL_ENV_MAX) } else { p.1.clamp(-100.0, 100.0) };
+                }
+                if f[0] == "venv" {
+                    t.vol_env = e;
+                } else {
+                    t.pan_env = e;
+                }
             }
             "" => {}
             _ => {} // unknown keys from newer versions are ignored
@@ -773,6 +970,57 @@ mod tests {
         let k = p.session.tracks[0].clips[0].clone();
         assert_eq!((k.len, k.fade_in, k.fade_out), (1, 1, 0));
         p.session.trim_start(k.id, 0);
+    }
+
+    #[test]
+    fn envelope_interpolates_and_automates_the_mix() {
+        let mut e = Envelope::default();
+        assert_eq!(e.value_at(5), None);
+        e.insert(100, -6.0);
+        e.insert(0, 0.0);
+        assert_eq!(e.points, vec![(0, 0.0), (100, -6.0)]);
+        assert_eq!(e.value_at(50), Some(-3.0));
+        assert_eq!(e.value_at(500), Some(-6.0));
+        e.move_point(1, 0, -6.0); // can't pass its neighbour
+        assert_eq!(e.points[1].0, 0);
+        assert_eq!(Envelope::parse(&e.to_text()), e);
+
+        let (mut s, src) = session_with(vec![vec![0.5; 200]]);
+        s.insert_clip(0, src, 0).unwrap();
+        s.tracks[0].vol_env.insert(0, 0.0);
+        s.tracks[0].vol_env.insert(100, VOL_ENV_MIN);
+        s.tracks[0].pan_env.insert(0, 100.0);
+        let mut peaks = [[0.0f32; 2]; 2];
+        let mut out = vec![Vec::new(), Vec::new()];
+        mix_into(&s.mix_state(), 0, 200, &mut out, &mut peaks);
+        assert!((out[1][0] - 0.5).abs() < 1e-5 && out[0][0].abs() < 1e-6, "hard right");
+        assert!(out[1][150].abs() < 1e-9, "silent after the envelope reaches the bottom");
+        assert!((peaks[0][1] - 0.5).abs() < 1e-5 && peaks[1] == [0.0, 0.0]);
+    }
+
+    #[test]
+    fn overlapping_clips_crossfade() {
+        let (mut s, src) = session_with(vec![vec![1.0; 100]]);
+        let a = s.insert_clip(0, src, 0).unwrap();
+        let b = s.insert_clip(0, src, 60).unwrap();
+        let eff = effective_clips(&s.tracks[0].clips);
+        let ea = eff.iter().find(|c| c.id == a).unwrap();
+        let eb = eff.iter().find(|c| c.id == b).unwrap();
+        assert_eq!((ea.fade_out, eb.fade_in), (40, 40));
+        // Equal-power crossfade: the sum stays near unity (within the +3 dB bump).
+        let m = mix_range(&s.mix_state(), 0, 160);
+        for t in 60..100 {
+            assert!(m[0][t] >= 0.99 && m[0][t] <= 1.42, "t={t}: {}", m[0][t]);
+        }
+        assert!((m[0][30] - 1.0).abs() < 1e-6 && (m[0][130] - 1.0).abs() < 1e-6);
+        // Session file keeps automation.
+        s.tracks[1].vol_env.insert(10, -3.0);
+        s.tracks[1].show_env = true;
+        let mut paths = BTreeMap::new();
+        paths.insert(src, PathBuf::from("/x/tone.wav"));
+        let p = from_text(2, &to_text(&s, &paths, None), None).unwrap();
+        assert_eq!(p.session.tracks[1].vol_env, s.tracks[1].vol_env);
+        assert!(p.session.tracks[1].show_env);
     }
 
     #[test]
