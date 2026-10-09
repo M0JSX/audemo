@@ -8,7 +8,9 @@ mod editor;
 mod engine;
 mod io;
 mod panels;
+mod prefs;
 mod theme;
+mod workspace;
 
 use std::path::PathBuf;
 
@@ -20,19 +22,18 @@ impl eframe::App for app::App {
         self.menu_bar(ctx);
         self.toolbar(ctx);
         self.status_bar(ctx);
-        if self.show_meters {
-            self.meters(ctx);
-        }
-        self.transport(ctx);
+        self.bottom_row(ctx);
         if self.show_left {
-            self.left_panel(ctx);
-        }
-        if self.show_right {
-            self.right_panel(ctx);
+            self.left_column(ctx);
         }
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(theme::BG_DEEP).inner_margin(egui::Margin::same(4.0)))
-            .show(ctx, |ui| self.editor_ui(ui));
+            .frame(egui::Frame::none().fill(theme::BG_DEEP).inner_margin(egui::Margin::same(2.0)))
+            .show(ctx, |ui| {
+                self.transport_bar(ui);
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::none().fill(theme::BG_DEEP).inner_margin(egui::Margin::same(2.0)))
+                    .show_inside(ui, |ui| self.editor_ui(ui));
+            });
         self.dialogs(ctx);
         self.job_overlay(ctx);
         self.finish_frame(ctx);

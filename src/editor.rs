@@ -285,6 +285,55 @@ impl App {
             }
         }
 
+        // ------------------------------------------------ live recording
+        if let (Some(t), Some((in_rate, _))) = (&self.rec_target, self.engine.recording_format()) {
+            if t.doc_id == doc.id {
+                let a = t.range.0 as f64;
+                let head = a + doc.pending as f64;
+                let bs = crate::engine::REC_BLOCK as f64 * sr / in_rate as f64;
+                let x0 = v.x(a).max(lanes.left());
+                let x1 = v.x(head).min(lanes.right());
+                for c in 0..n_ch {
+                    let r = lane_rect(wave_area, c);
+                    if x1 > x0 {
+                        painter.rect_filled(Rect::from_x_y_ranges(x0..=x1, r.y_range()), 0.0, LANE_BG);
+                    }
+                    draw_grid(&painter, Rect::from_x_y_ranges(x0..=x1.max(x0), r.y_range()), doc.amp_zoom);
+                }
+                let amp_zoom = doc.amp_zoom;
+                self.engine.with_rec_blocks(|blocks| {
+                    let mut shapes = Vec::new();
+                    let cols = (x1 - x0).max(0.0) as usize;
+                    for c in 0..n_ch {
+                        let r = lane_rect(wave_area, c);
+                        let mid = r.center().y;
+                        let amp = (r.height() * 0.5 - 1.0) * amp_zoom;
+                        let bc = c.min(1);
+                        for i in 0..cols {
+                            let x = x0 + i as f32;
+                            let s0 = (v.s(x) - a) / bs;
+                            let s1 = (v.s(x + 1.0) - a) / bs;
+                            let b0 = s0.floor().max(0.0) as usize;
+                            let b1 = (s1.ceil() as usize).max(b0 + 1).min(blocks.len());
+                            if b0 >= b1 {
+                                continue;
+                            }
+                            let (lo, hi) = blocks[b0..b1].iter().fold((f32::MAX, f32::MIN), |(lo, hi), b| (lo.min(b[bc].0), hi.max(b[bc].1)));
+                            let y0 = (mid - hi * amp).clamp(r.top(), r.bottom());
+                            let y1 = (mid - lo * amp).clamp(r.top(), r.bottom()).max(y0 + 1.0);
+                            shapes.push(Shape::line_segment([pos2(x + 0.5, y0), pos2(x + 0.5, y1)], Stroke::new(1.0_f32, WAVE)));
+                        }
+                    }
+                    painter.extend(shapes);
+                });
+                let hx = v.x(head);
+                if hx >= lanes.left() && hx <= lanes.right() {
+                    painter.line_segment([pos2(hx, ruler.top()), pos2(hx, lanes.bottom())], Stroke::new(1.5_f32, RECORD));
+                    painter.add(Shape::convex_polygon(vec![pos2(hx - 6.0, ruler.top()), pos2(hx + 6.0, ruler.top()), pos2(hx, ruler.top() + 9.0)], RECORD, Stroke::NONE));
+                }
+            }
+        }
+
         // ------------------------------------------------ markers, cursor, playhead
         for (mi, m) in doc.markers.iter().enumerate() {
             let x = v.x(m.pos as f64);

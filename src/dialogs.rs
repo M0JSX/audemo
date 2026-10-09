@@ -14,10 +14,13 @@ use crate::theme::*;
 
 const SHORTCUTS: &[(&str, &str)] = &[
     ("Play / stop", "Space"),
-    ("Record", "Shift+Space"),
+    ("Record (Stop or Space ends it)", "Shift+Space"),
     ("Open / New / Save / Save As", "Ctrl+O / Ctrl+N / Ctrl+S / Ctrl+Shift+S"),
     ("Undo / Redo", "Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y)"),
-    ("Cut / Copy / Paste / Paste to New", "Ctrl+X / Ctrl+C / Ctrl+V / Ctrl+Shift+V"),
+    ("Cut / Copy / Paste", "Ctrl+X / Ctrl+C / Ctrl+V"),
+    ("Copy to New / Paste to New", "Alt+Shift+C / Ctrl+Alt+V"),
+    ("Mix Paste", "Ctrl+Shift+V"),
+    ("Repeat previous command", "Shift+R"),
     ("Delete selection", "Delete or Backspace"),
     ("Crop to selection", "Ctrl+T"),
     ("Select all / deselect", "Ctrl+A / Esc"),
@@ -85,8 +88,8 @@ impl App {
                     next = Some(Dialog::NewFile { rate, channels, seconds });
                 }
             }
-            Dialog::Export { mut format, mut dither, path } => {
-                centered(egui::Window::new("Save As")).show(ctx, |ui| {
+            Dialog::Export { mut format, mut dither, path, selection } => {
+                centered(egui::Window::new(if selection { "Save Selection As" } else { "Save As" })).show(ctx, |ui| {
                     if let Some(d) = self.doc() {
                         ui.label(RichText::new(format!("{} • {}", d.name, d.format_label())).color(TEXT_DIM));
                     }
@@ -114,13 +117,104 @@ impl App {
                         if ui.add(egui::Button::new(RichText::new("Choose location and save…").color(Color32::WHITE)).fill(ACCENT)).clicked() {
                             keep = false;
                             if let Some(p) = path.clone().or_else(|| self.pick_save_path()) {
-                                self.write_wav(p, format, dither && format != WavFormat::Float32);
+                                self.write_wav(p, format, dither && format != WavFormat::Float32, selection);
                             }
                         }
                     });
                 });
                 if keep {
-                    next = Some(Dialog::Export { format, dither, path });
+                    next = Some(Dialog::Export { format, dither, path, selection });
+                }
+            }
+            Dialog::Preferences { mut input, mut output, inputs, outputs } => {
+                let mut open = true;
+                centered(egui::Window::new("Preferences: Audio Hardware").open(&mut open)).show(ctx, |ui| {
+                    ui.set_min_width(460.0);
+                    egui::Grid::new("audiohw").num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
+                        ui.label("Default Input");
+                        let shown = input.clone().unwrap_or_else(|| "System default".into());
+                        egui::ComboBox::from_id_source("hw_in").width(300.0).selected_text(shown).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut input, None, "System default");
+                            for n in &inputs {
+                                ui.selectable_value(&mut input, Some(n.clone()), n);
+                            }
+                        });
+                        ui.end_row();
+                        ui.label("Default Output");
+                        let shown = output.clone().unwrap_or_else(|| "System default".into());
+                        egui::ComboBox::from_id_source("hw_out").width(300.0).selected_text(shown).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut output, None, "System default");
+                            for n in &outputs {
+                                ui.selectable_value(&mut output, Some(n.clone()), n);
+                            }
+                        });
+                        ui.end_row();
+                        ui.label("Output in use");
+                        ui.label(RichText::new(format!("{} @ {} Hz, {} ch", self.engine.device_name, self.engine.out_rate, self.engine.out_channels)).color(TEXT_DIM));
+                        ui.end_row();
+                    });
+                    ui.label(RichText::new("Recordings are captured at the input device's native rate and converted to the file's sample rate when you stop.").color(TEXT_DIM).size(11.0));
+                    ui.add_space(6.0);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                        if ui.add(egui::Button::new(RichText::new("  OK  ").color(Color32::WHITE)).fill(ACCENT)).clicked() {
+                            keep = false;
+                            if self.engine.is_recording() {
+                                self.stop_recording();
+                            }
+                            self.engine.input_name = input.clone();
+                            let out_changed = self.prefs.output_device != output;
+                            self.prefs.input_device = input.clone();
+                            self.prefs.output_device = output.clone();
+                            self.prefs.save();
+                            if out_changed {
+                                match self.engine.set_output(output.clone()) {
+                                    Ok(()) => self.set_status(format!("Output: {} @ {} Hz", self.engine.device_name, self.engine.out_rate)),
+                                    Err(e) => next = Some(Dialog::Message { title: "Output device".into(), text: e }),
+                                }
+                            }
+                        }
+                    });
+                });
+                if open && keep {
+                    next = Some(Dialog::Preferences { input, output, inputs, outputs });
+                }
+            }
+            Dialog::MixPaste { mut mode, mut clip_db, mut orig_db } => {
+                let mut open = true;
+                centered(egui::Window::new("Mix Paste").open(&mut open)).show(ctx, |ui| {
+                    egui::Grid::new("mixpaste").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                        ui.label("Copied audio volume");
+                        ui.add(egui::Slider::new(&mut clip_db, -40.0..=12.0).suffix(" dB").fixed_decimals(1));
+                        ui.end_row();
+                        ui.label("Existing audio volume");
+                        ui.add_enabled(mode == 1 || mode == 3, egui::Slider::new(&mut orig_db, -40.0..=12.0).suffix(" dB").fixed_decimals(1));
+                        ui.end_row();
+                        ui.label("Mode");
+                        ui.vertical(|ui| {
+                            ui.radio_value(&mut mode, 0, "Insert");
+                            ui.radio_value(&mut mode, 1, "Overlap (Mix)");
+                            ui.radio_value(&mut mode, 2, "Overwrite");
+                            ui.radio_value(&mut mode, 3, "Modulate");
+                        });
+                        ui.end_row();
+                    });
+                    ui.label(RichText::new("Pastes at the cursor or the start of the selection.").color(TEXT_DIM).size(11.0));
+                    ui.add_space(6.0);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                        if ui.add(egui::Button::new(RichText::new("  OK  ").color(Color32::WHITE)).fill(ACCENT)).clicked() {
+                            self.actions.push(Action::MixPaste { mode, clip_db, orig_db });
+                            keep = false;
+                        }
+                    });
+                });
+                if open && keep {
+                    next = Some(Dialog::MixPaste { mode, clip_db, orig_db });
                 }
             }
             Dialog::Convert { mut rate, mut channels } => {
@@ -273,7 +367,10 @@ impl App {
         let previewing_now = self.engine.is_playing_tag(PREVIEW_TAG);
         let Some(Dialog::Effect(d)) = &mut self.dialog else { return };
         let def: &EffectDef = &effects[d.idx];
-        let scope = if def.generator {
+        let rack_mode = d.rack_slot.is_some();
+        let scope = if rack_mode {
+            format!("Effects Rack slot {}", d.rack_slot.unwrap() + 1)
+        } else if def.generator {
             if scope.starts_with("Selection") { format!("Replaces the {}", scope.to_lowercase()) } else { "Inserts at the cursor".to_string() }
         } else {
             format!("Applies to: {scope}")
@@ -341,7 +438,8 @@ impl App {
                         if ui.button("Close").clicked() {
                             close = true;
                         }
-                        if ui.add(egui::Button::new(RichText::new("    Apply    ").color(Color32::WHITE)).fill(ACCENT).min_size(vec2(90.0, 26.0))).clicked() {
+                        let label = if rack_mode { "  Save to Rack  " } else { "    Apply    " };
+                        if ui.add(egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(ACCENT).min_size(vec2(90.0, 26.0))).clicked() {
                             apply = true;
                         }
                     });
@@ -370,7 +468,14 @@ impl App {
                 self.engine.replace_buffer(b, sr, 0.0, len);
             }
         }
-        if apply {
+        if apply && rack_mode {
+            let (slot, p) = (d.rack_slot.unwrap(), d.params.clone());
+            self.close_effect_dialog();
+            if let Some(s) = self.rack.get_mut(slot) {
+                s.params = p;
+            }
+            self.rack_touched();
+        } else if apply {
             let p = d.params.clone();
             let idx = d.idx;
             self.actions.push(Action::ApplyEffect(idx, p));

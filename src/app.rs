@@ -11,9 +11,10 @@ use crate::dsp::effects::{self, Ctx, EffectDef, NoiseProfile};
 use crate::dsp::params::Params;
 use crate::dsp::peaks::PeakCache;
 use crate::dsp::resample::{remap_channels, resample_channels};
-use crate::dsp::util::{format_time, slice_range};
-use crate::engine::{Buffer, Engine, PREVIEW_TAG};
+use crate::dsp::util::{db_to_lin, format_time, slice_range};
+use crate::engine::{Buffer, Engine, BROWSER_TAG, PREVIEW_TAG};
 use crate::io::{self, WavFormat};
+use crate::prefs::Prefs;
 
 pub const MAX_UNDO: usize = 60;
 pub const SAMPLE_RATES: [u32; 10] = [8000, 11025, 16000, 22050, 32000, 44100, 48000, 88200, 96000, 192000];
@@ -61,6 +62,9 @@ pub struct Document {
     pub dirty: bool,
     pub active_ch: Vec<bool>,
     pub spec: Vec<Option<SpecTex>>,
+    /// Length (in this file's samples) of a recording in progress.
+    pub pending: usize,
+    pub recording: bool,
 }
 
 impl Document {
@@ -90,6 +94,8 @@ impl Document {
             dirty: false,
             active_ch: vec![true; n_ch],
             spec: Vec::new(),
+            pending: 0,
+            recording: false,
         }
     }
 
@@ -176,7 +182,13 @@ impl Document {
     }
 
     pub fn max_span(&self) -> f64 {
-        (self.len().max(64)) as f64
+        let base = (self.len() + self.pending).max(64) as f64;
+        if self.recording {
+            // Keep a steady 30 s window while recording into a short file.
+            base.max(self.sample_rate as f64 * 30.0)
+        } else {
+            base
+        }
     }
 
     pub fn clamp_view(&mut self) {
@@ -261,11 +273,56 @@ pub enum Tool {
     Hand,
 }
 
+/// Panels in the workspace, grouped into tabbed frames like Audition's
+/// default workspace.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum LeftTab {
+pub enum Panel {
     Files,
-    Effects,
+    Favorites,
+    MediaBrowser,
+    EffectsRack,
     Markers,
+    Properties,
+    History,
+}
+
+impl Panel {
+    pub const TOP: [Panel; 2] = [Panel::Files, Panel::Favorites];
+    pub const MIDDLE: [Panel; 4] = [Panel::MediaBrowser, Panel::EffectsRack, Panel::Markers, Panel::Properties];
+    pub const BOTTOM: [Panel; 1] = [Panel::History];
+    pub fn name(self) -> &'static str {
+        match self {
+            Panel::Files => "Files",
+            Panel::Favorites => "Favorites",
+            Panel::MediaBrowser => "Media Browser",
+            Panel::EffectsRack => "Effects Rack",
+            Panel::Markers => "Markers",
+            Panel::Properties => "Properties",
+            Panel::History => "History",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RackSlot {
+    pub idx: usize,
+    pub params: Params,
+    pub on: bool,
+}
+
+pub const RACK_SLOTS: usize = 16;
+
+/// Where a recording in progress will land.
+pub struct RecTarget {
+    pub doc_id: u64,
+    pub range: (usize, usize),
+}
+
+#[derive(Clone, Debug)]
+pub enum LoadIntent {
+    Open,
+    Append(u64),
+    Audition,
 }
 
 pub struct EffectDialog {
@@ -280,12 +337,16 @@ pub struct EffectDialog {
     pub dry: Option<Buffer>,
     pub wet: Option<Buffer>,
     pub error: Option<String>,
+    /// Editing a slot of the Effects Rack rather than applying directly.
+    pub rack_slot: Option<usize>,
 }
 
 pub enum Dialog {
     Effect(EffectDialog),
     NewFile { rate: u32, channels: usize, seconds: f32 },
-    Export { format: WavFormat, dither: bool, path: Option<PathBuf> },
+    Export { format: WavFormat, dither: bool, path: Option<PathBuf>, selection: bool },
+    Preferences { input: Option<String>, output: Option<String>, inputs: Vec<String>, outputs: Vec<String> },
+    MixPaste { mode: usize, clip_db: f32, orig_db: f32 },
     Convert { rate: u32, channels: usize },
     Shortcuts,
     About,
@@ -299,6 +360,8 @@ pub enum JobKind {
     Edit { doc_id: u64, range: (usize, usize), active: Vec<bool>, new_rate: Option<u32>, select: bool },
     /// Render an effect preview.
     Preview { params: Params },
+    /// Render the Effects Rack chain for preview.
+    RackPreview { version: u64 },
 }
 
 pub struct Job {
@@ -351,6 +414,17 @@ pub enum Action {
     AmpOut,
     SetCursor(usize),
     Status(String),
+    CloseAll,
+    SaveAll,
+    SaveSelectionAs,
+    CopyToNew,
+    MixPaste { mode: usize, clip_db: f32, orig_db: f32 },
+    RepeatLast,
+    OpenAppend,
+    OpenRecent(PathBuf),
+    Preferences,
+    ApplyRack,
+    Audition(PathBuf),
 }
 
 pub const FAVORITES: &[(&str, &str, &str)] = &[
@@ -377,14 +451,29 @@ pub struct App {
     pub noise_print: Option<NoiseProfile>,
     pub dialog: Option<Dialog>,
     pub job: Option<Job>,
-    pub loads: Vec<(PathBuf, Receiver<Result<io::Decoded, String>>)>,
+    pub loads: Vec<(PathBuf, LoadIntent, Receiver<Result<io::Decoded, String>>)>,
     pub status: String,
     pub status_at: Instant,
     pub show_spectral: bool,
     pub show_left: bool,
-    pub show_right: bool,
+    pub show_bottom: bool,
     pub show_meters: bool,
-    pub left_tab: LeftTab,
+    pub tab_top: Panel,
+    pub tab_mid: Panel,
+    pub prefs: Prefs,
+    pub rack: Vec<RackSlot>,
+    pub rack_mix: f32,
+    pub rack_in_db: f32,
+    pub rack_out_db: f32,
+    pub rack_previewing: bool,
+    pub rack_version: u64,
+    pub rack_rendered: u64,
+    pub rack_changed: Instant,
+    pub last_effect: Option<(usize, Params)>,
+    pub rec_target: Option<RecTarget>,
+    pub browser_dir: PathBuf,
+    pub browser_entries: Option<(PathBuf, Vec<(PathBuf, bool, u64)>)>,
+    pub browser_selected: Option<PathBuf>,
     pub tool: Tool,
     pub looping: bool,
     pub follow: bool,
@@ -395,7 +484,6 @@ pub struct App {
     pub drag_anchor: Option<usize>,
     pub hand_anchor: Option<(f32, f64, f64)>,
     pub fade_drag: Option<(bool, usize)>,
-    pub effect_search: String,
     pub play_origin: usize,
     pub allow_quit: bool,
 }
@@ -403,7 +491,14 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, open: Vec<PathBuf>) -> Self {
         crate::theme::apply(&cc.egui_ctx);
-        let engine = Engine::new();
+        let prefs = Prefs::load();
+        let engine = Engine::new(prefs.output_device.clone(), prefs.input_device.clone());
+        let browser_dir = prefs
+            .browser_dir
+            .clone()
+            .filter(|d| d.is_dir())
+            .or_else(crate::prefs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("/"));
         let mut app = App {
             docs: Vec::new(),
             active: None,
@@ -422,9 +517,24 @@ impl App {
             status_at: Instant::now(),
             show_spectral: false,
             show_left: true,
-            show_right: true,
+            show_bottom: true,
             show_meters: true,
-            left_tab: LeftTab::Files,
+            tab_top: Panel::Files,
+            tab_mid: Panel::EffectsRack,
+            prefs,
+            rack: Vec::new(),
+            rack_mix: 100.0,
+            rack_in_db: 0.0,
+            rack_out_db: 0.0,
+            rack_previewing: false,
+            rack_version: 1,
+            rack_rendered: 0,
+            rack_changed: Instant::now(),
+            last_effect: None,
+            rec_target: None,
+            browser_dir,
+            browser_entries: None,
+            browser_selected: None,
             tool: Tool::Selection,
             looping: false,
             follow: true,
@@ -435,7 +545,6 @@ impl App {
             drag_anchor: None,
             hand_anchor: None,
             fade_drag: None,
-            effect_search: String::new(),
             play_origin: 0,
             allow_quit: false,
         };
@@ -503,7 +612,29 @@ impl App {
         self.handle_shortcuts(ctx);
         self.update_meters(ctx);
         self.follow_playhead();
+        self.track_recording();
         self.maybe_render_preview();
+        self.maybe_render_rack_preview();
+    }
+
+    /// Keep the target file's live length and view in step with the input.
+    fn track_recording(&mut self) {
+        let Some(t) = &self.rec_target else { return };
+        let Some((rate, _)) = self.engine.recording_format() else { return };
+        let frames = self.engine.recorded_frames();
+        let doc_id = t.doc_id;
+        let start = t.range.0;
+        let follow = self.follow;
+        if let Some(d) = self.docs.iter_mut().find(|d| d.id == doc_id) {
+            d.recording = true;
+            d.pending = (frames as f64 * d.sample_rate as f64 / rate as f64) as usize;
+            let head = (start + d.pending) as f64;
+            let span = d.view_end - d.view_start;
+            if follow && head > d.view_end - span * 0.05 {
+                d.view_end = d.max_span().min(head + span * 0.25).max(span);
+                d.view_start = (d.view_end - span).max(0.0);
+            }
+        }
     }
 
     pub fn finish_frame(&mut self, ctx: &egui::Context) {
@@ -513,6 +644,8 @@ impl App {
         }
         let st = self.engine.status();
         if st.playing || self.job.is_some() || self.engine.is_recording() || !self.loads.is_empty() || self.meter_db.iter().any(|d| *d > -100.0) {
+            ctx.request_repaint();
+        } else if self.rack_previewing || matches!(self.dialog, Some(Dialog::Effect(ref d)) if d.previewing) {
             ctx.request_repaint();
         } else {
             ctx.request_repaint_after(Duration::from_millis(250));
@@ -548,7 +681,12 @@ impl App {
         if !typing {
             ctx.input_mut(|i| {
                 if i.consume_shortcut(&KS::new(cs, Key::Z)) { acts.push(Action::Redo); }
-                if i.consume_shortcut(&KS::new(cs, Key::V)) { acts.push(Action::PasteNew); }
+                if i.consume_shortcut(&KS::new(cmd | M::ALT, Key::V)) { acts.push(Action::PasteNew); }
+                if i.consume_shortcut(&KS::new(cs, Key::V)) {
+                    acts.push(Action::Status("__mix_paste".into()));
+                }
+                if i.consume_key(M::ALT | M::SHIFT, Key::C) { acts.push(Action::CopyToNew); }
+                if i.consume_key(M::SHIFT, Key::R) { acts.push(Action::RepeatLast); }
                 if i.consume_shortcut(&KS::new(cmd, Key::Z)) { acts.push(Action::Undo); }
                 if i.consume_shortcut(&KS::new(cmd, Key::Y)) { acts.push(Action::Redo); }
                 if i.consume_shortcut(&KS::new(cmd, Key::X)) { acts.push(Action::Cut); }
@@ -603,6 +741,10 @@ impl App {
                     self.show_spectral = !self.show_spectral;
                     continue;
                 }
+                if s == "__mix_paste" {
+                    self.dialog = Some(Dialog::MixPaste { mode: 1, clip_db: 0.0, orig_db: 0.0 });
+                    continue;
+                }
             }
             self.actions.push(a);
         }
@@ -644,30 +786,66 @@ impl App {
 
     fn poll_loads(&mut self) {
         let mut done = Vec::new();
-        for (i, (_, rx)) in self.loads.iter().enumerate() {
+        for (i, (_, _, rx)) in self.loads.iter().enumerate() {
             if let Ok(res) = rx.try_recv() {
                 done.push((i, res));
             }
         }
         for (i, res) in done.into_iter().rev() {
-            let (path, _) = self.loads.remove(i);
-            match res {
-                Ok(dec) => {
-                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled".into());
+            let (path, intent, _) = self.loads.remove(i);
+            let dec = match res {
+                Ok(d) => d,
+                Err(e) => {
+                    if !matches!(intent, LoadIntent::Audition) {
+                        self.dialog = Some(Dialog::Message { title: "Couldn't open file".into(), text: format!("{}\n\n{e}", path.display()) });
+                    }
+                    continue;
+                }
+            };
+            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled".into());
+            match intent {
+                LoadIntent::Open => {
                     let id = self.new_id();
-                    let secs = dec.channels[0].len() as f64 / dec.sample_rate as f64;
+                    let len = dec.channels[0].len();
                     let doc = Document::new(id, name.clone(), Some(path.clone()), dec.channels, dec.sample_rate, dec.bits, "Open");
                     self.add_doc(doc);
-                    self.set_status(format!("Opened {name} ({})", format_time(secs * 1.0, 1)));
+                    self.prefs.add_recent(path.clone());
+                    self.prefs.save();
+                    self.set_status(format!("Opened {name} ({})", format_time(len as f64, dec.sample_rate)));
                 }
-                Err(e) => {
-                    self.dialog = Some(Dialog::Message {
-                        title: "Couldn't open file".into(),
-                        text: format!("{}\n\n{e}", path.display()),
-                    });
+                LoadIntent::Append(doc_id) => {
+                    if let Some(d) = self.docs.iter_mut().find(|d| d.id == doc_id) {
+                        let mut audio = dec.channels;
+                        if dec.sample_rate != d.sample_rate {
+                            audio = resample_channels(&audio, d.sample_rate as f64 / dec.sample_rate as f64);
+                        }
+                        let audio = remap_channels(&audio, d.n_ch());
+                        let end = d.len();
+                        let active = vec![true; d.n_ch()];
+                        apply_edit(d, "Append", (end, end), &active, audio, None, true);
+                        self.set_status(format!("Appended {name}"));
+                    }
+                }
+                LoadIntent::Audition => {
+                    if self.browser_selected.as_deref() == Some(path.as_path()) {
+                        let len = dec.channels[0].len() as f64;
+                        self.engine.play(Arc::new(dec.channels), dec.sample_rate, 0.0, len, false, BROWSER_TAG);
+                    }
                 }
             }
         }
+    }
+
+    fn load_async(&mut self, p: PathBuf, intent: LoadIntent) {
+        let (tx, rx) = channel();
+        let path = p.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(io::load(&path));
+        });
+        if !matches!(intent, LoadIntent::Audition) {
+            self.set_status(format!("Opening {}…", p.display()));
+        }
+        self.loads.push((p, intent, rx));
     }
 
     fn open_paths(&mut self, paths: Vec<PathBuf>) {
@@ -676,13 +854,7 @@ impl App {
                 self.active = Some(i);
                 continue;
             }
-            let (tx, rx) = channel();
-            let path = p.clone();
-            std::thread::spawn(move || {
-                let _ = tx.send(io::load(&path));
-            });
-            self.set_status(format!("Opening {}…", p.display()));
-            self.loads.push((p, rx));
+            self.load_async(p, LoadIntent::Open);
         }
     }
 
@@ -732,6 +904,27 @@ impl App {
                             d.error = Some(e);
                             d.rendered = Some(params);
                         }
+                    }
+                }
+            }
+            JobKind::RackPreview { version } => {
+                self.rack_rendered = version;
+                match res {
+                    Ok(out) if self.rack_previewing => {
+                        let sr = self.doc().map(|d| d.sample_rate).unwrap_or(48000);
+                        let len = out.first().map(|c| c.len()).unwrap_or(0) as f64;
+                        let buf: Buffer = Arc::new(out);
+                        if self.engine.is_playing_tag(PREVIEW_TAG) {
+                            self.engine.replace_buffer(buf, sr, 0.0, len);
+                        } else {
+                            self.engine.play(buf, sr, 0.0, len, true, PREVIEW_TAG);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        self.rack_previewing = false;
+                        self.engine.stop();
+                        self.set_status(format!("Effects Rack: {e}"));
                     }
                 }
             }
@@ -788,6 +981,122 @@ impl App {
         });
     }
 
+    fn rack_inputs(&self) -> Option<(Vec<(usize, Params)>, (usize, usize), Vec<Vec<f32>>, u32, usize)> {
+        let doc = self.doc()?;
+        let slots = self.rack.iter().filter(|s| s.on).map(|s| (s.idx, s.params.clone())).collect();
+        let (a, b) = doc.target_range();
+        Some((slots, (a, b), Vec::new(), doc.sample_rate, doc.n_ch()))
+    }
+
+    fn maybe_render_rack_preview(&mut self) {
+        if !self.rack_previewing || self.job.is_some() || self.rack_rendered == self.rack_version {
+            return;
+        }
+        if self.rack_changed.elapsed() < Duration::from_millis(220) {
+            return;
+        }
+        if matches!(self.dialog, Some(Dialog::Effect(ref d)) if d.previewing) {
+            return;
+        }
+        let Some((slots, (a, b), _, sr, n_ch)) = self.rack_inputs() else {
+            self.rack_previewing = false;
+            return;
+        };
+        let b = b.min(a + sr as usize * 20);
+        let input = slice_range(&self.doc().unwrap().audio, a, b);
+        let (effects, np) = (self.effects.clone(), self.noise_print.clone());
+        let (mix, gi, go) = (self.rack_mix, self.rack_in_db, self.rack_out_db);
+        let version = self.rack_version;
+        self.spawn_job("Rack preview".into(), JobKind::RackPreview { version }, move || {
+            run_rack(&effects, &slots, input, sr, n_ch, np.as_ref(), mix, gi, go)
+        });
+    }
+
+    pub fn rack_touched(&mut self) {
+        self.rack_version += 1;
+        self.rack_changed = Instant::now();
+    }
+
+    pub fn apply_rack(&mut self) {
+        if self.busy() {
+            return;
+        }
+        let Some((slots, (a, b), _, sr, n_ch)) = self.rack_inputs() else {
+            self.set_status("Open or create a file first.");
+            return;
+        };
+        if slots.is_empty() {
+            self.set_status("The Effects Rack has no enabled effects.");
+            return;
+        }
+        if b <= a {
+            self.set_status("The file is empty.");
+            return;
+        }
+        self.rack_previewing = false;
+        if self.engine.is_playing_tag(PREVIEW_TAG) {
+            self.engine.stop();
+        }
+        if matches!(self.job, Some(Job { kind: JobKind::RackPreview { .. } | JobKind::Preview { .. }, .. })) {
+            self.job = None;
+        }
+        let doc = self.doc().unwrap();
+        let input = slice_range(&doc.audio, a, b);
+        let (doc_id, active) = (doc.id, doc.active_ch.clone());
+        let (effects, np) = (self.effects.clone(), self.noise_print.clone());
+        let (mix, gi, go) = (self.rack_mix, self.rack_in_db, self.rack_out_db);
+        self.spawn_job("Effects Rack".into(), JobKind::Edit { doc_id, range: (a, b), active, new_rate: None, select: true }, move || {
+            run_rack(&effects, &slots, input, sr, n_ch, np.as_ref(), mix, gi, go)
+        });
+    }
+
+    fn mix_paste(&mut self, mode: usize, clip_db: f32, orig_db: f32) {
+        let Some((clip, rate)) = self.clipboard.clone() else {
+            self.set_status("The clipboard is empty.");
+            return;
+        };
+        self.engine.stop();
+        let Some(d) = self.doc_mut() else { return };
+        let mut audio = clip;
+        if rate != d.sample_rate {
+            audio = resample_channels(&audio, d.sample_rate as f64 / rate as f64);
+        }
+        let audio = remap_channels(&audio, d.n_ch());
+        let cg = db_to_lin(clip_db);
+        let og = db_to_lin(orig_db);
+        let clen = audio[0].len();
+        let at = d.sel_range().map(|s| s.0).unwrap_or(d.cursor).min(d.len());
+        let all = vec![true; d.n_ch()];
+        match mode {
+            0 => {
+                let out = audio.iter().map(|c| c.iter().map(|v| v * cg).collect()).collect();
+                apply_edit(d, "Mix Paste (Insert)", (at, at), &all, out, None, true);
+            }
+            2 => {
+                let end = (at + clen).min(d.len());
+                let out = audio.iter().map(|c| c.iter().map(|v| v * cg).collect()).collect();
+                apply_edit(d, "Mix Paste (Replace)", (at, end), &all, out, None, true);
+            }
+            _ => {
+                let end = (at + clen).min(d.len());
+                let existing = slice_range(&d.audio, at, end);
+                let out: Vec<Vec<f32>> = (0..d.n_ch())
+                    .map(|c| {
+                        (0..clen)
+                            .map(|i| {
+                                let o = existing[c].get(i).copied().unwrap_or(0.0) * og;
+                                let w = audio[c][i] * cg;
+                                if mode == 3 { o * w } else { o + w }
+                            })
+                            .collect()
+                    })
+                    .collect();
+                let label = if mode == 3 { "Mix Paste (Modulate)" } else { "Mix Paste (Overlap)" };
+                apply_edit(d, label, (at, end), &all, out, None, true);
+            }
+        }
+    }
+
     pub fn close_effect_dialog(&mut self) {
         if self.engine.is_playing_tag(PREVIEW_TAG) || matches!(self.engine.status().tag, PREVIEW_TAG) {
             self.engine.stop();
@@ -836,6 +1145,9 @@ impl App {
         let np = self.noise_print.clone();
         let label = def.name.to_string();
         let effects2 = effects.clone();
+        if !def.generator || def.params.iter().any(|p| p.key == "duration") {
+            self.last_effect = Some((idx, params.clone()));
+        }
         self.spawn_job(label, JobKind::Edit { doc_id, range: (a, b), active, new_rate: None, select: true }, move || {
             let ctx = Ctx { sample_rate: sr, channels: n_ch, noise_print: np.as_ref() };
             effects2[idx].run(&input, &ctx, &params)
@@ -880,45 +1192,68 @@ impl App {
         }
     }
 
+    pub fn stop_recording(&mut self) {
+        let target = self.rec_target.take();
+        let Some((rec, rate)) = self.engine.stop_recording() else { return };
+        for d in self.docs.iter_mut() {
+            d.recording = false;
+            d.pending = 0;
+        }
+        let Some(t) = target else { return };
+        let Some(doc) = self.docs.iter_mut().find(|d| d.id == t.doc_id) else {
+            self.set_status("The file being recorded into was closed; the recording was discarded.");
+            return;
+        };
+        if rec.first().map(|c| c.is_empty()).unwrap_or(true) {
+            self.set_status("Recording was empty.");
+            return;
+        }
+        let secs = rec[0].len() as f64 / rate as f64;
+        let mut audio = rec;
+        if rate != doc.sample_rate {
+            audio = resample_channels(&audio, doc.sample_rate as f64 / rate as f64);
+        }
+        let audio = remap_channels(&audio, doc.n_ch());
+        let active = vec![true; doc.n_ch()];
+        apply_edit(doc, "Record", t.range, &active, audio, None, true);
+        doc.clamp_view();
+        self.set_status(format!("Recorded {secs:.1} s"));
+    }
+
     fn toggle_record(&mut self) {
         if self.engine.is_recording() {
-            if let Some((rec, rate)) = self.engine.stop_recording() {
-                if rec.first().map(|c| c.is_empty()).unwrap_or(true) {
-                    self.set_status("Recording was empty.");
-                    return;
-                }
-                if self.doc().is_none() {
-                    let id = self.new_id();
-                    let n = self.docs.len() + 1;
-                    let mut doc = Document::new(id, format!("Recording {n}"), None, rec, rate, None, "Record");
-                    doc.dirty = true;
-                    self.add_doc(doc);
-                    self.set_status("Recording saved to a new file.");
-                    return;
-                }
-                let doc = self.doc_mut().unwrap();
-                let mut audio = rec;
-                if rate != doc.sample_rate {
-                    audio = resample_channels(&audio, doc.sample_rate as f64 / rate as f64);
-                }
-                let audio = remap_channels(&audio, doc.n_ch());
-                let (a, b) = doc.sel_range().unwrap_or((doc.cursor, doc.cursor));
-                let active = vec![true; doc.n_ch()];
-                apply_edit(doc, "Record", (a, b), &active, audio, None, true);
-                self.set_status("Recording inserted.");
-            }
-        } else {
-            self.engine.stop();
-            match self.engine.start_recording() {
-                Ok(()) => self.set_status("Recording… press Shift+Space or the record button to stop."),
-                Err(e) => {
-                    self.dialog = Some(Dialog::Message {
-                        title: "Can't record".into(),
-                        text: format!("{e}\n\nOn macOS, allow microphone access for Audemo (or your terminal) in System Settings > Privacy & Security > Microphone."),
-                    })
-                }
-            }
+            self.stop_recording();
+            return;
         }
+        self.engine.stop();
+        let (rate, channels) = match self.engine.start_recording() {
+            Ok(f) => f,
+            Err(e) => {
+                self.dialog = Some(Dialog::Message {
+                    title: "Can't record".into(),
+                    text: format!(
+                        "{e}\n\nCheck the input device in Edit > Preferences > Audio Hardware. On macOS, allow microphone access for Audemo in System Settings > Privacy & Security > Microphone."
+                    ),
+                });
+                return;
+            }
+        };
+        // Like Audition, recording needs a file: make one if none is open.
+        if self.doc().is_none() {
+            let id = self.new_id();
+            let n = self.docs.len() + 1;
+            let ch = channels.clamp(1, 2);
+            let mut doc = Document::new(id, format!("Recording {n}"), None, vec![Vec::new(); ch], rate, None, "New Recording");
+            doc.dirty = true;
+            self.add_doc(doc);
+        }
+        let d = self.doc_mut().unwrap();
+        let range = d.sel_range().unwrap_or((d.cursor, d.cursor));
+        d.sel = None;
+        d.recording = true;
+        d.pending = 0;
+        self.rec_target = Some(RecTarget { doc_id: d.id, range });
+        self.set_status(format!("Recording at {rate} Hz. Press Stop, Space or Shift+Space to finish."));
     }
 
     // ---------------------------------------------------------------- saving
@@ -933,20 +1268,31 @@ impl App {
             .unwrap_or(false);
         if force_dialog || !is_wav {
             let fmt = WavFormat::from_bits(doc.source_bits);
-            self.dialog = Some(Dialog::Export { format: fmt, dither: fmt == WavFormat::Pcm16, path: None });
+            self.dialog = Some(Dialog::Export { format: fmt, dither: fmt == WavFormat::Pcm16, path: None, selection: false });
             return;
         }
         let path = doc.path.clone().unwrap();
         let fmt = WavFormat::from_bits(doc.source_bits);
-        self.write_wav(path, fmt, fmt == WavFormat::Pcm16);
+        self.write_wav(path, fmt, fmt == WavFormat::Pcm16, false);
     }
 
-    pub fn write_wav(&mut self, path: PathBuf, fmt: WavFormat, dither: bool) {
+    /// Write the active file (or just its selection) as WAV.
+    pub fn write_wav(&mut self, path: PathBuf, fmt: WavFormat, dither: bool, selection: bool) {
         let Some(doc) = self.doc() else { return };
-        let res = io::save_wav(&path, &doc.audio, doc.sample_rate, fmt, dither);
+        let res = if selection {
+            let (a, b) = doc.target_range();
+            io::save_wav(&path, &slice_range(&doc.audio, a, b), doc.sample_rate, fmt, dither)
+        } else {
+            io::save_wav(&path, &doc.audio, doc.sample_rate, fmt, dither)
+        };
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         match res {
+            Ok(()) if selection => {
+                self.prefs.add_recent(path.clone());
+                self.prefs.save();
+                self.set_status(format!("Saved selection as {name}"));
+            }
             Ok(()) => {
-                let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                 let doc = self.doc_mut().unwrap();
                 doc.path = Some(path.clone());
                 doc.name = name.clone();
@@ -957,6 +1303,8 @@ impl App {
                     WavFormat::Pcm32 => Some(32),
                     WavFormat::Float32 => None,
                 };
+                self.prefs.add_recent(path);
+                self.prefs.save();
                 self.set_status(format!("Saved {name} ({})", fmt.label()));
             }
             Err(e) => self.dialog = Some(Dialog::Message { title: "Save failed".into(), text: e }),
@@ -978,7 +1326,17 @@ impl App {
     pub fn perform(&mut self, action: Action, ctx: &egui::Context) {
         let editing = !matches!(
             action,
-            Action::New | Action::Open | Action::OpenPaths(_) | Action::Quit | Action::Status(_) | Action::Stop | Action::Close(_) | Action::ForceClose(_)
+            Action::New
+                | Action::Open
+                | Action::OpenPaths(_)
+                | Action::OpenRecent(_)
+                | Action::Quit
+                | Action::Status(_)
+                | Action::Stop
+                | Action::Close(_)
+                | Action::ForceClose(_)
+                | Action::Preferences
+                | Action::Audition(_)
         );
         if editing && self.busy() {
             self.set_status("Please wait for the current effect to finish.");
@@ -1160,6 +1518,7 @@ impl App {
                     dry: None,
                     wet: None,
                     error: None,
+                    rack_slot: None,
                 }));
             }
             Action::ApplyEffect(idx, params) => {
@@ -1236,6 +1595,8 @@ impl App {
                     d.dirty = true;
                 }
             }
+            Action::PlayToggle if self.engine.is_recording() => self.stop_recording(),
+            Action::Stop if self.engine.is_recording() => self.stop_recording(),
             Action::PlayToggle => self.play_toggle(),
             Action::Stop => {
                 self.engine.stop();
@@ -1323,7 +1684,110 @@ impl App {
                 }
                 self.restart_from_cursor_if_playing();
             }
+            Action::Status(s) if s.starts_with("__confirm_close:") => {
+                let id: u64 = s["__confirm_close:".len()..].parse().unwrap_or(0);
+                if let Some(i) = self.docs.iter().position(|d| d.id == id) {
+                    self.dialog = Some(Dialog::ConfirmClose { doc: i });
+                }
+            }
             Action::Status(s) => self.set_status(s),
+            Action::CloseAll => {
+                let dirty: Vec<usize> = (0..self.docs.len()).filter(|&i| self.docs[i].dirty).collect();
+                for i in (0..self.docs.len()).rev() {
+                    if !self.docs[i].dirty {
+                        self.actions.push(Action::ForceClose(i));
+                    }
+                }
+                if let Some(&first) = dirty.first() {
+                    // Indices shift as clean files close; confirm the dirty ones next frame.
+                    let id = self.docs[first].id;
+                    self.actions.push(Action::Status(format!("__confirm_close:{id}")));
+                }
+            }
+            Action::SaveAll => {
+                let mut saved = 0;
+                let mut skipped = 0;
+                for d in self.docs.iter_mut().filter(|d| d.dirty) {
+                    let wav = d.path.as_ref().and_then(|p| p.extension()).map(|e| e.eq_ignore_ascii_case("wav")).unwrap_or(false);
+                    if !wav {
+                        skipped += 1;
+                        continue;
+                    }
+                    let fmt = WavFormat::from_bits(d.source_bits);
+                    if io::save_wav(d.path.as_ref().unwrap(), &d.audio, d.sample_rate, fmt, fmt == WavFormat::Pcm16).is_ok() {
+                        d.dirty = false;
+                        saved += 1;
+                    }
+                }
+                self.set_status(if skipped > 0 {
+                    format!("Saved {saved} file(s). {skipped} need Save As first (new or non-WAV files).")
+                } else {
+                    format!("Saved {saved} file(s).")
+                });
+            }
+            Action::SaveSelectionAs => {
+                if let Some(d) = self.doc() {
+                    let fmt = WavFormat::from_bits(d.source_bits);
+                    self.dialog = Some(Dialog::Export { format: fmt, dither: fmt == WavFormat::Pcm16, path: None, selection: true });
+                }
+            }
+            Action::CopyToNew => {
+                let res = self.doc().map(|d| {
+                    let (a, b) = d.target_range();
+                    (slice_range(&d.audio, a, b), d.sample_rate)
+                });
+                if let Some((audio, sr)) = res {
+                    let id = self.new_id();
+                    let n = self.docs.len() + 1;
+                    let mut doc = Document::new(id, format!("Untitled {n}"), None, audio, sr, None, "Copy to New");
+                    doc.dirty = true;
+                    self.add_doc(doc);
+                }
+            }
+            Action::MixPaste { mode, clip_db, orig_db } => self.mix_paste(mode, clip_db, orig_db),
+            Action::RepeatLast => match self.last_effect.clone() {
+                Some((idx, p)) => self.run_effect(idx, p),
+                None => self.set_status("No effect has been applied yet."),
+            },
+            Action::OpenAppend => {
+                let Some(doc_id) = self.doc().map(|d| d.id) else {
+                    self.actions.push(Action::Open);
+                    return;
+                };
+                if let Some(paths) = rfd::FileDialog::new().add_filter("Audio files", io::OPEN_EXTENSIONS).pick_files() {
+                    for p in paths {
+                        self.load_async(p, LoadIntent::Append(doc_id));
+                    }
+                }
+            }
+            Action::OpenRecent(p) => {
+                if p.is_file() {
+                    self.open_paths(vec![p]);
+                } else {
+                    self.prefs.recent.retain(|r| r != &p);
+                    self.prefs.save();
+                    self.dialog = Some(Dialog::Message { title: "File not found".into(), text: format!("{} no longer exists.", p.display()) });
+                }
+            }
+            Action::Preferences => {
+                let (inputs, outputs) = crate::engine::list_devices();
+                self.dialog = Some(Dialog::Preferences {
+                    input: self.prefs.input_device.clone(),
+                    output: self.prefs.output_device.clone(),
+                    inputs,
+                    outputs,
+                });
+            }
+            Action::ApplyRack => self.apply_rack(),
+            Action::Audition(p) => {
+                self.browser_selected = Some(p.clone());
+                if self.engine.is_playing_tag(BROWSER_TAG) {
+                    self.engine.stop();
+                }
+                if self.prefs.browser_autoplay {
+                    self.load_async(p, LoadIntent::Audition);
+                }
+            }
         }
     }
 
@@ -1334,6 +1798,46 @@ impl App {
         let doc = Document::new(id, format!("Untitled {n}"), None, vec![vec![0.0; len]; channels.max(1)], rate, None, "New File");
         self.add_doc(doc);
     }
+}
+
+/// Run an Effects Rack chain: input gain, each enabled effect in order,
+/// dry/wet mix, output gain.
+#[allow(clippy::too_many_arguments)]
+pub fn run_rack(
+    effects: &[EffectDef],
+    slots: &[(usize, Params)],
+    input: Vec<Vec<f32>>,
+    sr: u32,
+    n_ch: usize,
+    np: Option<&NoiseProfile>,
+    mix: f32,
+    in_db: f32,
+    out_db: f32,
+) -> Result<Vec<Vec<f32>>, String> {
+    let ctx = Ctx { sample_rate: sr, channels: n_ch, noise_print: np };
+    let gi = db_to_lin(in_db);
+    let go = db_to_lin(out_db);
+    let mut x: Vec<Vec<f32>> = input.iter().map(|c| c.iter().map(|s| s * gi).collect()).collect();
+    for (idx, p) in slots {
+        x = effects[*idx].run(&x, &ctx, p).map_err(|e| format!("{}: {e}", effects[*idx].name))?;
+    }
+    let m = (mix / 100.0).clamp(0.0, 1.0);
+    let same = x.first().map(|c| c.len()) == input.first().map(|c| c.len());
+    Ok(x.into_iter()
+        .enumerate()
+        .map(|(c, ch)| {
+            ch.into_iter()
+                .enumerate()
+                .map(|(i, w)| {
+                    if same {
+                        (input[c.min(input.len() - 1)][i] * (1.0 - m) + w * m) * go
+                    } else {
+                        w * go
+                    }
+                })
+                .collect()
+        })
+        .collect())
 }
 
 /// Replace `range` with `out`, record undo, keep markers and selection sane.
@@ -1444,6 +1948,34 @@ mod tests {
         assert_eq!(d.active_ch.len(), 1);
         d.undo();
         assert_eq!((d.n_ch(), d.sample_rate, d.len()), (2, 1000, 1000));
+    }
+
+    #[test]
+    fn rack_chain_gain_and_mix() {
+        let effects = crate::dsp::effects::registry();
+        let amp = effects.iter().position(|e| e.id == "amplify").unwrap();
+        let inv = effects.iter().position(|e| e.id == "invert").unwrap();
+        let mut p = effects[amp].default_params();
+        p.set("left", crate::dsp::params::Value::F(6.0206));
+        let input = vec![vec![0.25f32; 100]];
+        // +6 dB then invert, fully wet, -6 dB output: back to -0.25.
+        let slots = vec![(amp, p.clone()), (inv, Params::default())];
+        let out = run_rack(&effects, &slots, input.clone(), 1000, 1, None, 100.0, 0.0, -6.0206).unwrap();
+        assert!((out[0][10] + 0.25).abs() < 1e-3, "{}", out[0][10]);
+        // 50% mix of dry 0.25 and wet -0.25 cancels.
+        let out = run_rack(&effects, &slots[1..], input, 1000, 1, None, 50.0, 0.0, 0.0).unwrap();
+        assert!(out[0][10].abs() < 1e-6);
+    }
+
+    #[test]
+    fn recording_extends_view_span() {
+        let mut d = doc(0);
+        d.recording = true;
+        d.pending = 500;
+        assert!(d.max_span() >= 30_000.0);
+        d.recording = false;
+        d.pending = 0;
+        assert_eq!(d.max_span(), 64.0);
     }
 
     #[test]

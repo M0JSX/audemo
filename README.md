@@ -11,6 +11,7 @@ Audemo is an independent project and is not affiliated with Adobe.
 
 - **Open** WAV, AIFF, FLAC, MP3, OGG/Vorbis, M4A/AAC, ALAC, CAF and MKV/WebM audio (drag files onto the window, or pass them on the command line).
 - **Save** WAV as 16-bit, 24-bit or 32-bit integer, or 32-bit float, with optional TPDF dither.
+- **Workspace** laid out like Audition's default: Files / Favorites, then Media Browser / Effects Rack / Markers / Properties, then History down the left; the Editor in the centre with its transport bar; Levels and Selection/View along the bottom. Panel groups resize, and Window > Workspace > Reset to Default restores the layout.
 - **Waveform editor** with an overview/zoom navigator, time ruler, per-channel lanes, amplitude ruler in dB, sample-level zoom and channel enable toggles (edit L or R only).
 - **Spectral frequency display** (Shift+D) shown under the waveform.
 - **Edit**: cut, copy, paste, paste to new, delete, crop, select all, convert sample rate and channel count.
@@ -18,7 +19,11 @@ Audemo is an independent project and is not affiliated with Adobe.
 - **Fade handles** in the top corners of the waveform and a floating **clip gain** control.
 - **Markers** (M), with rename, jump and delete in the Markers panel.
 - **Playback** through the system output (WASAPI, CoreAudio, ALSA/PulseAudio/PipeWire), looping, monitor volume, peak meters with hold and clip indicator.
-- **Recording** from the default input (Shift+Space); inserts at the cursor or creates a new file.
+- **Recording** (Shift+Space) with the waveform drawn live as it records; Stop or Space ends it. Records into the selection or at the cursor, or into a new file if none is open.
+- **Audio Hardware preferences** (Edit > Preferences) for choosing input and output devices; remembered between sessions along with recent files.
+- **Effects Rack**: chain up to 16 effects with power switches, reordering, input/output gain and dry/wet mix, loop preview, then apply in one step.
+- **Media Browser** to navigate folders, audition files with Auto-Play and double-click to open; **Favorites** panel; **Properties** panel with peak and RMS.
+- **File and Edit menus** with Open Append, Open Recent, Close All, Save Selection As, Save All, Copy to New, Mix Paste (insert / overlap / overwrite / modulate) and Repeat Previous Command.
 - **Effect windows** with presets, live looping preview (Space) and bypass, plus a draggable frequency-response curve for the EQs and filters.
 - **Favorites** menu for one-click common jobs.
 
@@ -52,9 +57,12 @@ All processing is 32-bit float. Effects run on a background thread, so the windo
 | Action | Keys |
 |---|---|
 | Play / stop | Space |
-| Record | Shift+Space |
+| Record (Stop or Space ends it) | Shift+Space |
 | Undo / redo | Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y) |
 | Cut / copy / paste | Ctrl+X / Ctrl+C / Ctrl+V |
+| Copy to New / Paste to New | Alt+Shift+C / Ctrl+Alt+V |
+| Mix Paste | Ctrl+Shift+V |
+| Repeat previous command | Shift+R |
 | Delete / crop | Delete / Ctrl+T |
 | Select all / deselect | Ctrl+A / Esc |
 | Add marker / previous / next | M / ← / → |
@@ -123,7 +131,9 @@ src/
   main.rs        window setup and panel layout
   app.rs         documents, undo history, actions, background jobs
   editor.rs      waveform / spectral editor, selection, fades, gain HUD
-  panels.rs      menus, toolbar, side panels, transport, meters, status bar
+  panels.rs      menus, toolbar, docked panel layout, transport, levels, status bar
+  workspace.rs   Favorites, Media Browser, Effects Rack and Properties panels
+  prefs.rs       saved preferences (audio devices, recent files)
   dialogs.rs     effect windows (presets, preview, EQ curve) and other dialogs
   engine.rs      cpal playback and recording
   io.rs          symphonia decoding, hound WAV export
@@ -138,7 +148,10 @@ Adding an effect means writing one `fn(&[Vec<f32>], &Ctx, &Params) -> Result<Vec
 and registering it with its parameters in `src/dsp/effects/`; the menu entry, dialog, presets and
 preview are generated from that definition.
 
-## Not included (yet)
+## Roadmap to Audition parity
 
-Multitrack session view, MP3/FLAC export, VST/AU plug-in hosting, spectral painting/healing tools,
-and batch processing.
+1. ~~Recording fixes, Audio Hardware preferences, Audition workspace layout~~ (done)
+2. Real-time Effects Rack, remaining Audition effects, Match Loudness, analysis panels
+3. Multitrack sessions: tracks, clips, automation, Mixer, mixdown
+4. Spectral selection/healing tools, Diagnostics panel, batch processing
+5. MP3/FLAC/AAC export, metadata, VST3/AU plug-in hosting
