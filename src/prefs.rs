@@ -217,6 +217,8 @@ prefs! {
     save_meta: bool = true,
     write_encoder: bool = true,
     // Memory
+    // Media & Disk Cache: temporary folder (None = the system's).
+    temp_dir: Option<PathBuf> = None,
     undo_levels: u32 = 60,
     // Multitrack
     pan_law: PanLaw = PanLaw::LrCut,
@@ -243,6 +245,40 @@ prefs! {
     tempo: f32 = 120.0,
     beats_per_bar: u32 = 4,
     beat_unit: u32 = 4,
+}
+
+static SYSTEM_TEMP: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+static LAUNCH_TEMP: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Point this process's temporary folder at the one chosen in Preferences.
+/// Plug-ins, the operating system's audio and file dialogs, and the plug-in
+/// scanner (a child process) all create their temporary files there. Call
+/// before any other thread starts; a change takes effect at the next launch.
+pub fn apply_temp_dir(p: &Prefs) {
+    let system = std::env::temp_dir();
+    let _ = SYSTEM_TEMP.set(system.clone());
+    let mut chosen = system;
+    if let Some(dir) = &p.temp_dir {
+        if std::fs::create_dir_all(dir).is_ok() && dir.is_dir() {
+            for var in ["TMPDIR", "TMP", "TEMP"] {
+                std::env::set_var(var, dir);
+            }
+            chosen = dir.clone();
+        } else {
+            eprintln!("audemo: temporary folder {} is unavailable; using the system's", dir.display());
+        }
+    }
+    let _ = LAUNCH_TEMP.set(chosen);
+}
+
+/// The operating system's own temporary folder.
+pub fn system_temp() -> PathBuf {
+    SYSTEM_TEMP.get().cloned().unwrap_or_else(std::env::temp_dir)
+}
+
+/// The temporary folder in use since launch.
+pub fn launch_temp() -> PathBuf {
+    LAUNCH_TEMP.get().cloned().unwrap_or_else(std::env::temp_dir)
 }
 
 pub fn config_dir() -> Option<PathBuf> {
@@ -416,6 +452,7 @@ mod tests {
             colors: [1, 2, 3, 4, 5, 0xffffff],
             spec_window: WindowFn::Hamming,
             backup_dir: Some(PathBuf::from("/Backups here")),
+            temp_dir: Some(PathBuf::from("/Volumes/Scratch/Temp")),
             marker_name: "Cue".into(),
             pan_law: PanLaw::EqualPower,
             ..Default::default()

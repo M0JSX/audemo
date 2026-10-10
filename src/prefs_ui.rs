@@ -623,10 +623,29 @@ impl App {
             Page::MediaCache => {
                 section(ui, "Temporary Folders");
                 group(ui, |ui| {
-                    let tmp = std::env::temp_dir().display().to_string();
+                    let shown = p.temp_dir.clone().unwrap_or_else(crate::prefs::system_temp);
                     row(ui, "Primary", |ui| {
-                        ui.add_enabled(false, egui::Label::new(RichText::new(&tmp).monospace().size(11.0)));
+                        ui.label(RichText::new(shown.display().to_string()).monospace().size(11.0));
                     });
+                    row(ui, "", |ui| {
+                        if ui.button("Browse...").clicked() {
+                            let mut dlg = rfd::FileDialog::new();
+                            if shown.is_dir() {
+                                dlg = dlg.set_directory(&shown);
+                            }
+                            if let Some(dir) = dlg.pick_folder() {
+                                p.temp_dir = (dir != crate::prefs::system_temp()).then_some(dir);
+                            }
+                        }
+                        if ui.add_enabled(p.temp_dir.is_some(), egui::Button::new("Use System Default")).clicked() {
+                            p.temp_dir = None;
+                        }
+                    });
+                    if shown != crate::prefs::launch_temp() {
+                        row(ui, "", |ui| {
+                            ui.label(RichText::new("Takes effect when Audemo is next started.").color(crate::theme::ACCENT()).size(11.0));
+                        });
+                    }
                 });
                 section(ui, "Media Cache");
                 group(ui, |ui| {
@@ -634,7 +653,7 @@ impl App {
                         ui.add_enabled(false, egui::Checkbox::new(&mut true.clone(), "Save Peak Files"));
                     });
                 });
-                note(ui, "Audemo keeps open audio in memory and builds waveform and peak data as files open, so it uses no temporary or cache files on disk.");
+                note(ui, "Plug-ins, the plug-in scanner and the system's audio and file services write their temporary files to the primary folder. Audemo itself keeps open audio and undo history in memory and builds peak data as files open, so it needs no cache on disk.");
             }
             Page::Memory => {
                 group(ui, |ui| {

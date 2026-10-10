@@ -58,6 +58,8 @@ fn main() -> eframe::Result<()> {
     if args.len() >= 3 && args[1] == "--scan-vst3" {
         std::process::exit(plugin::scan_child(std::path::Path::new(&args[2])));
     }
+    // Before any thread starts: environment changes aren't thread-safe.
+    prefs::apply_temp_dir(&prefs::Prefs::load());
     let files: Vec<PathBuf> = std::env::args().skip(1).map(PathBuf::from).filter(|p| p.is_file()).collect();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
