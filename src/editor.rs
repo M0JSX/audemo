@@ -131,10 +131,13 @@ impl App {
         let show_spec = self.show_spectral;
         let tool = self.tool;
 
-        let overview = Rect::from_min_size(full.min, vec2(full.width(), OVERVIEW_H));
-        let ruler = Rect::from_min_size(pos2(full.left(), overview.bottom()), vec2(full.width(), RULER_H));
+        let overview_strip = Rect::from_min_size(full.min, vec2(full.width(), OVERVIEW_H));
+        let ruler = Rect::from_min_size(pos2(full.left(), overview_strip.bottom()), vec2(full.width(), RULER_H));
         let body = Rect::from_min_max(pos2(full.left(), ruler.bottom() + 1.0), full.max);
         let lanes = Rect::from_min_max(pos2(body.left() + LEFT_W, body.top()), pos2(body.right() - RIGHT_W, body.bottom()));
+        // The overview spans the same width as the waveform, so its ends
+        // line up with the file's start and end below.
+        let overview = Rect::from_x_y_ranges(lanes.x_range(), overview_strip.y_range());
 
         let ss = self.spec_settings();
         let wheel_base = self.wheel_base();
@@ -144,7 +147,7 @@ impl App {
         let sr = doc.sample_rate as f64;
 
         // ------------------------------------------------ overview strip
-        painter.rect_filled(overview, 0.0, Color32::from_rgb(0x1c, 0x1c, 0x1c));
+        painter.rect_filled(overview_strip, 0.0, Color32::from_rgb(0x1c, 0x1c, 0x1c));
         {
             let total = doc.max_span();
             let cols = overview.width().max(1.0) as usize;
