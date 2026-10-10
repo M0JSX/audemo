@@ -759,6 +759,10 @@ impl RtEffect for PluginRt {
 
 fn make_rt(id: &str, p: &Params, sr: u32) -> Option<Box<dyn RtEffect>> {
     let (_, cid) = split_id(id)?;
+    // A plug-in disabled in the Plug-In Manager stays out of racks.
+    if !find(cid).map(|p| p.enabled).unwrap_or(false) {
+        return None;
+    }
     let state = p.s("state");
     match Plugin::create(cid, &state, sr, 2, 4096, false) {
         Ok(plugin) => Some(Box::new(PluginRt { plugin, cid: cid.to_string(), sample_rate: sr, state })),
@@ -798,15 +802,18 @@ fn pooled(cid: &str, state: &str, sr: u32, ch: usize) -> Result<Pooled, String> 
             found = Some(pool.remove(i));
         }
     }
-    if let Some(mut e) = found {
-        // Plug-ins accept these while not processing; doing them here keeps
-        // rendering going even while the UI thread is busy (a file dialog).
-        if e.state != state {
-            e.plugin.get().set_state_text(state);
-            e.state = state.to_string();
-        }
-        e.plugin.get().reset();
-        return Ok(e);
+    if let Some(e) = found {
+        // setState and setActive belong on the UI thread.
+        let want = state.to_string();
+        return run_on_main(move || {
+            let mut e = e;
+            if e.state != want {
+                e.plugin.get().set_state_text(&want);
+                e.state = want;
+            }
+            e.plugin.get().reset();
+            e
+        });
     }
     let plugin = Plugin::create(cid, state, sr, ch, 4096, true)?;
     Ok(Pooled { cid: cid.to_string(), sr, ch, state: state.to_string(), plugin })

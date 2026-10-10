@@ -1091,7 +1091,7 @@ impl App {
                 Some(ti) => (&s.tracks[ti].fx, s.tracks[ti].fx_on),
                 None => (&s.master_fx, s.master_fx_on),
             };
-            (fx.iter().map(|f| (if f.missing { None } else { effects.iter().position(|e| e.id == f.effect) }, f.effect, f.on)).collect(), on)
+            (fx.iter().map(|f| (if f.is_missing() { None } else { effects.iter().position(|e| e.id == f.effect) }, f.effect, f.on)).collect(), on)
         };
         enum Op {
             Toggle(usize),
@@ -1242,7 +1242,7 @@ impl App {
                 Some(ti) => s.tracks[ti].fx.get(i).cloned(),
                 None => s.master_fx.get(i).cloned(),
             };
-            if let Some((slot, idx)) = slot.filter(|s| !s.missing).and_then(|s| effects.iter().position(|e| e.id == s.effect).map(|i| (s, i))) {
+            if let Some((slot, idx)) = slot.filter(|s| !s.is_missing()).and_then(|s| effects.iter().position(|e| e.id == s.effect).map(|i| (s, i))) {
                 let slot_id = slot.id;
                 self.mt.fx_undo_for = None;
                 self.close_effect_dialog();

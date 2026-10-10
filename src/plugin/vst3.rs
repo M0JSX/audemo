@@ -1601,6 +1601,13 @@ impl Instance {
     }
 
     pub fn set_state(&mut self, comp: &[u8], ctrl: &[u8]) -> bool {
+        // Parameter changes still queued for the processor would undo the
+        // new state on the next block.
+        self.in_changes.clear();
+        if let Ok(mut q) = self.edits.lock() {
+            q.edits.clear();
+            q.touched = false;
+        }
         let mut ok = true;
         unsafe {
             if !comp.is_empty() {

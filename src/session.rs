@@ -241,8 +241,9 @@ pub struct FxSlot {
     pub on: bool,
     pub rt: SharedFx,
     /// A plug-in that isn't available: it passes audio through and keeps
-    /// its settings so saving the session doesn't lose them.
-    pub missing: bool,
+    /// its settings so saving the session doesn't lose them. Shared with the
+    /// slot's undo copies, like `rt`.
+    pub missing: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FxSlot {
@@ -250,19 +251,23 @@ impl FxSlot {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let e = rt::make(effect, &params, sample_rate)?;
         let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Some(FxSlot { id, effect, params, on: true, rt: Arc::new(Mutex::new(e)), missing: false })
+        Some(FxSlot { id, effect, params, on: true, rt: Arc::new(Mutex::new(e)), missing: Arc::new(false.into()) })
     }
 
     /// A slot for a plug-in that can't be loaded right now.
     pub fn placeholder(effect: &'static str, params: Params) -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1 << 40);
         let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        FxSlot { id, effect, params, on: true, rt: Arc::new(Mutex::new(Box::new(rt::Passthrough))), missing: true }
+        FxSlot { id, effect, params, on: true, rt: Arc::new(Mutex::new(Box::new(rt::Passthrough))), missing: Arc::new(true.into()) }
+    }
+
+    pub fn is_missing(&self) -> bool {
+        self.missing.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Try to load a missing plug-in again (after a scan). True if it loaded.
     pub fn revive(&mut self, sample_rate: u32) -> bool {
-        if !self.missing {
+        if !self.is_missing() {
             return false;
         }
         match rt::make(self.effect, &self.params, sample_rate) {
@@ -270,7 +275,7 @@ impl FxSlot {
                 if let Ok(mut r) = self.rt.lock() {
                     *r = e;
                 }
-                self.missing = false;
+                self.missing.store(false, std::sync::atomic::Ordering::Relaxed);
                 true
             }
             None => false,
@@ -301,6 +306,10 @@ impl FxSlot {
     /// The same effect and settings with its own, fresh state (for mixdown).
     fn fresh(&self, sample_rate: u32) -> FxSlot {
         let mut s = self.clone();
+        // A missing plug-in passes audio through in mixdowns too.
+        if self.is_missing() {
+            return s;
+        }
         if let Some(e) = rt::make(self.effect, &self.params, sample_rate) {
             s.rt = Arc::new(Mutex::new(e));
         }
