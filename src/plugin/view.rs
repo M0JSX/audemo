@@ -291,9 +291,13 @@ mod native {
                 ShowWindow(h, 0);
                 0
             }
-            WM_SIZE if !win.is_null() && !(*win).resizing && !(*win).view.is_null() => {
+            // Ignore minimising (SIZE_MINIMIZED): the plug-in keeps its size.
+            WM_SIZE if !win.is_null() && !(*win).resizing && !(*win).view.is_null() && w != 1 => {
                 let mut r = Rect::default();
                 GetClientRect(h, &mut r);
+                if r.right <= r.left || r.bottom <= r.top {
+                    return 0;
+                }
                 let view = (*win).view;
                 let v = &**(view as *mut *const PlugViewVtbl);
                 let mut vr = ViewRect { left: 0, top: 0, right: r.right - r.left, bottom: r.bottom - r.top };
@@ -430,6 +434,36 @@ pub(crate) mod native {
         pub(crate) fn objc_msgSend();
         #[cfg(target_arch = "x86_64")]
         fn objc_msgSend_stret();
+        fn objc_allocateClassPair(superclass: Id, name: *const c_char, extra: usize) -> Id;
+        fn objc_registerClassPair(cls: Id);
+        fn class_addMethod(cls: Id, name: Sel, imp: *const c_void, types: *const c_char) -> i8;
+        fn objc_autoreleasePoolPush() -> *mut c_void;
+        fn objc_autoreleasePoolPop(pool: *mut c_void);
+    }
+
+    /// Windows the user has closed (reported by the delegate below).
+    static CLOSED: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+    unsafe extern "C" fn window_will_close(_this: Id, _sel: Sel, note: Id) {
+        let w = send0(note, b"object\0");
+        if let Ok(mut c) = CLOSED.lock() {
+            c.push(w as usize);
+        }
+    }
+
+    /// A shared NSWindow delegate that records windowWillClose:.
+    fn delegate() -> Id {
+        static D: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *D.get_or_init(|| unsafe {
+            let mut cls = objc_allocateClassPair(class(b"NSObject\0"), b"AudemoPluginWindowDelegate\0".as_ptr() as *const c_char, 0);
+            if cls.is_null() {
+                cls = class(b"AudemoPluginWindowDelegate\0");
+            } else {
+                class_addMethod(cls, sel(b"windowWillClose:\0"), window_will_close as *const c_void, b"v@:@\0".as_ptr() as *const c_char);
+                objc_registerClassPair(cls);
+            }
+            send0(send0(cls, b"alloc\0"), b"init\0") as usize
+        }) as Id
     }
 
     /// `[o frame]`: an NSRect return (by hidden pointer on x86_64).
@@ -524,6 +558,7 @@ pub(crate) mod native {
                 return Err("Couldn't create the plug-in window.".into());
             }
             send_bool(window, b"setReleasedWhenClosed:\0", false);
+            send_id(window, b"setDelegate:\0", delegate());
             send_id(window, b"setTitle:\0", ns_string(title));
             // Float over Audemo's window, and hide while another app is active.
             send_long(window, b"setLevel:\0", 3);
@@ -545,8 +580,7 @@ pub(crate) mod native {
     }
 
     pub fn closed(win: &Win) -> bool {
-        // Closing (with releasedWhenClosed off) just hides the window.
-        win.shown && !win.window.is_null() && unsafe { !get_bool(win.window, b"isVisible\0") && !get_bool(win.window, b"isMiniaturized\0") }
+        win.shown && CLOSED.lock().map(|c| c.contains(&(win.window as usize))).unwrap_or(false)
     }
 
     pub fn resize(win: &mut Win, w: i32, h: i32) {
@@ -555,12 +589,21 @@ pub(crate) mod native {
         }
     }
 
+    /// Close and free the window. Its content view (the plug-in's) is gone
+    /// when this returns, so the plug-in can be destroyed right after.
     pub fn destroy(win: &mut Win) {
         unsafe {
             if !win.window.is_null() {
+                let pool = objc_autoreleasePoolPush();
+                send_id(win.window, b"setDelegate:\0", null_mut());
+                send_id(win.window, b"setContentView:\0", null_mut());
                 send_id(win.window, b"orderOut:\0", null_mut());
                 send0(win.window, b"close\0");
                 send0(win.window, b"release\0");
+                objc_autoreleasePoolPop(pool);
+                if let Ok(mut c) = CLOSED.lock() {
+                    c.retain(|w| *w != win.window as usize);
+                }
                 win.window = null_mut();
             }
         }

@@ -1085,13 +1085,13 @@ impl App {
         let session_id = self.sessions[si].id;
         let sr = self.sessions[si].sample_rate;
         let owner_id = owner.map(|ti| self.sessions[si].tracks[ti].id);
-        let (slots, rack_on): (Vec<(usize, &'static str, bool)>, bool) = {
+        let (slots, rack_on): (Vec<(Option<usize>, &'static str, bool)>, bool) = {
             let s = &self.sessions[si];
             let (fx, on) = match owner {
                 Some(ti) => (&s.tracks[ti].fx, s.tracks[ti].fx_on),
                 None => (&s.master_fx, s.master_fx_on),
             };
-            (fx.iter().map(|f| (effects.iter().position(|e| e.id == f.effect).unwrap_or(0), f.effect, f.on)).collect(), on)
+            (fx.iter().map(|f| (if f.missing { None } else { effects.iter().position(|e| e.id == f.effect) }, f.effect, f.on)).collect(), on)
         };
         enum Op {
             Toggle(usize),
@@ -1109,18 +1109,28 @@ impl App {
                 for i in 0..crate::app::RACK_SLOTS {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 3.0;
-                        if let Some((idx, _, on)) = slots.get(i).copied() {
+                        if let Some((idx, eid, on)) = slots.get(i).copied() {
                             if icon_button_sized(ui, Icon::Power, on, if on { "Turn effect off" } else { "Turn effect on" }, vec2(18.0, 18.0), true).clicked() {
                                 op = Some(Op::Toggle(i));
                             }
                             ui.label(RichText::new(format!("{:>2}", i + 1)).monospace().color(TEXT_DIM));
-                            let def = &effects[idx];
-                            if ui.selectable_label(false, RichText::new(def.name).color(if on && rack_on { TEXT } else { TEXT_DIM })).on_hover_text("Click to edit settings").clicked() && !def.params.is_empty() {
-                                op = Some(Op::Edit(i));
+                            // A plug-in that isn't available keeps its slot (and settings).
+                            let def = idx.map(|k| &effects[k]);
+                            let editable = def.map(|d| !d.params.is_empty()).unwrap_or(false);
+                            match def {
+                                Some(def) => {
+                                    if ui.selectable_label(false, RichText::new(def.name).color(if on && rack_on { TEXT } else { TEXT_DIM })).on_hover_text("Click to edit settings").clicked() && editable {
+                                        op = Some(Op::Edit(i));
+                                    }
+                                }
+                                None => {
+                                    let name = crate::plugin::split_id(eid).and_then(|(_, c)| crate::plugin::find(c)).map(|p| p.name).unwrap_or_else(|| eid.to_string());
+                                    ui.label(RichText::new(format!("{name} (unavailable)")).color(WARN)).on_hover_text("This plug-in isn't installed, is disabled, or failed to load. Its settings are kept; audio passes through unchanged.");
+                                }
                             }
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.menu_button(RichText::new("▸").color(TEXT_DIM), |ui| {
-                                    if !def.params.is_empty() && ui.button("Edit Effect…").clicked() {
+                                    if editable && ui.button("Edit Effect…").clicked() {
                                         op = Some(Op::Edit(i));
                                         ui.close_menu();
                                     }
@@ -1232,8 +1242,7 @@ impl App {
                 Some(ti) => s.tracks[ti].fx.get(i).cloned(),
                 None => s.master_fx.get(i).cloned(),
             };
-            if let Some(slot) = slot {
-                let idx = effects.iter().position(|e| e.id == slot.effect).unwrap_or(0);
+            if let Some((slot, idx)) = slot.filter(|s| !s.missing).and_then(|s| effects.iter().position(|e| e.id == s.effect).map(|i| (s, i))) {
                 let slot_id = slot.id;
                 self.mt.fx_undo_for = None;
                 self.close_effect_dialog();

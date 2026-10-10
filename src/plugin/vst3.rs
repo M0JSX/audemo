@@ -1441,6 +1441,10 @@ impl Instance {
         out
     }
 
+    pub fn refresh_latency(&mut self) {
+        self.latency = unsafe { (self.processor.vtbl().get_latency_samples)(self.processor.ptr) } as usize;
+    }
+
     pub fn get_param(&self, id: ParamId) -> f64 {
         self.controller.as_ref().map(|c| unsafe { (c.vtbl().get_param_normalized)(c.ptr, id) }).unwrap_or(0.0)
     }

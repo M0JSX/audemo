@@ -803,6 +803,18 @@ impl App {
         self.effects = Arc::new(new);
         self.effects_gen += 1;
         self.rack_touched();
+        // Plug-ins a session couldn't load may be available now.
+        for s in self.sessions.iter_mut() {
+            let sr = s.sample_rate;
+            for t in s.tracks.iter_mut() {
+                for f in t.fx.iter_mut() {
+                    f.revive(sr);
+                }
+            }
+            for f in s.master_fx.iter_mut() {
+                f.revive(sr);
+            }
+        }
     }
 
     pub fn doc(&self) -> Option<&Document> {

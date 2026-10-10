@@ -86,9 +86,12 @@ impl PluginEditor {
         self.state = s;
     }
 
-    fn store(&mut self, p: &mut Params) {
+    /// Write the instance's state to the effect's settings, with the
+    /// parameter changes that led to it (for running instances).
+    fn store(&mut self, p: &mut Params, edits: &[(u32, f64)]) {
         let s = self.plugin.state();
         if s != self.state {
+            p.set("edits", Value::S(super::encode_edits(&self.state, edits)));
             p.set("state", Value::S(s.clone()));
             self.state = s;
         }
@@ -98,8 +101,8 @@ impl PluginEditor {
     pub fn ui(&mut self, ui: &mut Ui, p: &mut Params) {
         self.sync_from(p);
         // Edits made in the plug-in's own window.
-        if self.plugin.get().take_touched() {
-            self.store(p);
+        if let Some(edits) = self.plugin.get().take_touched() {
+            self.store(p, &edits);
         }
         let visible: Vec<usize> = self
             .params
@@ -166,10 +169,10 @@ impl PluginEditor {
         });
         if !changed.is_empty() {
             let inst = self.plugin.get();
-            for (id, v) in changed {
-                inst.set_param(id, v);
+            for (id, v) in &changed {
+                inst.set_param(*id, *v);
             }
-            self.store(p);
+            self.store(p, &changed);
         }
     }
 }

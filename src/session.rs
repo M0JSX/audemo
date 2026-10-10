@@ -240,6 +240,9 @@ pub struct FxSlot {
     pub params: Params,
     pub on: bool,
     pub rt: SharedFx,
+    /// A plug-in that isn't available: it passes audio through and keeps
+    /// its settings so saving the session doesn't lose them.
+    pub missing: bool,
 }
 
 impl FxSlot {
@@ -247,7 +250,31 @@ impl FxSlot {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let e = rt::make(effect, &params, sample_rate)?;
         let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Some(FxSlot { id, effect, params, on: true, rt: Arc::new(Mutex::new(e)) })
+        Some(FxSlot { id, effect, params, on: true, rt: Arc::new(Mutex::new(e)), missing: false })
+    }
+
+    /// A slot for a plug-in that can't be loaded right now.
+    pub fn placeholder(effect: &'static str, params: Params) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1 << 40);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        FxSlot { id, effect, params, on: true, rt: Arc::new(Mutex::new(Box::new(rt::Passthrough))), missing: true }
+    }
+
+    /// Try to load a missing plug-in again (after a scan). True if it loaded.
+    pub fn revive(&mut self, sample_rate: u32) -> bool {
+        if !self.missing {
+            return false;
+        }
+        match rt::make(self.effect, &self.params, sample_rate) {
+            Some(e) => {
+                if let Ok(mut r) = self.rt.lock() {
+                    *r = e;
+                }
+                self.missing = false;
+                true
+            }
+            None => false,
+        }
     }
 
     /// New parameters, applied to the running instance without resetting it.
@@ -1281,14 +1308,21 @@ pub fn from_text(id: u64, text: &str, base: Option<&Path>, effects: &[EffectDef]
             }
             "masterfx" => s.master_fx_on = num(1).map(|v| v != 0.0).unwrap_or(true),
             "fx" | "mfx" => {
-                // Effects this version doesn't know are skipped.
+                // Built-in effects this version doesn't know are skipped;
+                // plug-ins that can't load are kept as placeholders.
                 let sr = s.sample_rate;
-                let slot = f.get(1).and_then(|eid| effects.iter().find(|e| e.id == *eid)).and_then(|def| {
-                    let params = Params::from_text(&def.params, f.get(3).unwrap_or(&""));
-                    let mut slot = FxSlot::new(def.id, params, sr)?;
-                    slot.on = f.get(2).map(|v| *v != "0").unwrap_or(true);
-                    Some(slot)
-                });
+                let on = f.get(2).map(|v| *v != "0").unwrap_or(true);
+                let text = f.get(3).unwrap_or(&"");
+                let eid = f.get(1).copied().unwrap_or("");
+                let def = effects.iter().find(|e| e.id == eid);
+                let mut slot = def.and_then(|def| FxSlot::new(def.id, Params::from_text(&def.params, text), sr));
+                if slot.is_none() && crate::plugin::split_id(eid).is_some() {
+                    let id: &'static str = def.map(|d| d.id).unwrap_or_else(|| Box::leak(eid.to_string().into_boxed_str()));
+                    slot = Some(FxSlot::placeholder(id, Params::from_text(&crate::plugin::param_defs(""), text)));
+                }
+                if let Some(sl) = slot.as_mut() {
+                    sl.on = on;
+                }
                 if let Some(slot) = slot {
                     if f[0] == "mfx" {
                         s.master_fx.push(slot);

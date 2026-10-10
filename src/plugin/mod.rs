@@ -522,15 +522,25 @@ impl Instance {
     pub fn reset(&mut self) {
         each!(self, i => i.reset())
     }
-    /// True if the plug-in's own window changed something since the last call.
-    pub fn take_touched(&mut self) -> bool {
+    /// Parameters the plug-in's own window changed since the last call:
+    /// `Some(changes)` (possibly empty for changes it didn't itemise), or
+    /// `None` if nothing changed.
+    pub fn take_touched(&mut self) -> Option<Vec<(u32, f64)>> {
         match self {
             Instance::Vst3(i) => {
-                let touched = i.edits.lock().map(|q| q.touched).unwrap_or(false);
-                if touched {
-                    i.flush_params();
+                let edits = {
+                    let q = i.edits.lock().ok()?;
+                    if !q.touched {
+                        return None;
+                    }
+                    q.edits.clone()
+                };
+                let restart = i.take_edits();
+                if restart & vst3::RESTART_LATENCY != 0 {
+                    i.refresh_latency();
                 }
-                touched
+                i.flush_params();
+                Some(edits)
             }
             #[cfg(target_os = "macos")]
             Instance::Au(i) => i.take_touched(),
@@ -685,16 +695,59 @@ pub fn decode_state(s: &str) -> (Vec<u8>, Vec<u8>) {
 /// A plug-in in a real-time rack.
 struct PluginRt {
     plugin: Plugin,
+    cid: String,
+    sample_rate: u32,
     state: String,
+}
+
+/// A stable fingerprint of a state text (FNV-1a).
+pub fn state_hash(s: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+/// The `edits` parameter: the changes that turn the state with fingerprint
+/// `from` into the new one, so a running instance can apply them cheaply.
+pub fn encode_edits(from: &str, edits: &[(u32, f64)]) -> String {
+    let list: Vec<String> = edits.iter().map(|(id, v)| format!("{id}:{v}")).collect();
+    format!("{}|{}", state_hash(from), list.join(","))
+}
+
+fn decode_edits(s: &str, current: &str) -> Option<Vec<(u32, f64)>> {
+    let (from, list) = s.split_once('|')?;
+    if from != state_hash(current) || list.is_empty() {
+        return None;
+    }
+    list.split(',').map(|e| e.split_once(':').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))).collect()
 }
 
 impl RtEffect for PluginRt {
     fn set_params(&mut self, p: &Params) {
         let s = p.s("state");
-        if s != self.state {
-            self.plugin.get().set_state_text(&s);
-            self.state = s;
+        if s == self.state {
+            return;
         }
+        // Edits made in the effect window arrive as individual parameter
+        // changes: cheap enough to apply while the slot is playing.
+        if let Some(edits) = decode_edits(&p.s("edits"), &self.state) {
+            let inst = self.plugin.get();
+            for (id, v) in edits {
+                inst.set_param(id, v);
+            }
+        } else if s.is_empty() {
+            // Back to defaults (Reset, undo): only a fresh instance has them.
+            match Plugin::create(&self.cid, "", self.sample_rate, 2, 4096, false) {
+                Ok(fresh) => self.plugin = fresh,
+                Err(e) => eprintln!("{e}"),
+            }
+        } else {
+            self.plugin.get().set_state_text(&s);
+        }
+        self.state = s;
     }
     fn reset(&mut self) {
         self.plugin.get().reset();
@@ -708,7 +761,7 @@ fn make_rt(id: &str, p: &Params, sr: u32) -> Option<Box<dyn RtEffect>> {
     let (_, cid) = split_id(id)?;
     let state = p.s("state");
     match Plugin::create(cid, &state, sr, 2, 4096, false) {
-        Ok(plugin) => Some(Box::new(PluginRt { plugin, state })),
+        Ok(plugin) => Some(Box::new(PluginRt { plugin, cid: cid.to_string(), sample_rate: sr, state })),
         Err(e) => {
             eprintln!("{e}");
             None
@@ -716,55 +769,74 @@ fn make_rt(id: &str, p: &Params, sr: u32) -> Option<Box<dyn RtEffect>> {
     }
 }
 
-// Offline rendering reuses instances: the live Effects Rack renders a
-// file in chunks, and creating a plug-in for each would be slow.
-static POOL: Mutex<Vec<(u64, Plugin)>> = Mutex::new(Vec::new());
+// Offline rendering reuses instances: the live Effects Rack renders a file
+// in chunks and previews re-render after every edit, and creating a plug-in
+// each time would be slow. Instances are kept per (plug-in, rate, channels)
+// with the state they last had.
+struct Pooled {
+    cid: String,
+    sr: u32,
+    ch: usize,
+    state: String,
+    plugin: Plugin,
+}
+
+static POOL: Mutex<Vec<Pooled>> = Mutex::new(Vec::new());
 const POOL_SIZE: usize = 6;
 
-fn pool_key(cid: &str, state: &str, sr: u32, ch: usize) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    (cid, state, sr, ch).hash(&mut h);
-    h.finish()
-}
-
-/// A fresh-sounding offline instance (reused and reset when possible).
-fn pooled(cid: &str, state: &str, sr: u32, ch: usize) -> Result<(u64, Plugin), String> {
-    let key = pool_key(cid, state, sr, ch);
-    let found = POOL.lock().ok().and_then(|mut p| p.iter().position(|e| e.0 == key).map(|i| p.remove(i).1));
-    if let Some(plugin) = found {
-        // Clear tails and delay lines on the UI thread, as plug-ins expect.
-        let plugin = run_on_main(move || {
-            let mut plugin = plugin;
-            plugin.get().reset();
-            plugin
-        })?;
-        return Ok((key, plugin));
+/// An offline instance with `state` and no leftover sound (from any thread).
+fn pooled(cid: &str, state: &str, sr: u32, ch: usize) -> Result<Pooled, String> {
+    let mut found = None;
+    if let Ok(mut pool) = POOL.lock() {
+        // Prefer an instance already in this state; any other will do unless
+        // defaults are wanted (only a fresh instance has those).
+        let pos = pool
+            .iter()
+            .position(|e| e.cid == cid && e.sr == sr && e.ch == ch && e.state == state)
+            .or_else(|| if state.is_empty() { None } else { pool.iter().position(|e| e.cid == cid && e.sr == sr && e.ch == ch) });
+        if let Some(i) = pos {
+            found = Some(pool.remove(i));
+        }
     }
-    Ok((key, Plugin::create(cid, state, sr, ch, 4096, true)?))
+    if let Some(mut e) = found {
+        // Plug-ins accept these while not processing; doing them here keeps
+        // rendering going even while the UI thread is busy (a file dialog).
+        if e.state != state {
+            e.plugin.get().set_state_text(state);
+            e.state = state.to_string();
+        }
+        e.plugin.get().reset();
+        return Ok(e);
+    }
+    let plugin = Plugin::create(cid, state, sr, ch, 4096, true)?;
+    Ok(Pooled { cid: cid.to_string(), sr, ch, state: state.to_string(), plugin })
 }
 
-fn unpool(key: u64, plugin: Plugin) {
+fn unpool(e: Pooled) {
     if let Ok(mut p) = POOL.lock() {
-        p.push((key, plugin));
+        p.push(e);
         if p.len() > POOL_SIZE {
             p.remove(0);
         }
     }
 }
 
-/// Offline processing (Apply, preview, Effects Rack, batch).
+/// Offline processing (Apply, preview, Effects Rack, batch). Plug-ins see
+/// the first two channels; any others pass through unchanged.
 fn process_offline(audio: &[Vec<f32>], ctx: &Ctx, p: &Params) -> Result<Vec<Vec<f32>>, String> {
     let cid = p.s("plugin");
     let n_ch = audio.len().clamp(1, 2);
-    let (key, mut plugin) = pooled(&cid, &p.s("state"), ctx.sample_rate, n_ch)?;
-    let inst = plugin.get();
+    let mut entry = pooled(&cid, &p.s("state"), ctx.sample_rate, n_ch)?;
+    let inst = entry.plugin.get();
     let len = audio.first().map(|c| c.len()).unwrap_or(0);
     let lat = inst.latency();
     // Feed the latency's worth of silence after the audio and drop the
     // same amount from the start, so the result lines up with the input.
     let total = len + lat;
-    let mut out = vec![Vec::with_capacity(len); audio.len().max(1)];
+    let mut out: Vec<Vec<f32>> = audio.to_vec();
+    if out.is_empty() {
+        out.push(Vec::new());
+    }
     let mut l = vec![0.0f32; 4096];
     let mut r = vec![0.0f32; 4096];
     let mut pos = 0;
@@ -777,20 +849,24 @@ fn process_offline(audio: &[Vec<f32>], ctx: &Ctx, p: &Params) -> Result<Vec<Vec<
         }
         inst.process(&mut l[..n], &mut r[..n]);
         for i in 0..n {
-            if pos + i >= lat {
-                out[0].push(l[i]);
-                if let Some(o) = out.get_mut(1) {
-                    o.push(r[i]);
+            let k = pos + i;
+            if k >= lat && k - lat < len {
+                out[0][k - lat] = l[i];
+                if n_ch == 2 {
+                    out[1][k - lat] = r[i];
                 }
             }
         }
         pos += n;
     }
-    for o in out.iter_mut() {
-        o.truncate(len);
-    }
-    unpool(key, plugin);
+    unpool(entry);
     Ok(out)
+}
+
+/// A plug-in effect's parameters: the class id, its saved state, and the
+/// last edits (see [`encode_edits`]).
+pub fn param_defs(cid: &'static str) -> Vec<crate::dsp::params::ParamDef> {
+    vec![text("plugin", "Plug-in", cid), text("state", "State", ""), text("edits", "Edits", "")]
 }
 
 /// Effect definitions for the enabled plug-ins, and the hooks that let racks
@@ -821,7 +897,7 @@ pub fn effect_defs() -> Vec<EffectDef> {
                 name,
                 category: Category::Plugin,
                 description: desc,
-                params: vec![text("plugin", "Plug-in", cid), text("state", "State", "")],
+                params: param_defs(cid),
                 presets: Vec::new(),
                 process: process_offline,
                 response: None,
@@ -862,5 +938,20 @@ mod tests {
         let (a, b) = decode_state(&encode_state(b"component", b"ctrl"));
         assert_eq!((a.as_slice(), b.as_slice()), (&b"component"[..], &b"ctrl"[..]));
         assert_eq!(decode_state(""), (Vec::new(), Vec::new()));
+    }
+
+    #[test]
+    fn edits_apply_only_to_the_state_they_came_from() {
+        let e = encode_edits("STATE_A", &[(3, 0.25), (7, 1.0)]);
+        assert_eq!(decode_edits(&e, "STATE_A"), Some(vec![(3, 0.25), (7, 1.0)]));
+        // Undo/redo to another state: apply the whole state instead.
+        assert_eq!(decode_edits(&e, "STATE_B"), None);
+        assert_eq!(decode_edits(&encode_edits("X", &[]), "X"), None);
+        assert_eq!(decode_edits("", "X"), None);
+        // Survives the session file's text escaping (no ; or =).
+        assert!(!e.contains(';') && !e.contains('='));
+        assert_eq!(split_id("vst3:ABC"), Some((Format::Vst3, "ABC")));
+        assert_eq!(split_id("au:00"), Some((Format::Au, "00")));
+        assert_eq!(split_id("amplify"), None);
     }
 }

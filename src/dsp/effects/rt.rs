@@ -21,6 +21,15 @@ pub trait RtEffect: Send {
     fn process(&mut self, l: &mut [f32], r: &mut [f32]);
 }
 
+/// Stands in for an effect that can't run (a plug-in that isn't available).
+pub struct Passthrough;
+
+impl RtEffect for Passthrough {
+    fn set_params(&mut self, _: &Params) {}
+    fn reset(&mut self) {}
+    fn process(&mut self, _: &mut [f32], _: &mut [f32]) {}
+}
+
 /// Effects that can run in a track rack, by effect id.
 pub const RT_EFFECTS: &[&str] = &[
     "amplify",

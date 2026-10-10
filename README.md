@@ -13,6 +13,7 @@ The interface uses Adobe's open-source Source Sans 3 and Source Code Pro typefac
 
 - **Open** WAV, AIFF, FLAC, MP3, OGG/Vorbis, M4A/AAC, ALAC, CAF and MKV/WebM audio (drag files onto the window, or pass them on the command line).
 - **Save** as WAV (16/24/32-bit integer or 32-bit float), FLAC (16/24-bit, lossless), MP3 (32–320 kbps CBR or V0–V9 VBR, via LAME) or AAC in M4A (64–320 kbps, via Fraunhofer FDK AAC), with optional TPDF dither. Saving runs in the background with a progress bar and Cancel, and writes to a temporary file first so a failed save never damages the original. MP3 and M4A files are gapless (encoder delay and padding are recorded and removed on open).
+- **Plug-ins**: VST3 effects on Windows, macOS and Linux, and Audio Units on macOS, from Effects > Audio Units / VST 3 and in every effects rack (waveform rack, track, bus and master racks), batch processing and previews. **Effects > Audio Plug-In Manager** scans the standard folders (plus any you add) in a separate process, so a plug-in that crashes is listed instead of closing Audemo, and lets you enable or disable each one. Each plug-in's effect window shows its parameters, and **Show Plug-In Window** opens the plug-in's own interface (Windows and macOS). Plug-in settings are saved with sessions and rack slots; a session whose plug-in isn't installed keeps the slot and its settings and passes audio through until it's available. Plug-in latency is compensated when applying effects.
 - **Metadata** panel: title, artist, album, album artist, genre, year, track number, composer, comment and copyright, read from and written to every format (RIFF INFO, ID3v2, Vorbis comments, iTunes tags). WAV files also keep their **markers** as cue points.
 - **Workspace** laid out like Audition's default: Files / Favorites, then Media Browser / Effects Rack / Markers / Properties, then History down the left; the Editor in the centre with its transport bar; Levels / Frequency Analysis / Phase Meter and Selection/View along the bottom; History / Match Loudness at the bottom left. Panel groups resize, and Window > Workspace > Reset to Default restores the layout.
 - **Multitrack editor** (toolbar *Multitrack*, or 0): sessions of tracks with volume, pan, mute, solo and record-arm; drag files from the Files panel (or the desktop) onto tracks; move clips between tracks, trim their edges, drag fade handles, set clip gain, split at the playhead (Ctrl+K), with snapping to clip edges, the cursor and the selection. The mix plays live as you edit. Arm a track and record onto it while the other tracks play. **Volume and pan automation**: press A on a track to show its yellow (volume) and blue (pan) lines; drag or double-click a line to add points, drag points, double-click one to delete it, right-click to clear. Overlapping clips on a track **crossfade automatically** (equal-power). Peak **meters** on every track. **Recording latency compensation** (Preferences) lines overdubs up with what you heard. **Track effects racks**: every track, bus and the master has a 16-slot rack of real-time effects (EQs and filters, compressors, limiter, gate, de-esser, delay, echo, chorus/flanger, reverb, distortion, stereo tools), edited in the Effects Rack panel and heard live as the session plays. **Bus tracks** (Alt+B) take tracks routed to them (Out) and **sends** (pre- or post-fader) and have their own rack and fader. A **Mixer** view with faders, pan, meters, sends, output routing and rack access for every track, bus and the master. **Mixdown Session to New File** (entire session or time selection). Clips stay linked to their files, so edits made in the Waveform editor (double-click a clip) are heard in the session. Sessions save as `.audemo` files, with any unsaved audio written to a folder beside them.
@@ -165,6 +166,8 @@ src/
   engine.rs      cpal playback and recording
   io.rs          symphonia decoding, tags, markers, MP4 edit lists
   export/        WAV, FLAC (own encoder), MP3 (LAME) and M4A (FDK AAC) writers; tags
+  plugin/        VST3 host (interfaces written from the MIT-licensed SDK headers), Audio Units
+                 (macOS), plug-in windows, scanning, the Plug-In Manager's registry
   theme.rs       palette and hand-drawn transport icons
 assets/          app icon, macOS Info.plist, Linux .desktop file, WiX installer source
 scripts/         macOS and Linux packaging scripts
@@ -183,9 +186,13 @@ preview are generated from that definition.
 2. ~~Real-time Effects Rack, remaining Audition effects, Match Loudness, analysis panels~~ (done)
 3. Multitrack sessions: ~~tracks, clips, Mixer, mixdown, recording~~ (0.6), ~~automation, crossfades, track meters, latency compensation~~ (0.6.5), ~~track/bus/master effects racks, bus tracks, sends~~ (0.7) — done
 4. ~~Spectral selection/healing tools, Diagnostics panel, batch processing~~ (0.8)
-5. ~~MP3/FLAC/AAC export, metadata~~ (0.9); VST3/AU plug-in hosting next
+5. ~~MP3/FLAC/AAC export, metadata~~ (0.9), ~~VST3 and Audio Unit plug-in hosting~~ (0.10)
 
-## Third-party codecs
+## Third-party code
+
+The VST3 interface definitions are written from Steinberg's VST3 SDK headers, which are MIT-licensed. VST is a registered trademark of Steinberg Media Technologies GmbH.
+
+### Codecs
 
 MP3 encoding uses [LAME](https://lame.sourceforge.io/) (LGPL 2.0) and AAC encoding uses the
 [Fraunhofer FDK AAC](https://android.googlesource.com/platform/external/aac/) library (FDK AAC

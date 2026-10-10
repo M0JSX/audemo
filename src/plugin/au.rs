@@ -508,17 +508,18 @@ impl Instance {
         }
     }
 
-    /// True if a parameter changed in the unit's own view since the last call.
-    pub fn take_touched(&mut self) -> bool {
-        let mut changed = false;
+    /// Parameters changed in the unit's own view since the last call.
+    pub fn take_touched(&mut self) -> Option<Vec<(u32, f64)>> {
+        let mut changed = Vec::new();
         for i in 0..self.params.len() {
-            let v = self.raw(self.params[i].info.id);
+            let id = self.params[i].info.id;
+            let v = self.raw(id);
             if v != self.seen[i] {
                 self.seen[i] = v;
-                changed = true;
+                changed.push((id, self.get_param(id)));
             }
         }
-        changed
+        (!changed.is_empty()).then_some(changed)
     }
 
     pub fn reset(&mut self) {
