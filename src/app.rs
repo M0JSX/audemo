@@ -1832,7 +1832,8 @@ impl App {
             return;
         }
         self.engine.stop();
-        let (rate, channels) = match self.engine.start_recording() {
+        let want = self.doc().map(|d| d.sample_rate);
+        let (rate, channels) = match self.engine.start_recording(want) {
             Ok(f) => f,
             Err(e) => {
                 self.dialog = Some(Dialog::Message {

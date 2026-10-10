@@ -607,7 +607,7 @@ impl App {
         let state = Arc::new(s.mix_state());
         let end = s.end();
         self.engine.stop();
-        match self.engine.start_recording() {
+        match self.engine.start_recording(Some(self.sessions[si].sample_rate)) {
             Ok((rate, _)) => {
                 // Play the other tracks while recording (overdub).
                 if end > start {

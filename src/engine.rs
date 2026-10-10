@@ -690,33 +690,54 @@ impl Engine {
     }
 
     /// Start recording from the chosen input; returns (rate, channels).
-    pub fn start_recording(&mut self) -> Result<(u32, usize), String> {
+    /// `want_rate` (the file's or session's rate) is used when the input
+    /// supports it, so the take needs no sample-rate conversion afterwards.
+    pub fn start_recording(&mut self, want_rate: Option<u32>) -> Result<(u32, usize), String> {
         if let Some(r) = &self.rec {
             return Ok((r.rate, r.channels));
         }
         let device = find_input(self.config.host.as_deref(), self.config.input.as_deref()).ok_or("No audio input device found.")?;
-        let supported = device.default_input_config().map_err(|e| e.to_string())?;
-        let fmt = supported.sample_format();
-        let cfg: cpal::StreamConfig = supported.into();
-        // One-second chunks (a whole number of frames); the first is allocated up front.
-        let chunk_len = cfg.sample_rate.0.max(4096) as usize * cfg.channels.max(1) as usize;
-        let shared = Arc::new(Mutex::new(RecShared {
-            chunks: vec![Vec::with_capacity(chunk_len)],
-            chunk_len,
-            samples: 0,
-            peaks: [0.0; 2],
-        }));
-        let s = shared.clone();
-        let n_in = cfg.channels.max(1) as usize;
-        let map = [self.config.in_map[0].min(n_in - 1), self.config.in_map[1].min(n_in - 1)];
-        let stream = match fmt {
-            cpal::SampleFormat::F32 => build_input::<f32>(&device, &cfg, s, map),
-            cpal::SampleFormat::I16 => build_input::<i16>(&device, &cfg, s, map),
-            cpal::SampleFormat::U16 => build_input::<u16>(&device, &cfg, s, map),
-            cpal::SampleFormat::I32 => build_input::<i32>(&device, &cfg, s, map),
-            other => Err(format!("Unsupported input sample format {other:?}")),
-        }?;
-        stream.play().map_err(|e| e.to_string())?;
+        let default = device.default_input_config().map_err(|e| e.to_string())?;
+        let at_rate = want_rate.filter(|&r| r != default.sample_rate().0).and_then(|r| {
+            let ranges = device.supported_input_configs().ok()?;
+            ranges
+                .filter(|c| c.channels() == default.channels() && c.sample_format() == default.sample_format())
+                .find(|c| c.min_sample_rate().0 <= r && r <= c.max_sample_rate().0)
+                .map(|c| c.with_sample_rate(cpal::SampleRate(r)))
+        });
+        // Try the file's rate first; if the device refuses it (another app
+        // may be holding it at its current rate), record at its default.
+        let mut tries = at_rate.into_iter().chain(std::iter::once(default)).peekable();
+        let (stream, shared, map, cfg) = loop {
+            let supported = tries.next().expect("default config is always tried");
+            let last = tries.peek().is_none();
+            let fmt = supported.sample_format();
+            let cfg: cpal::StreamConfig = supported.into();
+            // One-second chunks (a whole number of frames); the first is allocated up front.
+            let chunk_len = cfg.sample_rate.0.max(4096) as usize * cfg.channels.max(1) as usize;
+            let shared = Arc::new(Mutex::new(RecShared {
+                chunks: vec![Vec::with_capacity(chunk_len)],
+                chunk_len,
+                samples: 0,
+                peaks: [0.0; 2],
+            }));
+            let s = shared.clone();
+            let n_in = cfg.channels.max(1) as usize;
+            let map = [self.config.in_map[0].min(n_in - 1), self.config.in_map[1].min(n_in - 1)];
+            let built = match fmt {
+                cpal::SampleFormat::F32 => build_input::<f32>(&device, &cfg, s, map),
+                cpal::SampleFormat::I16 => build_input::<i16>(&device, &cfg, s, map),
+                cpal::SampleFormat::U16 => build_input::<u16>(&device, &cfg, s, map),
+                cpal::SampleFormat::I32 => build_input::<i32>(&device, &cfg, s, map),
+                other => Err(format!("Unsupported input sample format {other:?}")),
+            }
+            .and_then(|st| st.play().map(|_| st).map_err(|e| e.to_string()));
+            match built {
+                Ok(st) => break (st, shared, map, cfg),
+                Err(e) if last => return Err(e),
+                Err(_) => continue,
+            }
+        };
         let (rate, channels) = (cfg.sample_rate.0, cfg.channels as usize);
         let mut view = RecView::default();
         view.reset(channels.clamp(1, 2));
