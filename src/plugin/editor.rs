@@ -116,11 +116,11 @@ impl PluginEditor {
             ui.horizontal(|ui| {
                 ui.label("Find");
                 ui.add(egui::TextEdit::singleline(&mut self.filter).desired_width(200.0));
-                ui.label(RichText::new(format!("{} parameters", self.params.len())).color(TEXT_DIM).size(11.0));
+                ui.label(RichText::new(format!("{} parameters", self.params.len())).color(TEXT_DIM()).size(11.0));
             });
         }
         if self.params.is_empty() {
-            ui.label(RichText::new("This plug-in has no parameters to show.").color(TEXT_DIM));
+            ui.label(RichText::new("This plug-in has no parameters to show.").color(TEXT_DIM()));
             return;
         }
         let mut changed: Vec<(u32, f64)> = Vec::new();
@@ -163,7 +163,7 @@ impl PluginEditor {
                         }
                     }
                 });
-                ui.label(RichText::new(text).color(HOT).monospace());
+                ui.label(RichText::new(text).color(HOT()).monospace());
                 ui.end_row();
             }
         });

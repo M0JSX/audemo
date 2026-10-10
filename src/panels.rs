@@ -40,7 +40,7 @@ fn time_field(ui: &mut Ui, id: egui::Id, samples: f64, sr: u32, enabled: bool) -
     }
     let resp = ui.add_enabled(
         enabled,
-        egui::TextEdit::singleline(&mut text).id(id).desired_width(92.0).clip_text(false).font(egui::TextStyle::Monospace).text_color(HOT).frame(has_focus),
+        egui::TextEdit::singleline(&mut text).id(id).desired_width(92.0).clip_text(false).font(egui::TextStyle::Monospace).text_color(HOT()).frame(has_focus),
     );
     ui.data_mut(|d| d.insert_temp(id, text.clone()));
     if resp.lost_focus() {
@@ -66,7 +66,7 @@ impl App {
         let recent = self.prefs.recent.clone();
         let last = self.last_effect.as_ref().map(|(i, _)| effects[*i].name);
         egui::TopBottomPanel::top("menu")
-            .frame(egui::Frame::none().fill(BG_DEEP).inner_margin(egui::Margin::symmetric(6.0, 3.0)))
+            .frame(egui::Frame::none().fill(BG_DEEP()).inner_margin(egui::Margin::symmetric(6.0, 3.0)))
             .show(ctx, |ui| {
                 egui::menu::bar(ui, |ui| {
                     ui.menu_button("File", |ui| {
@@ -80,7 +80,7 @@ impl App {
                         });
                         ui.menu_button("Open Recent", |ui| {
                             if recent.is_empty() {
-                                ui.label(RichText::new("No recent files").color(TEXT_DIM));
+                                ui.label(RichText::new("No recent files").color(TEXT_DIM()));
                             }
                             for r in &recent {
                                 let name = r.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -152,7 +152,9 @@ impl App {
                         }
                         ui.separator();
                         ui.menu_button("Preferences", |ui| {
-                            if item(ui, "Audio Hardware…", "", true) { self.actions.push(Action::Preferences); }
+                            for page in crate::prefs_ui::Page::ALL {
+                                if item(ui, &format!("{}…", page.name()), "", true) { self.actions.push(Action::PreferencesPage(page)); }
+                            }
                         });
                     });
                     ui.menu_button("Multitrack", |ui| {
@@ -219,6 +221,7 @@ impl App {
                         ui.separator();
                         ui.checkbox(&mut self.show_spectral, format!("Show Spectral Frequency Display   {}", sc("Shift+D")));
                         ui.checkbox(&mut self.follow, "Follow Playhead");
+                        if item(ui, "Play with Pre-roll and Post-roll", "Alt+Space", has_doc) { self.actions.push(Action::PlayWithRoll); }
                     });
                     ui.menu_button("Window", |ui| {
                         ui.menu_button("Workspace", |ui| {
@@ -270,7 +273,7 @@ impl App {
 
     pub fn toolbar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("toolbar")
-            .frame(egui::Frame::none().fill(BG_PANEL).inner_margin(egui::Margin::symmetric(6.0, 3.0)).stroke(Stroke::new(1.0_f32, BORDER)))
+            .frame(egui::Frame::none().fill(BG_PANEL()).inner_margin(egui::Margin::symmetric(6.0, 3.0)).stroke(Stroke::new(1.0_f32, BORDER())))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
@@ -307,7 +310,7 @@ impl App {
                     }
                     if matches!(self.tool, Tool::Brush | Tool::SpotHeal) {
                         ui.add_space(4.0);
-                        ui.label(RichText::new("Size").color(TEXT_DIM).size(11.0));
+                        ui.label(RichText::new("Size").color(TEXT_DIM()).size(11.0));
                         hot_drag(ui, egui::DragValue::new(&mut self.brush_px).speed(0.5).range(4.0..=200.0).fixed_decimals(0).suffix(" px"));
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -321,11 +324,11 @@ impl App {
                                 ui.close_menu();
                             }
                         });
-                        ui.label(RichText::new("Workspace:").color(TEXT_DIM));
+                        ui.label(RichText::new("Workspace:").color(TEXT_DIM()));
                         ui.add_space(12.0);
                         if let Some(np) = &self.noise_print {
                             let secs = np.samples.first().map(|c| c.len()).unwrap_or(0) as f64 / np.sample_rate as f64;
-                            ui.label(RichText::new(format!("Noise print {secs:.1} s")).color(HOT).size(11.5))
+                            ui.label(RichText::new(format!("Noise print {secs:.1} s")).color(HOT()).size(11.5))
                                 .on_hover_text("Captured noise print for Noise Reduction (process)");
                         }
                     });
@@ -377,7 +380,7 @@ impl App {
             .resizable(true)
             .default_width(270.0)
             .width_range(200.0..=460.0)
-            .frame(egui::Frame::none().fill(BG_DEEP).inner_margin(egui::Margin::same(2.0)))
+            .frame(egui::Frame::none().fill(BG_DEEP()).inner_margin(egui::Margin::same(2.0)))
             .show(ctx, |ui| {
                 egui::TopBottomPanel::top("left_top")
                     .resizable(true)
@@ -445,20 +448,20 @@ impl App {
         let mut switch_session = None;
         let mut select = None;
         let mut insert: Option<u64> = None;
-        egui::Frame::none().fill(BG_LIST).show(ui, |ui| {
+        egui::Frame::none().fill(BG_LIST()).show(ui, |ui| {
             ui.set_min_height(ui.available_height());
             egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
                 egui::Grid::new("files_table").num_columns(7).striped(true).spacing([12.0, 2.0]).show(ui, |ui| {
                     for h in ["Name", "Status", "Duration", "Sample Rate", "Channels", "Bit Depth", "Source Format"] {
-                        ui.label(RichText::new(h).color(TEXT_DIM).size(11.5));
+                        ui.label(RichText::new(h).color(TEXT_DIM()).size(11.5));
                     }
                     ui.end_row();
                     for (i, s) in self.sessions.iter().enumerate() {
                         let active = Some(i) == self.active_session && self.mode == Mode::Multitrack;
                         ui.horizontal(|ui| {
                             let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-                            draw_icon(ui.painter(), r.shrink(1.0), Icon::Multitrack, if active { HOT } else { Color32::from_rgb(0x4d, 0xa3, 0xff) });
-                            let name = RichText::new(&s.name).color(if active { HOT } else { TEXT });
+                            draw_icon(ui.painter(), r.shrink(1.0), Icon::Multitrack, if active { HOT() } else { Color32::from_rgb(0x4d, 0xa3, 0xff) });
+                            let name = RichText::new(&s.name).color(if active { HOT() } else { TEXT() });
                             if ui.selectable_label(active, if active { name.strong() } else { name }).clicked() {
                                 switch_session = Some(i);
                             }
@@ -475,8 +478,8 @@ impl App {
                         let active = Some(i) == self.active;
                         ui.horizontal(|ui| {
                             let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-                            draw_icon(ui.painter(), r.shrink(1.0), Icon::Waveform, if active { HOT } else { WAVE });
-                            let name = RichText::new(&d.name).color(if active { HOT } else { TEXT });
+                            draw_icon(ui.painter(), r.shrink(1.0), Icon::Waveform, if active { HOT() } else { WAVE() });
+                            let name = RichText::new(&d.name).color(if active { HOT() } else { TEXT() });
                             let id = d.id;
                             let resp = ui.dnd_drag_source(egui::Id::new(("file_drag", id)), crate::mt_ui::DocDrag(id), |ui| {
                                 ui.selectable_label(active, if active { name.strong() } else { name })
@@ -532,12 +535,12 @@ impl App {
         }
         ui.add_space(4.0);
         let Some(di) = self.active else {
-            ui.label(RichText::new("Open a file to add markers.").color(TEXT_DIM));
+            ui.label(RichText::new("Open a file to add markers.").color(TEXT_DIM()));
             return;
         };
         let doc = &mut self.docs[di];
         if doc.markers.is_empty() {
-            ui.label(RichText::new("No markers. Press M during playback or at the cursor.").color(TEXT_DIM));
+            ui.label(RichText::new("No markers. Press M during playback or at the cursor.").color(TEXT_DIM()));
             return;
         }
         let mut remove = None;
@@ -545,7 +548,7 @@ impl App {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             egui::Grid::new("markers").num_columns(3).striped(true).spacing([6.0, 4.0]).show(ui, |ui| {
                 for h in ["Name", "Start", ""] {
-                    ui.label(RichText::new(h).color(TEXT_DIM).size(11.0));
+                    ui.label(RichText::new(h).color(TEXT_DIM()).size(11.0));
                 }
                 ui.end_row();
                 for (i, m) in doc.markers.iter_mut().enumerate() {
@@ -575,7 +578,7 @@ impl App {
             .resizable(true)
             .default_height(150.0)
             .height_range(64.0..=420.0)
-            .frame(egui::Frame::none().fill(BG_DEEP).inner_margin(egui::Margin::same(2.0)))
+            .frame(egui::Frame::none().fill(BG_DEEP()).inner_margin(egui::Margin::same(2.0)))
             .show(ctx, |ui| {
                 if self.show_bottom {
                     egui::SidePanel::right("selview")
@@ -607,7 +610,7 @@ impl App {
 
     fn selection_view(&mut self, ui: &mut Ui) {
         let Some(di) = self.active else {
-            ui.label(RichText::new("No file").color(TEXT_DIM));
+            ui.label(RichText::new("No file").color(TEXT_DIM()));
             return;
         };
         let doc = &mut self.docs[di];
@@ -618,7 +621,7 @@ impl App {
         egui::Grid::new("selview").num_columns(4).min_col_width(60.0).spacing([10.0, 4.0]).show(ui, |ui| {
             ui.label("");
             for h in ["Start", "End", "Duration"] {
-                ui.label(RichText::new(h).color(TEXT_DIM).size(11.0));
+                ui.label(RichText::new(h).color(TEXT_DIM()).size(11.0));
             }
             ui.end_row();
             ui.label("Selection");
@@ -667,7 +670,7 @@ impl App {
                 ("Samples", format!("{}", doc.len())),
                 ("Memory", format!("{mb:.2} MB")),
             ] {
-                ui.label(RichText::new(k).color(TEXT_DIM).size(11.0));
+                ui.label(RichText::new(k).color(TEXT_DIM()).size(11.0));
                 ui.label(RichText::new(v).size(11.0));
                 ui.end_row();
             }
@@ -680,7 +683,7 @@ impl App {
             (Mode::Multitrack, Some(s), _) => ("New Session".into(), s.undo.iter().map(|u| u.label.clone()).collect(), s.redo.iter().map(|u| u.label.clone()).collect()),
             (_, _, Some(d)) => (d.origin.clone(), d.undo.iter().map(|u| u.label.clone()).collect(), d.redo.iter().map(|u| u.label.clone()).collect()),
             _ => {
-                ui.label(RichText::new("No history").color(TEXT_DIM));
+                ui.label(RichText::new("No history").color(TEXT_DIM()));
                 return;
             }
         };
@@ -696,17 +699,17 @@ impl App {
         let mut jump = None;
         let mut clear = false;
         let list_h = (ui.available_height() - 24.0).max(30.0);
-        egui::Frame::none().fill(BG_LIST).show(ui, |ui| {
+        egui::Frame::none().fill(BG_LIST()).show(ui, |ui| {
             ui.set_height(list_h);
             egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
                 for (idx, label, future) in entries {
-                    let text = if future { RichText::new(&label).color(TEXT_DIM).italics() } else { RichText::new(&label) };
+                    let text = if future { RichText::new(&label).color(TEXT_DIM()).italics() } else { RichText::new(&label) };
                     ui.horizontal(|ui| {
                         let (r, _) = ui.allocate_exact_size(vec2(12.0, 14.0), Sense::hover());
                         if idx == current {
                             ui.painter().add(egui::Shape::convex_polygon(
                                 vec![pos2(r.left() + 2.0, r.top() + 3.0), pos2(r.right() - 2.0, r.center().y), pos2(r.left() + 2.0, r.bottom() - 3.0)],
-                                HOT,
+                                HOT(),
                                 Stroke::NONE,
                             ));
                         }
@@ -718,7 +721,7 @@ impl App {
             });
         });
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("{undos} Undo{}", if undos == 1 { "" } else { "s" })).color(TEXT_DIM).size(11.5));
+            ui.label(RichText::new(format!("{undos} Undo{}", if undos == 1 { "" } else { "s" })).color(TEXT_DIM()).size(11.5));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if icon_button_sized(ui, Icon::Trash, false, "Clear History", vec2(20.0, 18.0), undos > 0 || current > 0).clicked() {
                     clear = true;
@@ -736,7 +739,7 @@ impl App {
     /// Transport and zoom controls along the bottom of the Editor panel.
     pub fn transport_bar(&mut self, ui: &mut Ui) {
         egui::TopBottomPanel::bottom("transport")
-            .frame(egui::Frame::none().fill(BG_PANEL).inner_margin(egui::Margin::symmetric(8.0, 4.0)))
+            .frame(egui::Frame::none().fill(BG_PANEL()).inner_margin(egui::Margin::symmetric(8.0, 4.0)))
             .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 1.0;
@@ -749,7 +752,7 @@ impl App {
                         _ => self.display_pos(),
                     };
                     let (r, _) = ui.allocate_exact_size(vec2(150.0, 30.0), Sense::hover());
-                    let col = if recording { RECORD } else { TIME };
+                    let col = if recording { RECORD() } else { TIME() };
                     ui.painter().text(r.left_center() + vec2(2.0, 0.0), Align2::LEFT_CENTER, format_time(pos, sr), FontId::monospace(24.0), col);
 
                     let st = self.engine.status();
@@ -828,7 +831,7 @@ impl App {
         for c in 0..2 {
             let y0 = bars.top() + c as f32 * (bar_h + 2.0);
             let r = Rect::from_min_size(pos2(bars.left(), y0), vec2(bars.width(), bar_h));
-            p.text(pos2(rect.left() + 2.0, r.center().y), Align2::LEFT_CENTER, if c == 0 { "L" } else { "R" }, FontId::monospace(9.5), TEXT_DIM);
+            p.text(pos2(rect.left() + 2.0, r.center().y), Align2::LEFT_CENTER, if c == 0 { "L" } else { "R" }, FontId::monospace(9.5), TEXT_DIM());
             p.rect_filled(r, 1.0, Color32::from_rgb(0x0c, 0x0e, 0x12));
             let db = self.meter_db[c];
             for (lo, hi, col) in [
@@ -844,18 +847,18 @@ impl App {
             let hold = self.meter_hold[c].0;
             if hold > floor {
                 let hx = x_of(hold);
-                p.line_segment([pos2(hx, r.top()), pos2(hx, r.bottom())], Stroke::new(2.0_f32, if hold > -0.1 { RECORD } else { Color32::WHITE }));
+                p.line_segment([pos2(hx, r.top()), pos2(hx, r.bottom())], Stroke::new(2.0_f32, if hold > -0.1 { RECORD() } else { Color32::WHITE }));
             }
             let clip = self.meter_hold[c].0 > -0.1;
             let cr = Rect::from_min_size(pos2(rect.right() - 10.0, r.top()), vec2(8.0, bar_h));
-            p.rect_filled(cr, 1.0, if clip { RECORD } else { Color32::from_rgb(0x30, 0x18, 0x18) });
+            p.rect_filled(cr, 1.0, if clip { RECORD() } else { Color32::from_rgb(0x30, 0x18, 0x18) });
         }
         let step = if bars.width() > 700.0 { 3.0 } else { 6.0 };
         let mut db = floor;
         while db <= 0.0 {
             let x = x_of(db);
-            p.line_segment([pos2(x, bars.bottom() + 1.0), pos2(x, bars.bottom() + 4.0)], Stroke::new(1.0_f32, TEXT_DIM));
-            p.text(pos2(x, bars.bottom() + 5.0), Align2::CENTER_TOP, format!("{}", db as i32), FontId::monospace(9.0), TEXT_DIM);
+            p.line_segment([pos2(x, bars.bottom() + 1.0), pos2(x, bars.bottom() + 4.0)], Stroke::new(1.0_f32, TEXT_DIM()));
+            p.text(pos2(x, bars.bottom() + 5.0), Align2::CENTER_TOP, format!("{}", db as i32), FontId::monospace(9.0), TEXT_DIM());
             db += step;
         }
     }
@@ -863,7 +866,7 @@ impl App {
     pub fn status_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("status")
             .exact_height(24.0)
-            .frame(egui::Frame::none().fill(Color32::from_rgb(0x2c, 0x2c, 0x2c)).inner_margin(egui::Margin::symmetric(8.0, 3.0)).stroke(Stroke::new(1.0_f32, BORDER)))
+            .frame(egui::Frame::none().fill(Color32::from_rgb(0x2c, 0x2c, 0x2c)).inner_margin(egui::Margin::symmetric(8.0, 3.0)).stroke(Stroke::new(1.0_f32, BORDER())))
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
                     let st = self.engine.status();
@@ -876,7 +879,7 @@ impl App {
                     } else {
                         "Stopped"
                     };
-                    ui.label(RichText::new(state).color(TEXT).size(11.5));
+                    ui.label(RichText::new(state).color(TEXT()).size(11.5));
                     ui.add_space(12.0);
                     let msg = if let Some(j) = &self.job {
                         format!("{}… {:.1} s", j.label, j.started.elapsed().as_secs_f32())
@@ -887,11 +890,11 @@ impl App {
                     } else {
                         "Ready".into()
                     };
-                    ui.label(RichText::new(msg).color(TEXT_DIM).size(11.5));
+                    ui.label(RichText::new(msg).color(TEXT_DIM()).size(11.5));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if let Some(d) = self.doc() {
                             let mb = d.len() as f64 * d.n_ch() as f64 * 4.0 / 1_048_576.0;
-                            let col = TEXT;
+                            let col = TEXT();
                             if let Some(free) = self.free_space() {
                                 ui.label(RichText::new(format!("{:.2} GB free", free as f64 / 1_073_741_824.0)).color(col).size(11.5));
                                 ui.add_space(14.0);
@@ -920,7 +923,7 @@ impl App {
                         egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(16.0)).show(ui, |ui| {
                             ui.set_width(340.0);
                             ui.label(RichText::new(format!("Saving {name}")).size(14.0));
-                            ui.label(RichText::new(summary).color(TEXT_DIM).size(11.0));
+                            ui.label(RichText::new(summary).color(TEXT_DIM()).size(11.0));
                             ui.add_space(4.0);
                             ui.add(egui::ProgressBar::new(frac).show_percentage());
                             ui.add_space(4.0);
@@ -958,7 +961,7 @@ impl App {
 }
 
 fn panel_frame() -> egui::Frame {
-    egui::Frame::none().fill(BG_PANEL).inner_margin(egui::Margin::same(PANEL_MARGIN)).rounding(3.0).outer_margin(egui::Margin::same(2.0))
+    egui::Frame::none().fill(BG_PANEL()).inner_margin(egui::Margin::same(PANEL_MARGIN)).rounding(3.0).outer_margin(egui::Margin::same(2.0))
 }
 
 /// Audition-style tab header for a panel group.
@@ -977,10 +980,10 @@ pub fn tab_strip_named(ui: &mut Ui, names: &[&str], current: &mut usize) {
     let h = 22.0;
     let header = Rect::from_min_size(pos2(full.left() - m, full.top() - m), vec2(full.width() + 2.0 * m, h));
     let p = ui.painter().clone();
-    p.rect_filled(header, Rounding { nw: 3.0, ne: 3.0, sw: 0.0, se: 0.0 }, BG_HEADER);
+    p.rect_filled(header, Rounding { nw: 3.0, ne: 3.0, sw: 0.0, se: 0.0 }, BG_HEADER());
     // Which tabs fit; the active one always shows (in place of the last that fits).
     let font_of = |active: bool| if active { bold(12.0) } else { FontId::proportional(12.0) };
-    let widths: Vec<f32> = names.iter().enumerate().map(|(i, n)| ui.fonts(|f| f.layout_no_wrap(n.to_string(), font_of(i == *current), TEXT).size().x) + 18.0).collect();
+    let widths: Vec<f32> = names.iter().enumerate().map(|(i, n)| ui.fonts(|f| f.layout_no_wrap(n.to_string(), font_of(i == *current), TEXT()).size().x) + 18.0).collect();
     let avail = header.width() - 26.0;
     let mut shown: Vec<usize> = Vec::new();
     let mut used = 0.0;
@@ -1006,11 +1009,11 @@ pub fn tab_strip_named(ui: &mut Ui, names: &[&str], current: &mut usize) {
         let r = Rect::from_min_max(pos2(x, header.top() + 2.0), pos2(x + w, header.bottom()));
         let resp = ui.interact(r, ui.id().with(("tab", n)), Sense::click());
         if active {
-            p.rect_filled(r, Rounding { nw: 3.0, ne: 3.0, sw: 0.0, se: 0.0 }, BG_PANEL);
+            p.rect_filled(r, Rounding { nw: 3.0, ne: 3.0, sw: 0.0, se: 0.0 }, BG_PANEL());
         } else if resp.hovered() {
             p.rect_filled(r, Rounding { nw: 3.0, ne: 3.0, sw: 0.0, se: 0.0 }, Color32::from_rgb(0x33, 0x33, 0x33));
         }
-        p.text(r.center(), Align2::CENTER_CENTER, n, font_of(active), if active { Color32::WHITE } else { TEXT_DIM });
+        p.text(r.center(), Align2::CENTER_CENTER, n, font_of(active), if active { Color32::WHITE } else { TEXT_DIM() });
         if resp.clicked() {
             *current = i;
         }
@@ -1020,7 +1023,7 @@ pub fn tab_strip_named(ui: &mut Ui, names: &[&str], current: &mut usize) {
     let menu = Rect::from_center_size(pos2(header.right() - 11.0, header.center().y + 1.0), vec2(10.0, 8.0));
     let menu_hit = menu.expand2(vec2(6.0, 6.0));
     let mresp = ui.interact(menu_hit, ui.id().with("tab_menu"), Sense::click());
-    draw_icon(&p, menu, Icon::Menu, if !hidden.is_empty() { HOT } else if mresp.hovered() { TEXT } else { TEXT_DIM });
+    draw_icon(&p, menu, Icon::Menu, if !hidden.is_empty() { HOT() } else if mresp.hovered() { TEXT() } else { TEXT_DIM() });
     let open_id = ui.id().with("tab_menu_open");
     let mut open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
     if mresp.clicked() {
@@ -1057,15 +1060,15 @@ pub const PANEL_MARGIN: f32 = 6.0;
 /// Waveform / Multitrack view buttons at the left of the toolbar.
 fn mode_button(ui: &mut Ui, icon: Icon, label: &str, active: bool, enabled: bool, tip: &str) -> egui::Response {
     let font = FontId::proportional(12.5);
-    let tw = ui.fonts(|f| f.layout_no_wrap(label.to_string(), font.clone(), TEXT).size().x);
+    let tw = ui.fonts(|f| f.layout_no_wrap(label.to_string(), font.clone(), TEXT()).size().x);
     let (rect, resp) = ui.allocate_exact_size(vec2(tw + 34.0, 22.0), if enabled { Sense::click() } else { Sense::hover() });
     let p = ui.painter();
-    let bg = if active { Color32::from_rgb(0x26, 0x26, 0x26) } else if enabled && resp.hovered() { Color32::from_rgb(0x55, 0x55, 0x55) } else { BG_RAISED };
+    let bg = if active { Color32::from_rgb(0x26, 0x26, 0x26) } else if enabled && resp.hovered() { Color32::from_rgb(0x55, 0x55, 0x55) } else { BG_RAISED() };
     p.rect_filled(rect, 2.0, bg);
-    p.rect_stroke(rect, 2.0, Stroke::new(1.0_f32, BORDER));
-    let fg = if !enabled { Color32::from_rgb(0x70, 0x70, 0x70) } else if active { Color32::WHITE } else { TEXT };
+    p.rect_stroke(rect, 2.0, Stroke::new(1.0_f32, BORDER()));
+    let fg = if !enabled { Color32::from_rgb(0x70, 0x70, 0x70) } else if active { Color32::WHITE } else { TEXT() };
     let ir = Rect::from_center_size(pos2(rect.left() + 13.0, rect.center().y), vec2(14.0, 12.0));
-    draw_icon(p, ir, icon, if active { WAVE } else { fg });
+    draw_icon(p, ir, icon, if active { WAVE() } else { fg });
     p.text(pos2(rect.left() + 24.0, rect.center().y), Align2::LEFT_CENTER, label, font, fg);
     resp.on_hover_text(tip)
 }

@@ -38,7 +38,7 @@ pub fn plugin_menu(ui: &mut Ui, effects: &[EffectDef], enabled: bool, filter: im
         };
         ui.menu_button(title, |ui| {
             if groups.is_empty() {
-                ui.label(RichText::new("None found. Use Effects > Audio Plug-In Manager to scan.").color(TEXT_DIM));
+                ui.label(RichText::new("None found. Use Effects > Audio Plug-In Manager to scan.").color(TEXT_DIM()));
             }
             for (vendor, items) in groups {
                 ui.menu_button(vendor, |ui| {
@@ -74,11 +74,11 @@ impl App {
             .open(&mut open)
             .show(ctx, |ui| {
                 if cfg!(target_os = "macos") {
-                    ui.label(RichText::new("Audio Units installed on this Mac are listed automatically when you scan.").color(TEXT_DIM).size(11.0));
+                    ui.label(RichText::new("Audio Units installed on this Mac are listed automatically when you scan.").color(TEXT_DIM()).size(11.0));
                 }
                 ui.label(RichText::new("Folders searched for VST3 plug-ins").strong());
                 for d in plugin::default_folders() {
-                    ui.label(RichText::new(d.display().to_string()).color(TEXT_DIM).monospace().size(11.0));
+                    ui.label(RichText::new(d.display().to_string()).color(TEXT_DIM()).monospace().size(11.0));
                 }
                 for d in &reg.folders {
                     ui.horizontal(|ui| {
@@ -120,10 +120,10 @@ impl App {
                 });
                 let f = self.plugin_filter.to_lowercase();
                 let list_h = (ui.available_height() - if reg.failed.is_empty() { 40.0 } else { 140.0 }).max(120.0);
-                egui::Frame::none().fill(BG_LIST).inner_margin(egui::Margin::same(4.0)).show(ui, |ui| {
+                egui::Frame::none().fill(BG_LIST()).inner_margin(egui::Margin::same(4.0)).show(ui, |ui| {
                     egui::ScrollArea::vertical().id_source("plugins").max_height(list_h).min_scrolled_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
                         if reg.plugins.is_empty() {
-                            ui.label(RichText::new(if scanning { "Scanning…" } else { "No plug-ins found. Install some (or add the folder they're in), then Scan." }).color(TEXT_DIM));
+                            ui.label(RichText::new(if scanning { "Scanning…" } else { "No plug-ins found. Install some (or add the folder they're in), then Scan." }).color(TEXT_DIM()));
                         }
                         egui::Grid::new("plugin_list").num_columns(5).striped(true).spacing([10.0, 3.0]).show(ui, |ui| {
                             for p in reg.plugins.iter().filter(|p| f.is_empty() || p.name.to_lowercase().contains(&f) || p.vendor.to_lowercase().contains(&f)) {
@@ -131,22 +131,22 @@ impl App {
                                 if ui.checkbox(&mut on, "").on_hover_text("Show in the Effects menu and racks").changed() {
                                     toggle = Some((p.cid.clone(), on));
                                 }
-                                ui.label(RichText::new(&p.name).color(if p.enabled { TEXT } else { TEXT_DIM })).on_hover_text(p.path.display().to_string());
-                                ui.label(RichText::new(&p.vendor).color(TEXT_DIM));
-                                ui.label(RichText::new(p.format.label()).color(TEXT_DIM).size(11.0));
-                                ui.label(RichText::new(&p.version).color(TEXT_DIM).size(11.0));
+                                ui.label(RichText::new(&p.name).color(if p.enabled { TEXT() } else { TEXT_DIM() })).on_hover_text(p.path.display().to_string());
+                                ui.label(RichText::new(&p.vendor).color(TEXT_DIM()));
+                                ui.label(RichText::new(p.format.label()).color(TEXT_DIM()).size(11.0));
+                                ui.label(RichText::new(&p.version).color(TEXT_DIM()).size(11.0));
                                 ui.end_row();
                             }
                         });
                     });
                 });
                 if !reg.failed.is_empty() {
-                    egui::CollapsingHeader::new(RichText::new(format!("{} couldn't be loaded", reg.failed.len())).color(WARN)).show(ui, |ui| {
+                    egui::CollapsingHeader::new(RichText::new(format!("{} couldn't be loaded", reg.failed.len())).color(WARN())).show(ui, |ui| {
                         egui::ScrollArea::vertical().id_source("failed").max_height(90.0).show(ui, |ui| {
                             for (p, why) in &reg.failed {
                                 ui.horizontal(|ui| {
                                     ui.label(p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()).on_hover_text(p.display().to_string());
-                                    ui.label(RichText::new(why).color(TEXT_DIM).size(11.0));
+                                    ui.label(RichText::new(why).color(TEXT_DIM()).size(11.0));
                                 });
                             }
                         });
@@ -154,7 +154,7 @@ impl App {
                 }
                 ui.label(
                     RichText::new("Plug-ins are checked in a separate process, so one that crashes is listed above instead of closing Audemo.")
-                        .color(TEXT_DIM)
+                        .color(TEXT_DIM())
                         .size(10.5),
                 );
             });

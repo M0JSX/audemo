@@ -15,7 +15,17 @@ use std::sync::Arc;
 pub use meta::{Metadata, Tag, TAGS};
 pub use wav::WavFormat;
 
+static WRITE_ENCODER: AtomicBool = AtomicBool::new(true);
+
+/// Preferences > Markers & Metadata: name Audemo as the encoder in tags.
+pub fn set_write_encoder(on: bool) {
+    WRITE_ENCODER.store(on, Ordering::Relaxed);
+}
+
 pub fn encoder_name() -> String {
+    if !WRITE_ENCODER.load(Ordering::Relaxed) {
+        return String::new();
+    }
     format!("Audemo {}", option_env!("CARGO_PKG_VERSION").unwrap_or(""))
 }
 

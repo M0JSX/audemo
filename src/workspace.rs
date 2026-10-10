@@ -103,7 +103,7 @@ fn list_dir(dir: &Path) -> Vec<(PathBuf, bool, u64)> {
 impl App {
     pub fn favorites_panel(&mut self, ui: &mut Ui) {
         let has_doc = self.doc().is_some();
-        ui.label(RichText::new("Click to apply to the selection, or the whole file.").color(TEXT_DIM).size(11.0));
+        ui.label(RichText::new("Click to apply to the selection, or the whole file.").color(TEXT_DIM()).size(11.0));
         ui.add_space(2.0);
         let tips: Vec<String> = FAVORITES
             .iter()
@@ -155,7 +155,7 @@ impl App {
                 self.prefs.browser_autoplay = auto;
                 self.prefs.save();
             }
-            ui.label(RichText::new(self.browser_dir.display().to_string()).color(TEXT_DIM).size(10.5));
+            ui.label(RichText::new(self.browser_dir.display().to_string()).color(TEXT_DIM()).size(10.5));
         });
         ui.add_space(2.0);
         let stale = self.browser_entries.as_ref().map(|(d, _)| d != &self.browser_dir).unwrap_or(true);
@@ -166,16 +166,16 @@ impl App {
         let entries = self.browser_entries.as_ref().map(|(_, e)| e.clone()).unwrap_or_default();
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             if entries.is_empty() {
-                ui.label(RichText::new("No folders or audio files here.").color(TEXT_DIM));
+                ui.label(RichText::new("No folders or audio files here.").color(TEXT_DIM()));
             }
             egui::Grid::new("mb_list").num_columns(2).striped(true).spacing([8.0, 2.0]).show(ui, |ui| {
                 for (p, is_dir, size) in &entries {
                     let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                     let selected = self.browser_selected.as_deref() == Some(p.as_path());
                     let label = if *is_dir {
-                        RichText::new(format!("▸ {name}")).color(TEXT)
+                        RichText::new(format!("▸ {name}")).color(TEXT())
                     } else {
-                        RichText::new(format!("   {name}")).color(if selected { WAVE_SEL } else { TEXT })
+                        RichText::new(format!("   {name}")).color(if selected { WAVE_SEL() } else { TEXT() })
                     };
                     let r = ui.selectable_label(selected, label);
                     if *is_dir {
@@ -190,7 +190,7 @@ impl App {
                         } else if r.clicked() {
                             self.actions.push(Action::Audition(p.clone()));
                         }
-                        ui.label(RichText::new(human_size(*size)).color(TEXT_DIM).size(10.5));
+                        ui.label(RichText::new(human_size(*size)).color(TEXT_DIM()).size(10.5));
                     }
                     ui.end_row();
                 }
@@ -219,7 +219,7 @@ impl App {
 
         // Presets row.
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Presets:").color(TEXT_DIM));
+            ui.label(RichText::new("Presets:").color(TEXT_DIM()));
             egui::ComboBox::from_id_source("rack_presets").width(ui.available_width() - 4.0).selected_text("(Default)").show_ui(ui, |ui| {
                 if ui.selectable_label(false, "(Default)").clicked() {
                     self.rack.clear();
@@ -243,7 +243,7 @@ impl App {
 
         // Sixteen slots, always shown.
         let list_h = (ui.available_height() - 112.0).max(80.0);
-        egui::Frame::none().fill(BG_LIST).inner_margin(egui::Margin::same(2.0)).show(ui, |ui| {
+        egui::Frame::none().fill(BG_LIST()).inner_margin(egui::Margin::same(2.0)).show(ui, |ui| {
             egui::ScrollArea::vertical().max_height(list_h).min_scrolled_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
                 let n = self.rack.len();
                 for i in 0..RACK_SLOTS {
@@ -254,14 +254,14 @@ impl App {
                                 slot.on = !slot.on;
                                 changed = true;
                             }
-                            ui.label(RichText::new(format!("{:>2}", i + 1)).monospace().color(TEXT_DIM));
+                            ui.label(RichText::new(format!("{:>2}", i + 1)).monospace().color(TEXT_DIM()));
                             let def = &effects[slot.idx];
-                            let name = RichText::new(def.name).color(if slot.on { TEXT } else { TEXT_DIM });
+                            let name = RichText::new(def.name).color(if slot.on { TEXT() } else { TEXT_DIM() });
                             if ui.selectable_label(false, name).on_hover_text("Click to edit settings").clicked() && !def.params.is_empty() {
                                 edit = Some(i);
                             }
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.menu_button(RichText::new("▸").color(TEXT_DIM), |ui| {
+                                ui.menu_button(RichText::new("▸").color(TEXT_DIM()), |ui| {
                                     if !def.params.is_empty() && ui.button("Edit Effect…").clicked() {
                                         edit = Some(i);
                                         ui.close_menu();
@@ -285,7 +285,7 @@ impl App {
                             ui.label(RichText::new(format!("{:>2}", i + 1)).monospace().color(Color32::from_rgb(0x66, 0x66, 0x66)));
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if i == n {
-                                    ui.menu_button(RichText::new("▸").color(TEXT), |ui| {
+                                    ui.menu_button(RichText::new("▸").color(TEXT()), |ui| {
                                         for cat in std::iter::once(Category::Basic).chain(Category::MENU_ORDER) {
                                             if cat == Category::Generate {
                                                 continue;
@@ -331,22 +331,22 @@ impl App {
         // Gain, mix, process and apply.
         ui.add_space(3.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Input").color(TEXT_DIM));
+            ui.label(RichText::new("Input").color(TEXT_DIM()));
             changed |= hot_drag(ui, egui::DragValue::new(&mut self.rack_in_db).speed(0.1).range(-24.0..=24.0).fixed_decimals(1).suffix(" dB")).changed();
             ui.add_space(8.0);
-            ui.label(RichText::new("Output").color(TEXT_DIM));
+            ui.label(RichText::new("Output").color(TEXT_DIM()));
             changed |= hot_drag(ui, egui::DragValue::new(&mut self.rack_out_db).speed(0.1).range(-24.0..=24.0).fixed_decimals(1).suffix(" dB")).changed();
         });
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Mix:").color(TEXT_DIM));
-            ui.label(RichText::new("Dry").color(TEXT_DIM).size(11.0));
+            ui.label(RichText::new("Mix:").color(TEXT_DIM()));
+            ui.label(RichText::new("Dry").color(TEXT_DIM()).size(11.0));
             ui.spacing_mut().slider_width = (ui.available_width() - 90.0).max(60.0);
             changed |= ui.add(egui::Slider::new(&mut self.rack_mix, 0.0..=100.0).show_value(false)).changed();
-            ui.label(RichText::new("Wet").color(TEXT_DIM).size(11.0));
+            ui.label(RichText::new("Wet").color(TEXT_DIM()).size(11.0));
             changed |= hot_drag(ui, egui::DragValue::new(&mut self.rack_mix).speed(0.5).range(0.0..=100.0).fixed_decimals(0).suffix(" %")).changed();
         });
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Process:").color(TEXT_DIM));
+            ui.label(RichText::new("Process:").color(TEXT_DIM()));
             let before = self.rack_entire;
             egui::ComboBox::from_id_source("rack_process").width(110.0).selected_text(if self.rack_entire { "Entire File" } else { "Selection Only" }).show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.rack_entire, false, "Selection Only");
@@ -393,7 +393,7 @@ impl App {
 
     pub fn properties_panel(&mut self, ui: &mut Ui) {
         let Some(doc) = self.doc() else {
-            ui.label(RichText::new("No file selected.").color(TEXT_DIM));
+            ui.label(RichText::new("No file selected.").color(TEXT_DIM()));
             return;
         };
         let id = egui::Id::new(("props", doc.id, doc.version));
@@ -430,13 +430,13 @@ impl App {
         let name = doc.display_name();
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.label(RichText::new(name).font(bold(13.0)).color(Color32::WHITE));
-            ui.label(RichText::new("Audio File").color(TEXT_DIM).size(11.5));
+            ui.label(RichText::new("Audio File").color(TEXT_DIM()).size(11.5));
             ui.add_space(4.0);
             let grid = |ui: &mut Ui, id: &str, rows: Vec<(&str, String)>| {
                 egui::Grid::new(id).num_columns(2).spacing([8.0, 3.0]).show(ui, |ui| {
                     for (k, v) in rows {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.label(RichText::new(format!("{k}:")).color(TEXT_DIM).size(11.5));
+                            ui.label(RichText::new(format!("{k}:")).color(TEXT_DIM()).size(11.5));
                         });
                         ui.label(RichText::new(v).size(11.5));
                         ui.end_row();

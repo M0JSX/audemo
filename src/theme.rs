@@ -3,35 +3,65 @@
 
 use eframe::egui::{self, pos2, vec2, Color32, FontData, FontDefinitions, FontFamily, Pos2, Rect, Response, Rounding, Sense, Shape, Stroke, Ui};
 
-// Workspace greys.
-pub const BG_DEEP: Color32 = Color32::from_rgb(0x26, 0x26, 0x26); // gutters between panels
-pub const BG_PANEL: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a); // panel body
-pub const BG_HEADER: Color32 = Color32::from_rgb(0x2c, 0x2c, 0x2c); // panel tab strip
-pub const BG_LIST: Color32 = Color32::from_rgb(0x33, 0x33, 0x33); // list / table wells
-pub const BG_RAISED: Color32 = Color32::from_rgb(0x4a, 0x4a, 0x4a); // buttons
-pub const BORDER: Color32 = Color32::from_rgb(0x22, 0x22, 0x22);
-pub const TEXT: Color32 = Color32::from_rgb(0xd6, 0xd6, 0xd6);
-pub const TEXT_DIM: Color32 = Color32::from_rgb(0x9a, 0x9a, 0x9a);
-/// Audition's orange-yellow "hot text" for times and scrubbable values.
-pub const HOT: Color32 = Color32::from_rgb(0xe8, 0xa1, 0x3a);
-pub const ACCENT: Color32 = Color32::from_rgb(0x2d, 0x7f, 0xd9);
+// Palette: each colour lives in an atomic so Preferences > Appearance can
+// change it at run time. The functions keep their constant-like names.
+macro_rules! palette {
+    ($($(#[$m:meta])* $name:ident = $rgb:expr;)*) => {
+        mod cells {
+            use std::sync::atomic::AtomicU32;
+            $( #[allow(non_upper_case_globals)] pub static $name: AtomicU32 = AtomicU32::new($rgb); )*
+        }
+        $( $(#[$m])* #[allow(non_snake_case)] #[inline] pub fn $name() -> Color32 { rgb(cells::$name.load(std::sync::atomic::Ordering::Relaxed)) } )*
+        /// Every palette entry at its built-in value.
+        pub const DEFAULT_PALETTE: &[(&str, u32)] = &[$((stringify!($name), $rgb)),*];
+        fn set(name: &str, v: u32) {
+            match name { $(stringify!($name) => cells::$name.store(v, std::sync::atomic::Ordering::Relaxed),)* _ => {} }
+        }
+    };
+}
 
-// Editor.
-pub const LANE_BG: Color32 = Color32::from_rgb(0x0f, 0x13, 0x17);
-pub const LANE_GRID: Color32 = Color32::from_rgb(0x1f, 0x2a, 0x2a);
-pub const WAVE: Color32 = Color32::from_rgb(0x3f, 0xdc, 0x9b);
-pub const WAVE_DIM: Color32 = Color32::from_rgb(0x2d, 0x6e, 0x55);
-/// Waveform drawn inside a selection (dark on the light selection fill).
-pub const WAVE_SEL: Color32 = Color32::from_rgb(0x0a, 0x0c, 0x0c);
-/// Selection background: Audition inverts the selected range.
-pub const SEL_FILL: Color32 = Color32::from_rgb(0x47, 0xd4, 0xa0);
-pub const PLAYHEAD: Color32 = Color32::from_rgb(0xf2, 0xc2, 0x30);
-pub const CURSOR: Color32 = Color32::from_rgb(0xf2, 0xc2, 0x30);
-pub const MARKER: Color32 = Color32::from_rgb(0xe8, 0x7a, 0x30);
-pub const RECORD: Color32 = Color32::from_rgb(0xd8, 0x32, 0x2c);
-pub const TIME: Color32 = HOT;
-pub const WARN: Color32 = Color32::from_rgb(0xf0, 0xb4, 0x3c);
-pub const OVERVIEW_WAVE: Color32 = Color32::from_rgb(0xb8, 0xa0, 0x46);
+fn rgb(v: u32) -> Color32 {
+    Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
+}
+
+palette! {
+    /// gutters between panels
+    BG_DEEP = 0x262626;
+    /// panel body
+    BG_PANEL = 0x3a3a3a;
+    /// panel tab strip
+    BG_HEADER = 0x2c2c2c;
+    /// list / table wells
+    BG_LIST = 0x333333;
+    /// buttons
+    BG_RAISED = 0x4a4a4a;
+    BORDER = 0x222222;
+    TEXT = 0xd6d6d6;
+    TEXT_DIM = 0x9a9a9a;
+    /// Audition's orange-yellow "hot text" for times and scrubbable values.
+    HOT = 0xe8a13a;
+    ACCENT = 0x2d7fd9;
+    LANE_BG = 0x0f1317;
+    LANE_GRID = 0x1f2a2a;
+    WAVE = 0x3fdc9b;
+    WAVE_DIM = 0x2d6e55;
+    /// Waveform drawn inside a selection (dark on the light selection fill).
+    WAVE_SEL = 0x0a0c0c;
+    /// Selection background: Audition inverts the selected range.
+    SEL_FILL = 0x47d4a0;
+    PLAYHEAD = 0xf2c230;
+    CURSOR = 0xf2c230;
+    MARKER = 0xe87a30;
+    RECORD = 0xd8322c;
+    WARN = 0xf0b43c;
+    OVERVIEW_WAVE = 0xb8a046;
+}
+
+#[allow(non_snake_case)]
+#[inline]
+pub fn TIME() -> Color32 {
+    HOT()
+}
 
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
@@ -57,39 +87,11 @@ pub fn bold(size: f32) -> egui::FontId {
 
 pub fn apply(ctx: &egui::Context) {
     install_fonts(ctx);
-    let mut v = egui::Visuals::dark();
-    v.panel_fill = BG_PANEL;
-    v.window_fill = BG_PANEL;
-    v.extreme_bg_color = BG_LIST;
-    v.faint_bg_color = Color32::from_rgb(0x37, 0x37, 0x37);
-    v.code_bg_color = BG_LIST;
-    v.window_stroke = Stroke::new(1.0_f32, BORDER);
-    v.window_rounding = Rounding::same(3.0);
-    v.menu_rounding = Rounding::same(2.0);
-    v.selection.bg_fill = Color32::from_rgb(0x5c, 0x5c, 0x5c);
-    v.selection.stroke = Stroke::new(1.0_f32, Color32::WHITE);
-    v.hyperlink_color = HOT;
-    v.override_text_color = Some(TEXT);
-    v.widgets.noninteractive.bg_fill = BG_PANEL;
-    v.widgets.noninteractive.weak_bg_fill = BG_PANEL;
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, BORDER);
-    v.widgets.inactive.bg_fill = BG_RAISED;
-    v.widgets.inactive.weak_bg_fill = BG_RAISED;
-    v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(0x2a, 0x2a, 0x2a));
-    v.widgets.hovered.bg_fill = Color32::from_rgb(0x56, 0x56, 0x56);
-    v.widgets.hovered.weak_bg_fill = Color32::from_rgb(0x56, 0x56, 0x56);
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(0x6a, 0x6a, 0x6a));
-    v.widgets.active.bg_fill = Color32::from_rgb(0x62, 0x62, 0x62);
-    v.widgets.active.weak_bg_fill = Color32::from_rgb(0x62, 0x62, 0x62);
-    for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
-        w.rounding = Rounding::same(2.0);
-    }
-    // Audemo is always dark. egui otherwise follows the OS theme and swaps in
-    // its stock light or dark style, leaving our dark panels with the wrong
-    // text colours (an unreadable menu bar on Windows).
+    // Audemo is always dark-themed in egui's terms. egui otherwise follows
+    // the OS theme and swaps in its stock light or dark style, leaving our
+    // panels with the wrong text colours (an unreadable menu bar on Windows).
     ctx.set_theme(egui::ThemePreference::Dark);
-    ctx.set_visuals_of(egui::Theme::Dark, v.clone());
-    ctx.set_visuals_of(egui::Theme::Light, v);
+    apply_visuals(ctx, 0);
     ctx.all_styles_mut(|s| {
         s.spacing.item_spacing = vec2(6.0, 3.0);
         s.spacing.button_padding = vec2(7.0, 2.0);
@@ -104,6 +106,136 @@ pub fn apply(ctx: &egui::Context) {
     ctx.options_mut(|o| o.zoom_with_keyboard = false);
 }
 
+/// Lighten (positive) or darken a grey by `off` levels.
+fn shade(v: u32, off: i32) -> u32 {
+    let ch = |x: u32| ((x as i32 + off).clamp(0x08, 0xf0)) as u32;
+    ch(v >> 16 & 0xff) << 16 | ch(v >> 8 & 0xff) << 8 | ch(v & 0xff)
+}
+
+fn mix(a: u32, b: u32, t: f32) -> u32 {
+    let ch = |s: u32| {
+        let (x, y) = ((a >> s & 0xff) as f32, (b >> s & 0xff) as f32);
+        ((x + (y - x) * t).round() as u32) << s
+    };
+    ch(16) | ch(8) | ch(0)
+}
+
+/// Grey offset for an Appearance brightness (30 = Audemo's default).
+fn brightness_offset(b: f32) -> i32 {
+    if b >= 30.0 {
+        ((b - 30.0) / 70.0 * 150.0) as i32
+    } else {
+        ((b - 30.0) / 30.0 * 40.0) as i32
+    }
+}
+
+static GRADIENTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Preferences > Appearance: "Use Gradients".
+pub fn gradients() -> bool {
+    GRADIENTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Apply Preferences > Appearance (and the tooltip setting) to the palette
+/// and egui's style.
+pub fn set_look(ctx: &egui::Context, p: &crate::prefs::Prefs) {
+    let off = brightness_offset(p.brightness);
+    for (name, base) in DEFAULT_PALETTE {
+        if name.starts_with("BG_") || *name == "BORDER" {
+            set(name, shade(*base, off));
+        }
+    }
+    // Light interfaces get dark text.
+    let light = 0x3a + off > 0x90;
+    set("TEXT", if light { 0x1c1c1c } else { 0xd6d6d6 });
+    set("TEXT_DIM", if light { 0x4e4e4e } else { 0x9a9a9a });
+    let c = p.colors;
+    set("WAVE", c[0]);
+    set("WAVE_DIM", mix(c[0], 0x000000, 0.5));
+    set("SEL_FILL", c[1]);
+    set("PLAYHEAD", c[2]);
+    set("CURSOR", c[2]);
+    set("MARKER", c[3]);
+    set("HOT", c[4]);
+    set("ACCENT", c[5]);
+    GRADIENTS.store(p.gradients, std::sync::atomic::Ordering::Relaxed);
+    apply_visuals(ctx, off);
+    ctx.set_zoom_factor(p.ui_scale);
+    let delay = if p.show_tooltips { 0.5 } else { f32::INFINITY };
+    ctx.all_styles_mut(|s| s.interaction.tooltip_delay = delay);
+}
+
+fn apply_visuals(ctx: &egui::Context, off: i32) {
+    let g = |v: u32| rgb(shade(v, off));
+    let mut v = egui::Visuals::dark();
+    v.panel_fill = BG_PANEL();
+    v.window_fill = BG_PANEL();
+    v.extreme_bg_color = BG_LIST();
+    v.faint_bg_color = g(0x373737);
+    v.code_bg_color = BG_LIST();
+    v.window_stroke = Stroke::new(1.0_f32, BORDER());
+    v.window_rounding = Rounding::same(3.0);
+    v.menu_rounding = Rounding::same(2.0);
+    v.selection.bg_fill = g(0x5c5c5c);
+    v.selection.stroke = Stroke::new(1.0_f32, TEXT());
+    v.hyperlink_color = HOT();
+    v.override_text_color = Some(TEXT());
+    v.widgets.noninteractive.bg_fill = BG_PANEL();
+    v.widgets.noninteractive.weak_bg_fill = BG_PANEL();
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, BORDER());
+    v.widgets.inactive.bg_fill = BG_RAISED();
+    v.widgets.inactive.weak_bg_fill = BG_RAISED();
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, g(0x2a2a2a));
+    v.widgets.hovered.bg_fill = g(0x565656);
+    v.widgets.hovered.weak_bg_fill = g(0x565656);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, g(0x6a6a6a));
+    v.widgets.active.bg_fill = g(0x626262);
+    v.widgets.active.weak_bg_fill = g(0x626262);
+    for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
+        w.rounding = Rounding::same(2.0);
+    }
+    ctx.set_visuals_of(egui::Theme::Dark, v.clone());
+    ctx.set_visuals_of(egui::Theme::Light, v);
+}
+
+/// Waveform lane background: flat, or a soft vertical gradient when
+/// "Use Gradients" is on.
+pub fn lane_fill(p: &egui::Painter, rect: Rect) {
+    if !gradients() {
+        p.rect_filled(rect, 0.0, LANE_BG());
+        return;
+    }
+    let edge = LANE_BG();
+    let mid = rgb(mix(cells::LANE_BG.load(std::sync::atomic::Ordering::Relaxed), 0x2a3640, 0.6));
+    let mut mesh = egui::Mesh::default();
+    let ys = [rect.top(), rect.center().y, rect.bottom()];
+    let cs = [edge, mid, edge];
+    for (y, c) in ys.iter().zip(cs) {
+        mesh.colored_vertex(pos2(rect.left(), *y), c);
+        mesh.colored_vertex(pos2(rect.right(), *y), c);
+    }
+    for k in 0..2u32 {
+        let i = k * 2;
+        mesh.add_triangle(i, i + 1, i + 2);
+        mesh.add_triangle(i + 1, i + 3, i + 2);
+    }
+    p.add(Shape::mesh(mesh));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn brightness_and_colours() {
+        assert_eq!(brightness_offset(30.0), 0);
+        assert!(brightness_offset(100.0) > 140 && brightness_offset(0.0) < -30);
+        assert_eq!(shade(0x3a3a3a, 0), 0x3a3a3a);
+        assert_eq!(shade(0x101010, -100), 0x080808);
+        assert_eq!(mix(0x000000, 0xffffff, 0.5), 0x808080);
+    }
+}
+
 /// Audition-style scrubbable value: orange text, drag to change, click to type.
 pub fn hot_drag<'a>(ui: &mut Ui, dv: egui::DragValue<'a>) -> Response {
     ui.scope(|ui| {
@@ -112,7 +244,7 @@ pub fn hot_drag<'a>(ui: &mut Ui, dv: egui::DragValue<'a>) -> Response {
             st.weak_bg_fill = Color32::TRANSPARENT;
             st.bg_fill = Color32::TRANSPARENT;
             st.bg_stroke = Stroke::NONE;
-            st.fg_stroke = Stroke::new(1.0_f32, HOT);
+            st.fg_stroke = Stroke::new(1.0_f32, HOT());
         }
         w.hovered.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(0xff, 0xc4, 0x6a));
         ui.add(dv)
@@ -184,9 +316,9 @@ pub fn icon_button_sized(ui: &mut Ui, icon: Icon, active: bool, tip: &str, size:
     let fg = if !enabled {
         Color32::from_rgb(0x6a, 0x6a, 0x6a)
     } else if icon == Icon::Record {
-        RECORD
+        RECORD()
     } else if active {
-        HOT
+        HOT()
     } else {
         Color32::from_rgb(0xd0, 0xd0, 0xd0)
     };

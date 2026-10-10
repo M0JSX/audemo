@@ -129,7 +129,7 @@ impl App {
 
     pub fn frequency_analysis(&mut self, ui: &mut Ui) {
         let Some(doc) = self.doc() else {
-            ui.label(RichText::new("No file").color(TEXT_DIM));
+            ui.label(RichText::new("No file").color(TEXT_DIM()));
             return;
         };
         let (doc_id, version, sr, n_ch) = (doc.id, doc.version, doc.sample_rate, doc.n_ch());
@@ -141,7 +141,7 @@ impl App {
         // Controls.
         let mut scan_now = false;
         ui.horizontal(|ui| {
-            ui.label(RichText::new("FFT Size:").color(TEXT_DIM));
+            ui.label(RichText::new("FFT Size:").color(TEXT_DIM()));
             egui::ComboBox::from_id_source("fa_size").width(70.0).selected_text(format!("{n}")).show_ui(ui, |ui| {
                 for (i, s) in FFT_SIZES.iter().enumerate() {
                     ui.selectable_value(&mut self.analysis.fft_idx, i, format!("{s}"));
@@ -191,7 +191,7 @@ impl App {
             return;
         }
         let p = ui.painter_at(rect);
-        p.rect_filled(rect, 2.0, LANE_BG);
+        p.rect_filled(rect, 2.0, LANE_BG());
         let plot = Rect::from_min_max(pos2(rect.left() + 30.0, rect.top() + 4.0), pos2(rect.right() - 6.0, rect.bottom() - 14.0));
         let fmin = 20.0f32;
         let fmax = sr as f32 / 2.0;
@@ -204,15 +204,15 @@ impl App {
                 continue;
             }
             let x = fx(f);
-            p.line_segment([pos2(x, plot.top()), pos2(x, plot.bottom())], Stroke::new(1.0_f32, LANE_GRID));
+            p.line_segment([pos2(x, plot.top()), pos2(x, plot.bottom())], Stroke::new(1.0_f32, LANE_GRID()));
             let l = if f >= 1000.0 { format!("{}k", f / 1000.0) } else { format!("{f}") };
-            p.text(pos2(x, plot.bottom() + 1.0), Align2::CENTER_TOP, l, FontId::monospace(9.0), TEXT_DIM);
+            p.text(pos2(x, plot.bottom() + 1.0), Align2::CENTER_TOP, l, FontId::monospace(9.0), TEXT_DIM());
         }
         let mut db = 0.0;
         while db >= db_lo {
             let y = dy(db);
-            p.line_segment([pos2(plot.left(), y), pos2(plot.right(), y)], Stroke::new(1.0_f32, LANE_GRID));
-            p.text(pos2(plot.left() - 3.0, y), Align2::RIGHT_CENTER, format!("{}", db as i32), FontId::monospace(9.0), TEXT_DIM);
+            p.line_segment([pos2(plot.left(), y), pos2(plot.right(), y)], Stroke::new(1.0_f32, LANE_GRID()));
+            p.text(pos2(plot.left() - 3.0, y), Align2::RIGHT_CENTER, format!("{}", db as i32), FontId::monospace(9.0), TEXT_DIM());
             db -= if plot.height() > 160.0 { 12.0 } else { 24.0 };
         }
         // Spectrum → one point per pixel column (max of the bins it spans).
@@ -239,7 +239,7 @@ impl App {
         };
         if let Some(s) = scan {
             for (c, spec) in s.spectra.iter().enumerate() {
-                let col = if c == 0 { WAVE } else { RIGHT_COL };
+                let col = if c == 0 { WAVE() } else { RIGHT_COL };
                 let pts = curve(spec, s.n);
                 let mut mesh = Vec::with_capacity(pts.len() * 2);
                 for w in pts.windows(2) {
@@ -252,23 +252,23 @@ impl App {
                 p.extend(mesh);
                 p.add(Shape::line(pts, Stroke::new(1.0_f32, col.linear_multiply(0.6))));
             }
-            p.text(pos2(plot.right() - 4.0, plot.top() + 2.0), Align2::RIGHT_TOP, &s.label, FontId::proportional(10.5), TEXT_DIM);
+            p.text(pos2(plot.right() - 4.0, plot.top() + 2.0), Align2::RIGHT_TOP, &s.label, FontId::proportional(10.5), TEXT_DIM());
         }
         for (c, spec) in shown.iter().enumerate() {
-            let col = if c == 0 { WAVE } else { RIGHT_COL };
+            let col = if c == 0 { WAVE() } else { RIGHT_COL };
             p.add(Shape::line(curve(spec, n), Stroke::new(1.4_f32, col)));
         }
         if n_ch > 1 {
-            p.text(pos2(plot.left() + 4.0, plot.top() + 2.0), Align2::LEFT_TOP, "L", FontId::monospace(10.0), WAVE);
+            p.text(pos2(plot.left() + 4.0, plot.top() + 2.0), Align2::LEFT_TOP, "L", FontId::monospace(10.0), WAVE());
             p.text(pos2(plot.left() + 14.0, plot.top() + 2.0), Align2::LEFT_TOP, "R", FontId::monospace(10.0), RIGHT_COL);
         }
         if let Some(h) = resp.hover_pos().filter(|h| plot.contains(*h)) {
             let f = xf(h.x);
             let k = ((f / (sr as f32 / n as f32)).round() as usize).min(shown.first().map(|s| s.len() - 1).unwrap_or(0));
             let vals: Vec<String> = shown.iter().map(|s| format!("{:.1} dB", s.get(k).copied().unwrap_or(-200.0))).collect();
-            p.line_segment([pos2(h.x, plot.top()), pos2(h.x, plot.bottom())], Stroke::new(1.0_f32, TEXT_DIM));
+            p.line_segment([pos2(h.x, plot.top()), pos2(h.x, plot.bottom())], Stroke::new(1.0_f32, TEXT_DIM()));
             let label = if f >= 1000.0 { format!("{:.2} kHz  {}", f / 1000.0, vals.join(" / ")) } else { format!("{f:.0} Hz  {}", vals.join(" / ")) };
-            p.text(pos2(h.x + 6.0, plot.top() + 14.0), Align2::LEFT_TOP, label, FontId::monospace(10.0), HOT);
+            p.text(pos2(h.x + 6.0, plot.top() + 14.0), Align2::LEFT_TOP, label, FontId::monospace(10.0), HOT());
         }
     }
 
@@ -276,7 +276,7 @@ impl App {
 
     pub fn phase_meter(&mut self, ui: &mut Ui) {
         let Some(audio) = self.doc().map(|d| d.audio.clone()) else {
-            ui.label(RichText::new("No file").color(TEXT_DIM));
+            ui.label(RichText::new("No file").color(TEXT_DIM()));
             return;
         };
         let rect = ui.available_rect_before_wrap();
@@ -286,7 +286,7 @@ impl App {
         }
         let p = ui.painter_at(rect);
         if audio.len() < 2 {
-            p.text(rect.center(), Align2::CENTER_CENTER, "Mono file — phase metering needs two channels", FontId::proportional(12.0), TEXT_DIM);
+            p.text(rect.center(), Align2::CENTER_CENTER, "Mono file — phase metering needs two channels", FontId::proportional(12.0), TEXT_DIM());
             return;
         }
         let pos = self.display_pos() as usize;
@@ -303,16 +303,16 @@ impl App {
         // Goniometer (mid up, side across).
         let g = rect.height().min(rect.width() * 0.45) - 8.0;
         let gr = Rect::from_min_size(pos2(rect.left() + 4.0, rect.top() + 4.0), vec2(g, g));
-        p.rect_filled(gr, 2.0, LANE_BG);
+        p.rect_filled(gr, 2.0, LANE_BG());
         let cen = gr.center();
         let half = g * 0.5 - 4.0;
         for (d, lab) in [((-1.0f32, -1.0f32), "L"), ((1.0, -1.0), "R")] {
             let e = pos2(cen.x + d.0 * half * 0.7071, cen.y + d.1 * half * 0.7071);
-            p.line_segment([pos2(2.0 * cen.x - e.x, 2.0 * cen.y - e.y), e], Stroke::new(1.0_f32, LANE_GRID));
-            p.text(e, Align2::CENTER_BOTTOM, lab, FontId::monospace(9.0), TEXT_DIM);
+            p.line_segment([pos2(2.0 * cen.x - e.x, 2.0 * cen.y - e.y), e], Stroke::new(1.0_f32, LANE_GRID()));
+            p.text(e, Align2::CENTER_BOTTOM, lab, FontId::monospace(9.0), TEXT_DIM());
         }
-        p.line_segment([pos2(cen.x, gr.top() + 2.0), pos2(cen.x, gr.bottom() - 2.0)], Stroke::new(1.0_f32, LANE_GRID));
-        p.line_segment([pos2(gr.left() + 2.0, cen.y), pos2(gr.right() - 2.0, cen.y)], Stroke::new(1.0_f32, LANE_GRID));
+        p.line_segment([pos2(cen.x, gr.top() + 2.0), pos2(cen.x, gr.bottom() - 2.0)], Stroke::new(1.0_f32, LANE_GRID()));
+        p.line_segment([pos2(gr.left() + 2.0, cen.y), pos2(gr.right() - 2.0, cen.y)], Stroke::new(1.0_f32, LANE_GRID()));
         let pk = l.iter().chain(r).fold(0.0f32, |m, v| m.max(v.abs())).max(0.05);
         let scale = half / (pk * 1.414);
         let dots: Vec<Shape> = l
@@ -322,7 +322,7 @@ impl App {
             .map(|(&lv, &rv)| {
                 let x = (rv - lv) * 0.7071 * scale;
                 let y = (lv + rv) * 0.7071 * scale;
-                Shape::rect_filled(Rect::from_center_size(pos2(cen.x + x, cen.y - y), vec2(1.5, 1.5)), 0.0, WAVE.linear_multiply(0.7))
+                Shape::rect_filled(Rect::from_center_size(pos2(cen.x + x, cen.y - y), vec2(1.5, 1.5)), 0.0, WAVE().linear_multiply(0.7))
             })
             .collect();
         p.extend(dots);
@@ -333,15 +333,15 @@ impl App {
         if bar.width() > 40.0 {
             p.rect_filled(bar, 2.0, Color32::from_rgb(0x0c, 0x0e, 0x12));
             let xc = |v: f32| bar.left() + (v + 1.0) * 0.5 * bar.width();
-            let col = if corr < 0.0 { RECORD } else if corr < 0.3 { WARN } else { WAVE };
+            let col = if corr < 0.0 { RECORD() } else if corr < 0.3 { WARN() } else { WAVE() };
             let (x0, x1) = (xc(0.0).min(xc(corr)), xc(0.0).max(xc(corr)));
             p.rect_filled(Rect::from_min_max(pos2(x0, bar.top() + 2.0), pos2(x1.max(x0 + 2.0), bar.bottom() - 2.0)), 1.0, col);
             for (v, s) in [(-1.0, "-1"), (-0.5, "-0.5"), (0.0, "0"), (0.5, "+0.5"), (1.0, "+1")] {
                 let x = xc(v);
-                p.line_segment([pos2(x, bar.bottom()), pos2(x, bar.bottom() + 4.0)], Stroke::new(1.0_f32, TEXT_DIM));
-                p.text(pos2(x, bar.bottom() + 5.0), Align2::CENTER_TOP, s, FontId::monospace(9.0), TEXT_DIM);
+                p.line_segment([pos2(x, bar.bottom()), pos2(x, bar.bottom() + 4.0)], Stroke::new(1.0_f32, TEXT_DIM()));
+                p.text(pos2(x, bar.bottom() + 5.0), Align2::CENTER_TOP, s, FontId::monospace(9.0), TEXT_DIM());
             }
-            p.text(pos2(bar.left(), bar.top() - 4.0), Align2::LEFT_BOTTOM, "Phase correlation", FontId::proportional(11.0), TEXT_DIM);
+            p.text(pos2(bar.left(), bar.top() - 4.0), Align2::LEFT_BOTTOM, "Phase correlation", FontId::proportional(11.0), TEXT_DIM());
             p.text(pos2(bar.right(), bar.top() - 4.0), Align2::RIGHT_BOTTOM, format!("{corr:+.2}"), bold(12.0), col);
         }
     }
@@ -355,7 +355,7 @@ impl App {
             self.analysis.ml_rx = Some(rx);
         }
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Target:").color(TEXT_DIM));
+            ui.label(RichText::new("Target:").color(TEXT_DIM()));
             let st = &mut self.analysis;
             let current = LOUDNESS_PRESETS.iter().find(|p| p.1 == st.ml_target && p.2 == st.ml_tp).map(|p| p.0).unwrap_or("Custom");
             egui::ComboBox::from_id_source("ml_preset").width(ui.available_width() - 4.0).selected_text(current).show_ui(ui, |ui| {
@@ -368,9 +368,9 @@ impl App {
             });
         });
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Loudness").color(TEXT_DIM));
+            ui.label(RichText::new("Loudness").color(TEXT_DIM()));
             hot_drag(ui, egui::DragValue::new(&mut self.analysis.ml_target).speed(0.1).range(-40.0..=-5.0).fixed_decimals(1).suffix(" LUFS"));
-            ui.label(RichText::new("True peak").color(TEXT_DIM));
+            ui.label(RichText::new("True peak").color(TEXT_DIM()));
             hot_drag(ui, egui::DragValue::new(&mut self.analysis.ml_tp).speed(0.1).range(-9.0..=0.0).fixed_decimals(1).suffix(" dBTP"));
         });
         ui.add_space(2.0);
@@ -378,15 +378,15 @@ impl App {
         let rows: Vec<(u64, String, u64, bool)> = self.docs.iter().map(|d| (d.id, d.name.clone(), d.version, d.len() > 0)).collect();
         let mut scan: Vec<u64> = Vec::new();
         let table_h = (ui.available_height() - 30.0).max(40.0);
-        egui::Frame::none().fill(BG_LIST).inner_margin(egui::Margin::same(3.0)).show(ui, |ui| {
+        egui::Frame::none().fill(BG_LIST()).inner_margin(egui::Margin::same(3.0)).show(ui, |ui| {
             egui::ScrollArea::vertical().max_height(table_h).min_scrolled_height(table_h).auto_shrink([false, false]).show(ui, |ui| {
                 if rows.is_empty() {
-                    ui.label(RichText::new("Open files appear here.").color(TEXT_DIM));
+                    ui.label(RichText::new("Open files appear here.").color(TEXT_DIM()));
                     return;
                 }
                 egui::Grid::new("ml_table").num_columns(5).spacing([8.0, 3.0]).striped(true).show(ui, |ui| {
                     for h in ["", "File", "LUFS", "dBTP", "LRA"] {
-                        ui.label(RichText::new(h).color(TEXT_DIM).size(11.0));
+                        ui.label(RichText::new(h).color(TEXT_DIM()).size(11.0));
                     }
                     ui.end_row();
                     for (id, name, ver, has_audio) in &rows {
@@ -398,21 +398,21 @@ impl App {
                                 self.analysis.ml_excluded.insert(*id);
                             }
                         }
-                        ui.label(RichText::new(name).color(if inc { TEXT } else { TEXT_DIM }));
+                        ui.label(RichText::new(name).color(if inc { TEXT() } else { TEXT_DIM() }));
                         let m = self.analysis.ml_cache.get(id).filter(|(v, _)| v == ver).map(|(_, l)| *l);
                         let scanning = self.analysis.ml_scanning.contains(&(*id, *ver));
                         match m {
                             Some(l) => {
                                 let off = l.integrated.map(|x| (x - self.analysis.ml_target as f64).abs() > 0.5).unwrap_or(false);
-                                ui.label(RichText::new(opt(l.integrated, "")).monospace().color(if off { WARN } else { TEXT }));
+                                ui.label(RichText::new(opt(l.integrated, "")).monospace().color(if off { WARN() } else { TEXT() }));
                                 let over = l.true_peak_db > self.analysis.ml_tp as f64 + 0.05;
-                                ui.label(RichText::new(fmt_db(l.true_peak_db)).monospace().color(if over { RECORD } else { TEXT }));
+                                ui.label(RichText::new(fmt_db(l.true_peak_db)).monospace().color(if over { RECORD() } else { TEXT() }));
                                 ui.label(RichText::new(opt(l.range, "")).monospace());
                             }
                             None => {
                                 let t = if scanning { "…" } else { "—" };
                                 for _ in 0..3 {
-                                    ui.label(RichText::new(t).color(TEXT_DIM));
+                                    ui.label(RichText::new(t).color(TEXT_DIM()));
                                 }
                                 if inc && *has_audio && !scanning {
                                     scan.push(*id);
@@ -500,7 +500,7 @@ impl App {
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.set_min_width(380.0);
-                ui.label(RichText::new(&title).color(TEXT_DIM));
+                ui.label(RichText::new(&title).color(TEXT_DIM()));
                 ui.add_space(4.0);
                 match &stats {
                     None => {
@@ -513,20 +513,20 @@ impl App {
                     Some(s) => {
                         let text = stats_rows(s);
                         let stereo = s.channels.len() > 1;
-                        egui::Frame::none().fill(BG_LIST).inner_margin(egui::Margin::same(8.0)).rounding(2.0).show(ui, |ui| {
+                        egui::Frame::none().fill(BG_LIST()).inner_margin(egui::Margin::same(8.0)).rounding(2.0).show(ui, |ui| {
                             egui::Grid::new("ampstats").num_columns(if stereo { 3 } else { 2 }).spacing([18.0, 4.0]).striped(true).show(ui, |ui| {
                                 ui.label("");
                                 if stereo {
-                                    ui.label(RichText::new("Left").color(TEXT_DIM));
-                                    ui.label(RichText::new("Right").color(TEXT_DIM));
+                                    ui.label(RichText::new("Left").color(TEXT_DIM()));
+                                    ui.label(RichText::new("Right").color(TEXT_DIM()));
                                 } else {
-                                    ui.label(RichText::new("Mono").color(TEXT_DIM));
+                                    ui.label(RichText::new("Mono").color(TEXT_DIM()));
                                 }
                                 ui.end_row();
                                 for (label, vals) in &text {
                                     ui.label(*label);
                                     for v in vals {
-                                        ui.label(RichText::new(v).monospace().color(TEXT));
+                                        ui.label(RichText::new(v).monospace().color(TEXT()));
                                     }
                                     if vals.len() == 1 && stereo {
                                         ui.label("");

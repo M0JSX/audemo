@@ -13,7 +13,40 @@ const OVERVIEW_H: f32 = 20.0;
 const RULER_H: f32 = 24.0;
 const LEFT_W: f32 = 30.0;
 const RIGHT_W: f32 = 64.0;
-const SPEC_FFT: usize = 1024;
+/// Spectral display settings (Preferences > Spectral Displays).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpecSettings {
+    pub fft: usize,
+    pub window: crate::dsp::spectrogram::Window,
+    pub range_db: f32,
+    pub log: bool,
+}
+
+static SPEC_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_spec_log(on: bool) {
+    SPEC_LOG.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Height (0 = bottom, 1 = top) of frequency `f` on the spectral display.
+fn f_frac(f: f32, nyq: f32) -> f32 {
+    if SPEC_LOG.load(std::sync::atomic::Ordering::Relaxed) {
+        const LO: f32 = 20.0;
+        ((f.max(LO) / LO).ln() / (nyq / LO).max(1.0001).ln()).clamp(0.0, 1.0)
+    } else {
+        (f / nyq).clamp(0.0, 1.0)
+    }
+}
+
+/// Frequency at height `x` (0 = bottom) of the spectral display.
+fn frac_f(x: f32, nyq: f32) -> f32 {
+    if SPEC_LOG.load(std::sync::atomic::Ordering::Relaxed) {
+        const LO: f32 = 20.0;
+        LO * (nyq / LO).max(1.0).powf(x.clamp(0.0, 1.0))
+    } else {
+        x.clamp(0.0, 1.0) * nyq
+    }
+}
 
 pub(crate) const RULER_STEPS: [f64; 22] = [
     0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0,
@@ -60,6 +93,20 @@ pub(crate) fn ruler_label(t: f64, step: f64) -> String {
 }
 
 impl App {
+    pub fn spec_settings(&self) -> SpecSettings {
+        use crate::dsp::spectrogram::Window as W;
+        use crate::prefs::WindowFn as P;
+        let window = match self.prefs.spec_window {
+            P::BlackmanHarris => W::BlackmanHarris,
+            P::Blackman => W::Blackman,
+            P::Hann => W::Hann,
+            P::Hamming => W::Hamming,
+            P::Welch => W::Welch,
+            P::Rectangular => W::Rectangular,
+        };
+        SpecSettings { fft: self.prefs.spec_size as usize, window, range_db: self.prefs.spec_range_db, log: self.prefs.spec_log }
+    }
+
     pub fn editor_ui(&mut self, ui: &mut Ui) {
         if self.mode == crate::app::Mode::Multitrack {
             self.multitrack_ui(ui);
@@ -85,6 +132,8 @@ impl App {
         let body = Rect::from_min_max(pos2(full.left(), ruler.bottom() + 1.0), full.max);
         let lanes = Rect::from_min_max(pos2(body.left() + LEFT_W, body.top()), pos2(body.right() - RIGHT_W, body.bottom()));
 
+        let ss = self.spec_settings();
+        let wheel_base = self.wheel_base();
         let doc = &mut self.docs[di];
         let len = doc.len();
         let n_ch = doc.n_ch().max(1);
@@ -110,7 +159,7 @@ impl App {
                     amp = amp.max(hi.abs()).max(lo.abs());
                 }
                 let x = overview.left() + px as f32 + 0.5;
-                shapes.push(Shape::line_segment([pos2(x, mid - amp * h), pos2(x, mid + amp * h + 1.0)], Stroke::new(1.0_f32, OVERVIEW_WAVE)));
+                shapes.push(Shape::line_segment([pos2(x, mid - amp * h), pos2(x, mid + amp * h + 1.0)], Stroke::new(1.0_f32, OVERVIEW_WAVE())));
             }
             painter.extend(shapes);
             let ox = |s: f64| overview.left() + (s / total) as f32 * overview.width();
@@ -119,10 +168,10 @@ impl App {
             }
             let vr = Rect::from_x_y_ranges(ox(doc.view_start)..=ox(doc.view_end).max(ox(doc.view_start) + 3.0), overview.y_range());
             painter.rect_filled(vr, 0.0, Color32::from_rgba_unmultiplied(242, 194, 48, 26));
-            painter.rect_stroke(vr.shrink(0.5), 0.0, Stroke::new(1.0_f32, PLAYHEAD));
+            painter.rect_stroke(vr.shrink(0.5), 0.0, Stroke::new(1.0_f32, PLAYHEAD()));
             if st.playing && st.tag == doc.id {
                 let x = ox(st.pos);
-                painter.line_segment([pos2(x, overview.top()), pos2(x, overview.bottom())], Stroke::new(1.0_f32, PLAYHEAD));
+                painter.line_segment([pos2(x, overview.top()), pos2(x, overview.bottom())], Stroke::new(1.0_f32, PLAYHEAD()));
             }
             let resp = ui.interact(overview, ui.id().with(("overview", doc.id)), Sense::click_and_drag());
             if resp.is_pointer_button_down_on() {
@@ -143,8 +192,8 @@ impl App {
 
         // ------------------------------------------------ ruler
         painter.rect_filled(ruler, 0.0, Color32::from_rgb(0x2b, 0x2b, 0x2b));
-        painter.line_segment([pos2(ruler.left(), ruler.bottom()), pos2(ruler.right(), ruler.bottom())], Stroke::new(1.0_f32, BORDER));
-        painter.text(pos2(ruler.left() + 4.0, ruler.top() + 3.0), Align2::LEFT_TOP, "hms", FontId::proportional(11.0), TEXT_DIM);
+        painter.line_segment([pos2(ruler.left(), ruler.bottom()), pos2(ruler.right(), ruler.bottom())], Stroke::new(1.0_f32, BORDER()));
+        painter.text(pos2(ruler.left() + 4.0, ruler.top() + 3.0), Align2::LEFT_TOP, "hms", FontId::proportional(11.0), TEXT_DIM());
         {
             let px_per_s = v.width as f64 / ((v.end - v.start) / sr);
             let step = *RULER_STEPS.iter().find(|&&s| s * px_per_s >= 84.0).unwrap_or(&3600.0);
@@ -155,13 +204,13 @@ impl App {
                 let t = i as f64 * step;
                 let x = v.x(t * sr);
                 if x >= lanes.left() - 0.5 && x <= lanes.right() + 0.5 {
-                    painter.line_segment([pos2(x, ruler.bottom() - 9.0), pos2(x, ruler.bottom())], Stroke::new(1.0_f32, TEXT_DIM));
-                    painter.text(pos2(x + 3.0, ruler.top() + 3.0), Align2::LEFT_TOP, ruler_label(t, step), font.clone(), TEXT_DIM);
+                    painter.line_segment([pos2(x, ruler.bottom() - 9.0), pos2(x, ruler.bottom())], Stroke::new(1.0_f32, TEXT_DIM()));
+                    painter.text(pos2(x + 3.0, ruler.top() + 3.0), Align2::LEFT_TOP, ruler_label(t, step), font.clone(), TEXT_DIM());
                 }
                 for k in 1..5 {
                     let xm = v.x((t + step * k as f64 / 5.0) * sr);
                     if xm >= lanes.left() && xm <= lanes.right() {
-                        painter.line_segment([pos2(xm, ruler.bottom() - 4.0), pos2(xm, ruler.bottom())], Stroke::new(1.0_f32, BORDER));
+                        painter.line_segment([pos2(xm, ruler.bottom() - 4.0), pos2(xm, ruler.bottom())], Stroke::new(1.0_f32, BORDER()));
                     }
                 }
             }
@@ -197,13 +246,13 @@ impl App {
         for c in 0..n_ch {
             let r = lane_rect(wave_area, c);
             let active = doc.active_ch.get(c).copied().unwrap_or(true);
-            painter.rect_filled(r, 0.0, LANE_BG);
+            crate::theme::lane_fill(&painter, r);
             // Selection behind the waveform.
             if let Some((a, b)) = sel {
                 let x0 = v.x(a as f64).max(r.left());
                 let x1 = v.x(b as f64).min(r.right()).max(x0 + 1.0);
                 if x1 > r.left() && x0 < r.right() {
-                    painter.rect_filled(Rect::from_x_y_ranges(x0..=x1, r.y_range()), 0.0, if active { SEL_FILL } else { Color32::from_rgb(0x2c, 0x3d, 0x37) });
+                    painter.rect_filled(Rect::from_x_y_ranges(x0..=x1, r.y_range()), 0.0, if active { SEL_FILL() } else { Color32::from_rgb(0x2c, 0x3d, 0x37) });
                 }
             }
             draw_grid(&painter, r, doc.amp_zoom);
@@ -224,8 +273,8 @@ impl App {
             let tr = Rect::from_min_size(pos2(body.right() - 17.0, r.center().y - 9.0), vec2(15.0, 18.0));
             let tresp = ui.interact(tr, ui.id().with(("chan", doc.id, c)), Sense::click());
             painter.rect_filled(tr, 2.0, if active { Color32::from_rgb(0x5a, 0x5a, 0x5a) } else { Color32::from_rgb(0x2c, 0x2c, 0x2c) });
-            painter.rect_stroke(tr, 2.0, Stroke::new(1.0_f32, BORDER));
-            painter.text(tr.center(), Align2::CENTER_CENTER, label, bold(11.0), if active { Color32::WHITE } else { TEXT_DIM });
+            painter.rect_stroke(tr, 2.0, Stroke::new(1.0_f32, BORDER()));
+            painter.text(tr.center(), Align2::CENTER_CENTER, label, bold(11.0), if active { Color32::WHITE } else { TEXT_DIM() });
             let tresp = tresp.on_hover_text("Enable / disable this channel for editing");
             if tresp.clicked() && c < doc.active_ch.len() {
                 doc.active_ch[c] = !doc.active_ch[c];
@@ -244,16 +293,22 @@ impl App {
             for c in 0..n_ch {
                 let r = lane_rect(area, c);
                 let cols = (r.width() as usize).clamp(16, 2400);
-                let key = (doc.version, v.start as i64, v.end as i64, cols);
+                let key = (doc.version, v.start as i64, v.end as i64, cols, (ss.fft, ss.window as u8, ss.range_db as i32, ss.log));
                 let stale = doc.spec[c].as_ref().map(|t| t.key != key).unwrap_or(true);
                 if stale {
-                    let bins = SPEC_FFT / 2;
-                    let data = spectrogram_range(&doc.audio[c], v.start, v.end, cols, SPEC_FFT);
+                    let bins = ss.fft / 2;
+                    let data = spectrogram_range(&doc.audio[c], v.start, v.end, cols, ss.fft, ss.window);
                     let mut rgba = vec![0u8; cols * bins * 4];
+                    // Texture rows top to bottom, each showing the bin at its frequency.
+                    let row_bin: Vec<usize> = (0..bins)
+                        .map(|row| {
+                            let frac = 1.0 - (row as f32 + 0.5) / bins as f32;
+                            ((frac_f(frac, nyq as f32) / nyq as f32 * bins as f32) as usize).min(bins - 1)
+                        })
+                        .collect();
                     for x in 0..cols {
-                        for b in 0..bins {
-                            let col = heat_colour(data[x * bins + b], -115.0);
-                            let row = bins - 1 - b;
+                        for (row, &b) in row_bin.iter().enumerate() {
+                            let col = heat_colour(data[x * bins + b], -ss.range_db);
                             let i = (row * cols + x) * 4;
                             rgba[i] = col[0];
                             rgba[i + 1] = col[1];
@@ -276,19 +331,27 @@ impl App {
                     }
                 }
                 // Frequency ruler (kHz).
-                let step_hz = [500.0, 1000.0, 2000.0, 5000.0, 10000.0]
-                    .into_iter()
-                    .find(|s| r.height() as f64 * s / nyq >= 22.0)
-                    .unwrap_or(10000.0);
-                let mut f = step_hz;
-                while f < nyq {
-                    let y = r.bottom() - (f / nyq) as f32 * r.height();
-                    painter.line_segment([pos2(lanes.right(), y), pos2(lanes.right() + 5.0, y)], Stroke::new(1.0_f32, TEXT_DIM));
+                let ticks: Vec<f64> = if ss.log {
+                    [50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0].into_iter().filter(|f| *f < nyq).collect()
+                } else {
+                    let step_hz = [500.0, 1000.0, 2000.0, 5000.0, 10000.0]
+                        .into_iter()
+                        .find(|s| r.height() as f64 * s / nyq >= 22.0)
+                        .unwrap_or(10000.0);
+                    (1..).map(|k| k as f64 * step_hz).take_while(|f| *f < nyq).collect()
+                };
+                let mut last_y = f32::MAX;
+                for f in ticks {
+                    let y = r.bottom() - f_frac(f as f32, nyq as f32) * r.height();
+                    if last_y - y < 14.0 {
+                        continue;
+                    }
+                    last_y = y;
+                    painter.line_segment([pos2(lanes.right(), y), pos2(lanes.right() + 5.0, y)], Stroke::new(1.0_f32, TEXT_DIM()));
                     let label = if f >= 1000.0 { format!("{}k", f / 1000.0) } else { format!("{f}") };
-                    painter.text(pos2(lanes.right() + 8.0, y), Align2::LEFT_CENTER, label, FontId::monospace(9.5), TEXT_DIM);
-                    f += step_hz;
+                    painter.text(pos2(lanes.right() + 8.0, y), Align2::LEFT_CENTER, label, FontId::monospace(9.5), TEXT_DIM());
                 }
-                painter.text(pos2(lanes.right() + 8.0, r.top() + 6.0), Align2::LEFT_CENTER, "Hz", FontId::monospace(9.5), TEXT_DIM);
+                painter.text(pos2(lanes.right() + 8.0, r.top() + 6.0), Align2::LEFT_CENTER, "Hz", FontId::monospace(9.5), TEXT_DIM());
             }
         }
 
@@ -304,7 +367,7 @@ impl App {
                 for c in 0..n_ch {
                     let r = lane_rect(wave_area, c);
                     if x1 > x0 {
-                        painter.rect_filled(Rect::from_x_y_ranges(x0..=x1, r.y_range()), 0.0, LANE_BG);
+                        painter.rect_filled(Rect::from_x_y_ranges(x0..=x1, r.y_range()), 0.0, LANE_BG());
                     }
                     draw_grid(&painter, Rect::from_x_y_ranges(x0..=x1.max(x0), r.y_range()), doc.amp_zoom);
                 }
@@ -331,7 +394,7 @@ impl App {
                                     let ib = (f1.ceil() as usize).min(frames).max(ia + 1);
                                     let (lo, hi) = rv.min_max(c, ia, ib);
                                     let (y0, y1) = (y(hi), y(lo));
-                                    shapes.push(Shape::line_segment([pos2(x + 0.5, y0), pos2(x + 0.5, y1.max(y0 + 1.0))], Stroke::new(1.0_f32, WAVE)));
+                                    shapes.push(Shape::line_segment([pos2(x + 0.5, y0), pos2(x + 0.5, y1.max(y0 + 1.0))], Stroke::new(1.0_f32, WAVE())));
                                 }
                                 x += 1.0;
                             }
@@ -342,7 +405,7 @@ impl App {
                             let fb = (((v.end - a) * ratio).ceil() as usize + 1).min(frames);
                             if fb > fa + 1 {
                                 let pts: Vec<Pos2> = (fa..fb).map(|i| pos2(v.x(a + i as f64 / ratio), y(ch[i]))).collect();
-                                shapes.push(Shape::line(pts, Stroke::new(1.3_f32, WAVE)));
+                                shapes.push(Shape::line(pts, Stroke::new(1.3_f32, WAVE())));
                             }
                         }
                     }
@@ -350,8 +413,8 @@ impl App {
                 }
                 let hx = v.x(head);
                 if hx >= lanes.left() && hx <= lanes.right() {
-                    painter.line_segment([pos2(hx, ruler.top()), pos2(hx, lanes.bottom())], Stroke::new(1.5_f32, RECORD));
-                    painter.add(Shape::convex_polygon(vec![pos2(hx - 6.0, ruler.top()), pos2(hx + 6.0, ruler.top()), pos2(hx, ruler.top() + 9.0)], RECORD, Stroke::NONE));
+                    painter.line_segment([pos2(hx, ruler.top()), pos2(hx, lanes.bottom())], Stroke::new(1.5_f32, RECORD()));
+                    painter.add(Shape::convex_polygon(vec![pos2(hx - 6.0, ruler.top()), pos2(hx + 6.0, ruler.top()), pos2(hx, ruler.top() + 9.0)], RECORD(), Stroke::NONE));
                 }
             }
         }
@@ -363,9 +426,9 @@ impl App {
                 continue;
             }
             let pts = [pos2(x, lanes.top()), pos2(x, lanes.bottom())];
-            painter.extend(Shape::dashed_line(&pts, Stroke::new(1.0_f32, MARKER), 4.0, 3.0));
+            painter.extend(Shape::dashed_line(&pts, Stroke::new(1.0_f32, MARKER()), 4.0, 3.0));
             let flag = Rect::from_min_size(pos2(x, ruler.bottom() - 11.0), vec2(9.0, 10.0));
-            painter.add(Shape::convex_polygon(vec![flag.left_top(), flag.right_top(), pos2(flag.right(), flag.bottom() - 3.0), flag.left_bottom()], MARKER, Stroke::NONE));
+            painter.add(Shape::convex_polygon(vec![flag.left_top(), flag.right_top(), pos2(flag.right(), flag.bottom() - 3.0), flag.left_bottom()], MARKER(), Stroke::NONE));
             let fr = ui.interact(flag.expand(2.0), ui.id().with(("marker", doc.id, mi)), Sense::click());
             if fr.clicked() {
                 self.actions.push(Action::SetCursor(m.pos));
@@ -374,14 +437,14 @@ impl App {
         }
         let cx = v.x(doc.cursor as f64);
         if cx >= lanes.left() && cx <= lanes.right() {
-            painter.line_segment([pos2(cx, lanes.top()), pos2(cx, lanes.bottom())], Stroke::new(1.0_f32, CURSOR));
-            painter.add(Shape::convex_polygon(vec![pos2(cx - 5.0, ruler.top()), pos2(cx + 5.0, ruler.top()), pos2(cx, ruler.top() + 7.0)], CURSOR, Stroke::NONE));
+            painter.line_segment([pos2(cx, lanes.top()), pos2(cx, lanes.bottom())], Stroke::new(1.0_f32, CURSOR()));
+            painter.add(Shape::convex_polygon(vec![pos2(cx - 5.0, ruler.top()), pos2(cx + 5.0, ruler.top()), pos2(cx, ruler.top() + 7.0)], CURSOR(), Stroke::NONE));
         }
         if st.playing && st.tag == doc.id {
             let px = v.x(st.pos);
             if px >= lanes.left() && px <= lanes.right() {
-                painter.line_segment([pos2(px, ruler.top()), pos2(px, lanes.bottom())], Stroke::new(1.5_f32, PLAYHEAD));
-                painter.add(Shape::convex_polygon(vec![pos2(px - 6.0, ruler.top()), pos2(px + 6.0, ruler.top()), pos2(px, ruler.top() + 9.0)], PLAYHEAD, Stroke::NONE));
+                painter.line_segment([pos2(px, ruler.top()), pos2(px, lanes.bottom())], Stroke::new(1.5_f32, PLAYHEAD()));
+                painter.add(Shape::convex_polygon(vec![pos2(px - 6.0, ruler.top()), pos2(px + 6.0, ruler.top()), pos2(px, ruler.top() + 9.0)], PLAYHEAD(), Stroke::NONE));
             }
         }
 
@@ -394,7 +457,7 @@ impl App {
         // ------------------------------------------------ spectral tools
         let nyq = (sr / 2.0) as f32;
         let spec_lane_at = |p: Pos2| -> Option<Rect> { spec_area.and_then(|area| (0..n_ch).map(|c| lane_rect(area, c)).find(|r| r.contains(p))) };
-        let to_tf = |p: Pos2, r: Rect| -> (f64, f32) { (v.s(p.x).clamp(0.0, len as f64), ((r.bottom() - p.y) / r.height()).clamp(0.0, 1.0) * nyq) };
+        let to_tf = |p: Pos2, r: Rect| -> (f64, f32) { (v.s(p.x).clamp(0.0, len as f64), frac_f((r.bottom() - p.y) / r.height(), nyq)) };
         let origin = ui.input(|i| i.pointer.press_origin());
         let hover = ui.input(|i| i.pointer.hover_pos());
         let spectral_tool = tool.spectral() && !middle && spec_area.is_some();
@@ -418,7 +481,7 @@ impl App {
                         }
                         _ => {
                             // Add a point once the pointer has moved a couple of pixels.
-                            let far = pts.last().map(|q| (v.x(q.0) - p.x).abs() + ((q.1 - tf.1) / nyq * r.height()).abs() > 2.0).unwrap_or(true);
+                            let far = pts.last().map(|q| (v.x(q.0) - p.x).abs() + ((f_frac(q.1, nyq) - f_frac(tf.1, nyq)) * r.height()).abs() > 2.0).unwrap_or(true);
                             if far {
                                 pts.push(tf);
                             }
@@ -585,7 +648,7 @@ impl App {
                     doc.view_end += shift;
                     doc.clamp_view();
                 } else {
-                    let f = 0.85f64.powf(scroll.y as f64 / 40.0);
+                    let f = wheel_base.powf(scroll.y as f64 / 40.0);
                     let anchor = hover.map(|h| v.s(h.x)).unwrap_or((v.start + v.end) / 2.0);
                     doc.zoom(f, anchor);
                 }
@@ -610,7 +673,7 @@ impl App {
             let hr = Rect::from_center_size(pos2(hx, top_lane.top() + 9.0), vec2(11.0, 11.0));
             let hresp = ui.interact(hr.expand(3.0), ui.id().with(("fade", doc.id, fade_in)), Sense::drag());
             let hot = hresp.hovered() || hresp.dragged();
-            painter.rect_filled(hr, 2.0, if hot { ACCENT } else { Color32::from_rgb(0x9a, 0xa3, 0xb0) });
+            painter.rect_filled(hr, 2.0, if hot { ACCENT() } else { Color32::from_rgb(0x9a, 0xa3, 0xb0) });
             painter.rect_stroke(hr, 2.0, Stroke::new(1.0_f32, Color32::from_rgb(0x20, 0x24, 0x2a)));
             if hot {
                 ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
@@ -650,7 +713,7 @@ impl App {
                                 pos2(v.x(a + (b - a) * t as f64), r.bottom() - g * r.height())
                             })
                             .collect();
-                        painter.add(Shape::line(pts, Stroke::new(1.5_f32, ACCENT)));
+                        painter.add(Shape::line(pts, Stroke::new(1.5_f32, ACCENT())));
                     }
                     let shape = if cosine {
                         "Cosine".to_string()
@@ -679,7 +742,7 @@ impl App {
             painter.circle_filled(c, 7.0, Color32::from_rgb(0x26, 0x26, 0x26));
             painter.circle_stroke(c, 7.0, Stroke::new(1.0_f32, Color32::from_rgb(0x70, 0x70, 0x70)));
             let angle = -std::f32::consts::FRAC_PI_2 + self.hud_gain / 40.0 * 2.4;
-            painter.line_segment([c, c + vec2(angle.cos(), angle.sin()) * 6.0], Stroke::new(1.5_f32, HOT));
+            painter.line_segment([c, c + vec2(angle.cos(), angle.sin()) * 6.0], Stroke::new(1.5_f32, HOT()));
             let dv_rect = Rect::from_min_max(pos2(hud.left() + 24.0, hud.top() + 2.0), pos2(hud.right() - 4.0, hud.bottom() - 2.0));
             let sign = if self.hud_gain >= 0.0 { "+" } else { "" };
             let r = ui
@@ -696,7 +759,7 @@ impl App {
 
         // Channel separator line between waveform and spectral views.
         if let Some(area) = spec_area {
-            painter.line_segment([pos2(body.left(), area.top() - 2.0), pos2(body.right(), area.top() - 2.0)], Stroke::new(1.0_f32, BORDER));
+            painter.line_segment([pos2(body.left(), area.top() - 2.0), pos2(body.right(), area.top() - 2.0)], Stroke::new(1.0_f32, BORDER()));
         }
     }
 
@@ -705,17 +768,17 @@ impl App {
         let mut close = false;
         let rect = ui.available_rect_before_wrap();
         let header = Rect::from_min_size(rect.min, vec2(rect.width(), 24.0));
-        ui.painter().rect_filled(header, 0.0, BG_HEADER);
+        ui.painter().rect_filled(header, 0.0, BG_HEADER());
         ui.allocate_ui_at_rect(header, |ui| {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 let name = self.doc().map(|d| d.display_name()).unwrap_or_default();
                 let title = if name.is_empty() { "Editor".to_string() } else { format!("Editor: {name}") };
-                let (r, _) = ui.allocate_exact_size(vec2(ui.fonts(|f| f.layout_no_wrap(title.clone(), bold(12.0), TEXT).size().x) + 16.0, 22.0), Sense::hover());
-                ui.painter().rect_filled(Rect::from_min_max(pos2(r.left(), r.top() + 1.0), pos2(r.right(), header.bottom())), Rounding { nw: 3.0, ne: 3.0, sw: 0.0, se: 0.0 }, BG_PANEL);
+                let (r, _) = ui.allocate_exact_size(vec2(ui.fonts(|f| f.layout_no_wrap(title.clone(), bold(12.0), TEXT()).size().x) + 16.0, 22.0), Sense::hover());
+                ui.painter().rect_filled(Rect::from_min_max(pos2(r.left(), r.top() + 1.0), pos2(r.right(), header.bottom())), Rounding { nw: 3.0, ne: 3.0, sw: 0.0, se: 0.0 }, BG_PANEL());
                 ui.painter().text(r.center(), Align2::CENTER_CENTER, &title, bold(12.0), Color32::WHITE);
                 if !self.docs.is_empty() {
-                    ui.menu_button(RichText::new("▾").color(TEXT), |ui| {
+                    ui.menu_button(RichText::new("▾").color(TEXT()), |ui| {
                         for (i, d) in self.docs.iter().enumerate() {
                             if ui.selectable_label(Some(i) == self.active, d.display_name()).clicked() {
                                 switch = Some(i);
@@ -770,7 +833,7 @@ fn build_spec_shape(tool: Tool, pts: Vec<(f64, f32)>, rt: f64, rf: f32) -> Optio
 
 /// Draw a spectral selection on one channel's spectral display.
 fn draw_spec_shape(p: &egui::Painter, shape: &SpecShape, r: Rect, v: &View, nyq: f32, col: Color32) {
-    let y = |f: f32| r.bottom() - (f / nyq).clamp(0.0, 1.0) * r.height();
+    let y = |f: f32| r.bottom() - f_frac(f, nyq) * r.height();
     let fill = col.linear_multiply(0.22);
     let stroke = Stroke::new(1.0_f32, col);
     match shape {
@@ -791,7 +854,7 @@ fn draw_spec_shape(p: &egui::Painter, shape: &SpecShape, r: Rect, v: &View, nyq:
                 let t = v.s(x + cell / 2.0);
                 let mut yy = r.top();
                 while yy < r.bottom() {
-                    let f = (r.bottom() - (yy + cell / 2.0)) / r.height() * nyq;
+                    let f = frac_f((r.bottom() - (yy + cell / 2.0)) / r.height(), nyq);
                     if shape.contains(t, f) {
                         cells.push(Shape::rect_filled(Rect::from_min_size(pos2(x, yy), vec2(cell, cell)), 0.0, fill));
                     }
@@ -814,7 +877,7 @@ fn draw_spec_shape(p: &egui::Painter, shape: &SpecShape, r: Rect, v: &View, nyq:
 fn draw_grid(p: &egui::Painter, r: Rect, amp_zoom: f32) {
     let mid = r.center().y;
     let half = r.height() * 0.5 - 1.0;
-    p.line_segment([pos2(r.left(), mid), pos2(r.right(), mid)], Stroke::new(1.0_f32, LANE_GRID));
+    p.line_segment([pos2(r.left(), mid), pos2(r.right(), mid)], Stroke::new(1.0_f32, LANE_GRID()));
     for lin in [0.5f32, 0.25] {
         let dy = lin * half * amp_zoom;
         if dy < half {
@@ -839,7 +902,7 @@ fn draw_wave(
 ) {
     let mid = r.center().y;
     let amp = (r.height() * 0.5 - 1.0) * amp_zoom;
-    let (col, col_sel) = if active { (WAVE, WAVE_SEL) } else { (WAVE_DIM, WAVE_DIM) };
+    let (col, col_sel) = if active { (WAVE(), WAVE_SEL()) } else { (WAVE_DIM(), WAVE_DIM()) };
     let len = ch.len();
     if len == 0 {
         return;
@@ -921,11 +984,11 @@ fn draw_amp_ruler(p: &egui::Painter, r: Rect, x: f32, amp_zoom: f32) {
             continue;
         }
         last_y = y;
-        p.line_segment([pos2(x, y), pos2(x + 4.0, y)], Stroke::new(1.0_f32, TEXT_DIM));
-        p.text(pos2(x + 7.0, y), Align2::LEFT_CENTER, format!("{db:.0}"), font.clone(), TEXT_DIM);
+        p.line_segment([pos2(x, y), pos2(x + 4.0, y)], Stroke::new(1.0_f32, TEXT_DIM()));
+        p.text(pos2(x + 7.0, y), Align2::LEFT_CENTER, format!("{db:.0}"), font.clone(), TEXT_DIM());
         let y2 = mid + dy;
-        p.line_segment([pos2(x, y2), pos2(x + 4.0, y2)], Stroke::new(1.0_f32, BORDER));
+        p.line_segment([pos2(x, y2), pos2(x + 4.0, y2)], Stroke::new(1.0_f32, BORDER()));
     }
-    p.text(pos2(x + 7.0, mid), Align2::LEFT_CENTER, "-∞", font.clone(), TEXT_DIM);
-    p.text(pos2(x + 7.0, r.top() + 6.0), Align2::LEFT_CENTER, "dB", font, TEXT_DIM);
+    p.text(pos2(x + 7.0, mid), Align2::LEFT_CENTER, "-∞", font.clone(), TEXT_DIM());
+    p.text(pos2(x + 7.0, r.top() + 6.0), Align2::LEFT_CENTER, "dB", font, TEXT_DIM());
 }

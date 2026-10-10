@@ -27,7 +27,7 @@ The interface uses Adobe's open-source Source Sans 3 and Source Code Pro typefac
 - **Markers** (M), with rename, jump and delete in the Markers panel.
 - **Playback** through the system output (WASAPI, CoreAudio, ALSA/PulseAudio/PipeWire), looping, monitor volume, peak meters with hold and clip indicator.
 - **Recording** (Shift+Space) with the waveform drawn live as it records; Stop or Space ends it. Records into the selection or at the cursor, or into a new file if none is open.
-- **Audio Hardware preferences** (Edit > Preferences) for choosing input and output devices; remembered between sessions along with recent files.
+- **Preferences** (Edit > Preferences, Ctrl+, / ⌘,) with Audition's 17 pages: General (startup, tool tips, zoom factors, auto-scroll), Appearance (presets, element colours with hue/saturation, brightness from darkest to light, gradients, interface scale), Audio Channel Mapping (which device channels Audemo's L/R play and record on), Audio Hardware (device class/audio API, input and output devices, I/O buffer size, sample rate, force hardware to the file's sample rate, system audio settings), Auto Save (timed backups of sessions and edited files, how many to keep, where), Data (dither default, smoothing delete/cut and paste boundaries, sample rate conversion quality), Effects (open plug-in windows automatically, scan at startup), Markers & Metadata, Memory (installed RAM, undo levels), Multitrack (pan mode: L/R cut or equal power; recording latency), Multitrack Clips (automatic crossfades and their curve, default clip fades, clip names), Playback and Recording (return playhead on stop, follow, pre-roll/post-roll for View > Play with Pre-roll and Post-roll, Alt+Space), Spectral Displays (window function, resolution, decibel range, logarithmic frequency scale) and Time Display (decimal, CD 75 fps, SMPTE 30/29.97 drop/29.97/25/24, samples, bars and beats, custom fps). Control Surface, Media & Disk Cache and Video are there too, saying what Audemo does instead.
 - **Real-time Effects Rack**: chain up to 16 effects with power switches, reordering, input/output gain and dry/wet mix. With the rack's master power on, normal playback (Space, looping, seeking) is heard through the chain as you adjust it; Apply renders it into the file.
 - **Analysis**: Frequency Analysis (live FFT at the playhead, 1k–32k sizes, scan-selection average, hover readout), Phase Meter (goniometer and correlation), and Window > Amplitude Statistics (peak, true peak, RMS, clipping, DC offset, integrated loudness and loudness range).
 - **Match Loudness** panel: measure integrated loudness (ITU-R BS.1770 / EBU R128), true peak and LRA for open files and match them to EBU R128, ATSC A/85, podcast or streaming targets in one run.
@@ -161,7 +161,9 @@ src/
   dsp/effects/rt.rs  streaming versions of 24 effects for track, bus and master racks
   session.rs     multitrack sessions: tracks, clips, mixing, undo, .audemo files
   mt_ui.rs       Multitrack editor, Mixer, recording to tracks, mixdown
-  prefs.rs       saved preferences (audio devices, recent files)
+  prefs.rs       saved preferences (every setting, key=value file)
+  prefs_ui.rs    the Preferences window
+  autosave.rs    timed backups (Preferences > Auto Save)
   dialogs.rs     effect windows (presets, preview, EQ curve) and other dialogs
   engine.rs      cpal playback and recording
   io.rs          symphonia decoding, tags, markers, MP4 edit lists

@@ -3,6 +3,14 @@
 use std::f64::consts::PI;
 
 /// Resample `x` by `ratio` = output_rate / input_rate.
+/// Sinc kernel half-width in input samples (Preferences > Data > Sample
+/// Rate Conversion quality): 8 low, 16 medium, 32 high.
+static HALF_WIDTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(32);
+
+pub fn set_quality(half_width: u32) {
+    HALF_WIDTH.store(half_width.clamp(4, 64), std::sync::atomic::Ordering::Relaxed);
+}
+
 pub fn resample(x: &[f32], ratio: f64) -> Vec<f32> {
     if x.is_empty() {
         return Vec::new();
@@ -14,7 +22,7 @@ pub fn resample(x: &[f32], ratio: f64) -> Vec<f32> {
     let step = 1.0 / ratio;
     // Anti-alias cutoff relative to the input Nyquist.
     let cutoff = ratio.min(1.0) * 0.94;
-    let half = (16.0 / cutoff).ceil() as i64;
+    let half = (HALF_WIDTH.load(std::sync::atomic::Ordering::Relaxed) as f64 / cutoff).ceil() as i64;
     let n = x.len() as i64;
     let mut out = Vec::with_capacity(out_len);
     for i in 0..out_len {

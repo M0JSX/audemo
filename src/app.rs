@@ -18,7 +18,31 @@ use crate::export::{self, Container, ExportSettings};
 use crate::io;
 use crate::prefs::Prefs;
 
-pub const MAX_UNDO: usize = 60;
+static UNDO_LEVELS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(60);
+
+/// Undo steps kept per file and per session (Preferences > Memory).
+pub fn undo_levels() -> usize {
+    UNDO_LEVELS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The time display format of `p` (Preferences > Time Display).
+pub fn time_style_for(p: &Prefs) -> crate::dsp::util::TimeStyle {
+    use crate::dsp::util::TimeStyle as T;
+    use crate::prefs::TimeFormat as F;
+    let frames = |fps: f64, nominal: u32, drop: bool| T::Frames { fps, nominal, drop, hours: true };
+    match p.time_format {
+        F::Decimal => T::Decimal,
+        F::Cd75 => T::Frames { fps: 75.0, nominal: 75, drop: false, hours: false },
+        F::Smpte30 => frames(30.0, 30, false),
+        F::Smpte2997Drop => frames(30000.0 / 1001.0, 30, true),
+        F::Smpte2997 => frames(30000.0 / 1001.0, 30, false),
+        F::Smpte25 => frames(25.0, 25, false),
+        F::Smpte24 => frames(24.0, 24, false),
+        F::Samples => T::Samples,
+        F::BarsBeats => T::Bars { tempo: p.tempo as f64, per_bar: p.beats_per_bar },
+        F::Custom => frames(p.custom_fps as f64, p.custom_fps.round().max(1.0) as u32, false),
+    }
+}
 pub const SAMPLE_RATES: [u32; 10] = [8000, 11025, 16000, 22050, 32000, 44100, 48000, 88200, 96000, 192000];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -39,7 +63,8 @@ pub struct Snapshot {
 }
 
 pub struct SpecTex {
-    pub key: (u64, i64, i64, usize),
+    /// (version, view start, view end, columns, (fft, window, dB range, log)).
+    pub key: (u64, i64, i64, usize, (usize, u8, i32, bool)),
     pub tex: egui::TextureHandle,
 }
 
@@ -188,7 +213,7 @@ impl Document {
 
     pub fn push_undo(&mut self, label: &str) {
         self.undo.push(self.snapshot(label.to_string()));
-        if self.undo.len() > MAX_UNDO {
+        if self.undo.len() > undo_levels() {
             self.undo.remove(0);
         }
         self.redo.clear();
@@ -453,7 +478,7 @@ pub enum Dialog {
     /// New Audio File; `then_record` starts recording into it on OK.
     NewFile { name: String, rate: u32, channels: usize, bits: Option<u32>, seconds: f32, then_record: bool },
     Export { settings: ExportSettings, path: Option<PathBuf>, selection: bool },
-    Preferences { input: Option<String>, output: Option<String>, inputs: Vec<String>, outputs: Vec<String>, latency_ms: f32 },
+    Preferences(Box<crate::prefs_ui::PrefsDialog>),
     MixPaste { mode: usize, clip_db: f32, orig_db: f32 },
     Convert { rate: u32, channels: usize },
     Shortcuts,
@@ -550,6 +575,9 @@ pub enum Action {
     OpenAppend,
     OpenRecent(PathBuf),
     Preferences,
+    PreferencesPage(crate::prefs_ui::Page),
+    /// Play the selection (or from the cursor) with pre-roll and post-roll.
+    PlayWithRoll,
     ApplyRack,
     Audition(PathBuf),
     Pause,
@@ -605,6 +633,8 @@ pub struct App {
     pub dialog: Option<Dialog>,
     pub job: Option<Job>,
     pub saving: Option<SaveJob>,
+    /// Timed backups (Preferences > Auto Save).
+    pub autosave: crate::autosave::AutoSave,
     /// A plug-in scan in progress.
     pub plugin_scan: Option<Arc<std::sync::Mutex<crate::plugin::ScanProgress>>>,
     /// Bumped whenever the effect list changes (plug-ins rescanned).
@@ -675,7 +705,7 @@ impl App {
         let wake = cc.egui_ctx.clone();
         crate::plugin::init_main_thread(move || wake.request_repaint());
         let prefs = Prefs::load();
-        let engine = Engine::new(prefs.output_device.clone(), prefs.input_device.clone());
+        let engine = Engine::new(prefs.audio_config());
         let browser_dir = prefs
             .browser_dir
             .clone()
@@ -697,6 +727,7 @@ impl App {
             dialog: None,
             job: None,
             saving: None,
+            autosave: crate::autosave::AutoSave::default(),
             plugin_scan: None,
             effects_gen: 0,
             plugin_filter: String::new(),
@@ -751,15 +782,97 @@ impl App {
             active_session: None,
             mt: Default::default(),
         };
-        if !open.is_empty() {
+        let opened_files = !open.is_empty();
+        if opened_files {
             app.actions.push(Action::OpenPaths(open));
         }
-        if crate::plugin::needs_first_scan() {
+        app.apply_runtime_prefs(&cc.egui_ctx);
+        app.follow = app.prefs.follow;
+        app.rack_entire = app.prefs.rack_entire;
+        if crate::plugin::needs_first_scan() || app.prefs.scan_at_startup {
             app.plugin_scan = Some(crate::plugin::start_scan(false));
+        }
+        if !opened_files && app.prefs.startup == crate::prefs::Startup::MostRecent {
+            if let Some(p) = app.prefs.recent.iter().find(|p| p.is_file()).cloned() {
+                app.actions.push(Action::OpenPaths(vec![p]));
+            }
         }
         #[cfg(any(target_os = "macos", audemo_check_menu))]
         app.init_native_menu();
         app
+    }
+
+    /// Push settings that live outside `App` (palette, time format, mixing
+    /// rules …) from the preferences. Called at start-up and after OK.
+    pub fn apply_runtime_prefs(&mut self, ctx: &egui::Context) {
+        let p = &self.prefs;
+        crate::theme::set_look(ctx, p);
+        crate::dsp::util::set_time_style(time_style_for(p));
+        crate::dsp::resample::set_quality(match p.src_quality {
+            crate::prefs::SrcQuality::Low => 8,
+            crate::prefs::SrcQuality::Medium => 16,
+            crate::prefs::SrcQuality::High => 32,
+        });
+        crate::editor::set_spec_log(p.spec_log);
+        crate::session::set_mix_prefs(p.pan_law == crate::prefs::PanLaw::EqualPower, p.auto_crossfade, p.crossfade_curve == crate::prefs::FadeCurve::EqualPower, p.clip_fade_ms);
+        crate::export::set_write_encoder(p.write_encoder);
+        UNDO_LEVELS.store(p.undo_levels as usize, std::sync::atomic::Ordering::Relaxed);
+        // Mix settings changed: rebuild the live mix of a playing session.
+        for s in self.sessions.iter_mut() {
+            s.version += 1;
+        }
+    }
+
+    /// OK in Preferences: keep the new settings and apply what changed.
+    pub fn apply_prefs(&mut self, ctx: &egui::Context, new: Prefs) {
+        let old = std::mem::replace(&mut self.prefs, new);
+        self.prefs.save();
+        self.apply_runtime_prefs(ctx);
+        if old.follow != self.prefs.follow {
+            self.follow = self.prefs.follow;
+        }
+        if old.rack_entire != self.prefs.rack_entire {
+            self.rack_entire = self.prefs.rack_entire;
+        }
+        if old.autosave_minutes != self.prefs.autosave_minutes || old.autosave != self.prefs.autosave {
+            self.autosave.reset();
+        }
+        let (a, b) = (old.audio_config(), self.prefs.audio_config());
+        if a != b {
+            if self.engine.is_recording() && (a.host != b.host || a.input != b.input || a.in_map != b.in_map) {
+                self.stop_recording();
+            }
+            match self.engine.set_config(b) {
+                Ok(()) => self.set_status(format!("Audio: {} via {} at {} Hz", self.engine.device_name, self.engine.host_name, self.engine.out_rate)),
+                Err(e) => self.dialog = Some(Dialog::Message { title: "Audio hardware".into(), text: format!("{e}\n\nCheck Edit > Preferences > Audio Hardware.") }),
+            }
+        }
+        if old.force_doc_rate && !self.prefs.force_doc_rate {
+            self.engine.set_rate_override(None);
+        }
+    }
+
+    /// With "force hardware to document sample rate", run the output at
+    /// the rate of the file about to play.
+    pub fn prepare_output_rate(&mut self, rate: u32) {
+        if self.prefs.force_doc_rate && !self.engine.is_recording() {
+            self.engine.set_rate_override(Some(rate));
+        }
+    }
+
+    /// View span multiplier for one Zoom In / Zoom Out (Preferences > General).
+    pub fn zoom_step(&self, zoom_in: bool) -> f64 {
+        let k = (1.0 - self.prefs.zoom_factor as f64 / 100.0).clamp(0.1, 0.9);
+        if zoom_in {
+            k
+        } else {
+            1.0 / k
+        }
+    }
+
+    /// Span multiplier per 40 units of mouse wheel (Preferences > General).
+    pub fn wheel_base(&self) -> f64 {
+        (1.0 - 0.3 * self.prefs.wheel_zoom as f64 / 100.0).clamp(0.5, 0.995)
     }
 
     /// Built-in effects followed by the enabled plug-ins.
@@ -903,6 +1016,7 @@ impl App {
         self.poll_loads();
         self.poll_job();
         self.poll_save();
+        self.autosave_tick();
         self.handle_dropped_files(ctx);
         self.handle_shortcuts(ctx);
         self.update_meters(ctx);
@@ -978,6 +1092,7 @@ impl App {
             if i.consume_shortcut(&KS::new(cmd, Key::O)) { acts.push(Action::Open); }
             if i.consume_shortcut(&KS::new(cmd, Key::S)) { acts.push(Action::Save); }
             if i.consume_shortcut(&KS::new(cmd, Key::Q)) { acts.push(Action::Quit); }
+            if i.consume_shortcut(&KS::new(cmd, Key::Comma)) { acts.push(Action::Preferences); }
         });
         let typing = ctx.wants_keyboard_input();
         let modal = matches!(self.dialog, Some(ref d) if !matches!(d, Dialog::Effect(_)));
@@ -1004,6 +1119,7 @@ impl App {
                 if i.consume_key(M::NONE, Key::Num9) { acts.push(Action::SetMode(Mode::Waveform)); }
                 if i.consume_key(M::NONE, Key::Num0) { acts.push(Action::SetMode(Mode::Multitrack)); }
                 if i.consume_shortcut(&KS::new(cmd, Key::W)) { acts.push(Action::Close(usize::MAX)); }
+                if i.consume_key(M::ALT, Key::Space) { acts.push(Action::PlayWithRoll); }
                 if i.consume_key(M::SHIFT, Key::Space) { acts.push(Action::Record); }
                 if i.consume_key(M::SHIFT, Key::P) { acts.push(Action::CaptureNoise); }
                 if i.consume_key(M::SHIFT, Key::D) { acts.push(Action::Status("__toggle_spectral".into())); }
@@ -1082,6 +1198,7 @@ impl App {
     }
 
     fn follow_playhead(&mut self) {
+        let centered = self.prefs.autoscroll == crate::prefs::AutoScroll::Centered;
         let st = self.engine.status();
         if !self.follow || !st.playing {
             return;
@@ -1091,7 +1208,14 @@ impl App {
                 return;
             }
             let span = d.view_end - d.view_start;
-            if st.pos > d.view_end || st.pos < d.view_start {
+            if centered {
+                // Keep the playhead in the middle once it gets there.
+                if st.pos > d.view_start + span / 2.0 || st.pos < d.view_start {
+                    d.view_start = st.pos - span / 2.0;
+                    d.view_end = d.view_start + span;
+                    d.clamp_view();
+                }
+            } else if st.pos > d.view_end || st.pos < d.view_start {
                 d.view_start = st.pos - span * 0.02;
                 d.view_end = d.view_start + span;
                 d.clamp_view();
@@ -1577,11 +1701,16 @@ impl App {
             self.engine.stop();
             let pos = self.engine.status().pos.round().max(0.0) as usize;
             self.paused = None;
+            // Preferences: "Return CTI to start position on stop".
+            let pos = if self.prefs.return_to_start { self.play_origin } else { pos };
             if let Some(d) = self.doc_mut() {
                 d.cursor = pos.min(d.len());
             }
             return;
         }
+        let rate = doc.sample_rate;
+        self.prepare_output_rate(rate);
+        let Some(doc) = self.doc() else { return };
         let len = doc.len();
         if let Some((pid, pos)) = self.paused {
             if pid == doc.id {
@@ -1613,6 +1742,27 @@ impl App {
         if start != loop_start {
             self.engine.seek(start as f64);
         }
+    }
+
+    /// Play the selection (or from the cursor) with the pre-roll and
+    /// post-roll set in Preferences > Playback and Recording.
+    pub fn play_with_roll(&mut self) {
+        let Some(doc) = self.doc() else { return };
+        let (pre, post) = (self.prefs.preroll_s as f64, self.prefs.postroll_s as f64);
+        let sr = doc.sample_rate as f64;
+        let len = doc.len() as f64;
+        let (a, b) = doc.sel_range().map(|(a, b)| (a as f64, b as f64)).unwrap_or((doc.cursor as f64, len));
+        let start = (a - pre * sr).max(0.0);
+        let end = (b + post * sr).min(len);
+        if end <= start {
+            return;
+        }
+        let (buf, rate, id) = (doc.audio.clone(), doc.sample_rate, doc.id);
+        self.prepare_output_rate(rate);
+        self.paused = None;
+        self.play_origin = a as usize;
+        let stream = self.live_stream(id);
+        self.engine.play_ex(buf, stream, rate, start, end, false, id);
     }
 
     pub fn restart_from_cursor_if_playing(&mut self) {
@@ -1691,7 +1841,13 @@ impl App {
     fn save(&mut self, force_dialog: bool) {
         let Some(doc) = self.doc() else { return };
         match (force_dialog, doc.direct_save(), doc.path.clone()) {
-            (false, Some(settings), Some(path)) => self.begin_save(path, settings, false),
+            (false, Some(mut settings), Some(path)) => {
+                if doc.export.is_none() {
+                    settings.dither = self.prefs.dither;
+                    settings.include_meta = self.prefs.save_meta;
+                }
+                self.begin_save(path, settings, false)
+            }
             _ => self.open_save_dialog(false),
         }
     }
@@ -1700,10 +1856,14 @@ impl App {
         let Some(doc) = self.doc() else { return };
         // A file's own format first; otherwise the format used last time.
         let own = doc.export.is_some() || doc.path.as_deref().and_then(Container::from_path).is_some();
-        let settings = match self.prefs.export {
+        let mut settings = match self.prefs.export {
             Some(last) if !own => last,
             _ => doc.save_as_settings(),
         };
+        if doc.export.is_none() && (own || self.prefs.export.is_none()) {
+            settings.dither = self.prefs.dither;
+            settings.include_meta = self.prefs.save_meta;
+        }
         self.dialog = Some(Dialog::Export { settings, path: None, selection });
     }
 
@@ -1725,7 +1885,10 @@ impl App {
             return;
         }
         let Some(doc) = self.doc() else { return };
-        let (audio, markers) = Self::save_payload(doc, selection);
+        let (audio, mut markers) = Self::save_payload(doc, selection);
+        if selection && !self.prefs.copy_markers {
+            markers.clear();
+        }
         let (meta, rate) = (doc.meta.clone(), doc.sample_rate);
         let progress = export::Progress::default();
         let (tx, rx) = channel();
@@ -1880,6 +2043,7 @@ impl App {
                 | Action::Close(_)
                 | Action::ForceClose(_)
                 | Action::Preferences
+                | Action::PreferencesPage(_)
                 | Action::Audition(_)
         );
         if editing && self.busy() {
@@ -1987,11 +2151,16 @@ impl App {
             }
             Action::Delete => {
                 self.engine.stop();
+                let smooth_ms = if self.prefs.smooth_delete { self.prefs.smooth_delete_ms } else { 0.0 };
                 if let Some(d) = self.doc_mut() {
                     if let Some((a, b)) = d.sel_range() {
                         let active = vec![true; d.n_ch()];
-                        let empty = vec![Vec::new(); d.n_ch()];
-                        apply_edit(d, "Delete", (a, b), &active, empty, None, false);
+                        let n = (smooth_ms as f64 * d.sample_rate as f64 / 1000.0) as usize;
+                        match smooth_join(&d.audio, a, b, n) {
+                            // Crossfade across the join so it doesn't click.
+                            Some((range, xf)) => apply_edit(d, "Delete", range, &active, xf, None, false),
+                            None => apply_edit(d, "Delete", (a, b), &active, vec![Vec::new(); d.n_ch()], None, false),
+                        }
                         d.cursor = a;
                     }
                 }
@@ -2015,6 +2184,7 @@ impl App {
             }
             Action::Paste => {
                 self.engine.stop();
+                let smooth_ms = if self.prefs.smooth_edits { self.prefs.smooth_edits_ms } else { 0.0 };
                 let Some((clip, rate)) = self.clipboard.clone() else {
                     self.set_status("The clipboard is empty.");
                     return;
@@ -2024,8 +2194,12 @@ impl App {
                     if rate != d.sample_rate {
                         audio = resample_channels(&audio, d.sample_rate as f64 / rate as f64);
                     }
-                    let audio = remap_channels(&audio, d.n_ch());
+                    let mut audio = remap_channels(&audio, d.n_ch());
                     let range = d.sel_range().unwrap_or((d.cursor, d.cursor));
+                    if smooth_ms > 0.0 {
+                        let n = (smooth_ms as f64 * d.sample_rate as f64 / 1000.0) as usize;
+                        smooth_insert(&d.audio, range, &mut audio, n);
+                    }
                     let active = vec![true; d.n_ch()];
                     apply_edit(d, "Paste", range, &active, audio, None, true);
                 } else {
@@ -2153,9 +2327,10 @@ impl App {
             }
             Action::AddMarker => {
                 let pos = self.display_pos() as usize;
+                let marker_name = self.prefs.marker_name.clone();
                 if let Some(d) = self.doc_mut() {
                     let n = d.markers.len() + 1;
-                    d.markers.push(Marker { pos, name: format!("Marker {n:02}") });
+                    d.markers.push(Marker { pos, name: format!("{} {n:02}", marker_name.trim()) });
                     d.markers.sort_by_key(|m| m.pos);
                     d.dirty = true;
                 }
@@ -2216,7 +2391,7 @@ impl App {
             }
             Action::ZoomIn | Action::ZoomOut => {
                 let pos = self.display_pos();
-                let f = if matches!(action, Action::ZoomIn) { 0.5 } else { 2.0 };
+                let f = self.zoom_step(matches!(action, Action::ZoomIn));
                 if let Some(d) = self.doc_mut() {
                     let anchor = if pos >= d.view_start && pos <= d.view_end { pos } else { (d.view_start + d.view_end) / 2.0 };
                     d.zoom(f, anchor);
@@ -2309,14 +2484,22 @@ impl App {
             }
             Action::SaveSelectionAs => self.open_save_dialog(true),
             Action::CopyToNew => {
+                let with_meta = self.prefs.copy_markers;
                 let res = self.doc().map(|d| {
                     let (a, b) = d.target_range();
-                    (slice_range(&d.audio, a, b), d.sample_rate)
+                    let markers: Vec<Marker> = if with_meta {
+                        d.markers.iter().filter(|m| m.pos >= a && m.pos <= b).map(|m| Marker { pos: m.pos - a, name: m.name.clone() }).collect()
+                    } else {
+                        Vec::new()
+                    };
+                    (slice_range(&d.audio, a, b), d.sample_rate, markers, if with_meta { d.meta.clone() } else { Default::default() })
                 });
-                if let Some((audio, sr)) = res {
+                if let Some((audio, sr, markers, meta)) = res {
                     let id = self.new_id();
                     let n = self.docs.len() + 1;
                     let mut doc = Document::new(id, format!("Untitled {n}"), None, audio, sr, None, "Copy to New");
+                    doc.markers = markers;
+                    doc.meta = meta;
                     doc.dirty = true;
                     self.add_doc(doc);
                 }
@@ -2346,16 +2529,9 @@ impl App {
                     self.dialog = Some(Dialog::Message { title: "File not found".into(), text: format!("{} no longer exists.", p.display()) });
                 }
             }
-            Action::Preferences => {
-                let (inputs, outputs) = crate::engine::list_devices();
-                self.dialog = Some(Dialog::Preferences {
-                    input: self.prefs.input_device.clone(),
-                    output: self.prefs.output_device.clone(),
-                    inputs,
-                    outputs,
-                    latency_ms: self.prefs.rec_offset_ms,
-                });
-            }
+            Action::Preferences => self.dialog = Some(crate::prefs_ui::dialog(&self.prefs, crate::prefs_ui::Page::General)),
+            Action::PreferencesPage(page) => self.dialog = Some(crate::prefs_ui::dialog(&self.prefs, page)),
+            Action::PlayWithRoll => self.play_with_roll(),
             Action::ApplyRack => self.apply_rack(),
             Action::Pause => {
                 let st = self.engine.status();
@@ -2471,6 +2647,57 @@ pub fn run_rack(
 }
 
 /// Replace `range` with `out`, record undo, keep markers and selection sane.
+/// Deleting [a, b) with a crossfade of `n` frames across the join: the
+/// range to replace and what replaces it. None if there isn't room.
+pub fn smooth_join(audio: &[Vec<f32>], a: usize, b: usize, n: usize) -> Option<((usize, usize), Vec<Vec<f32>>)> {
+    let len = audio.first().map(|c| c.len()).unwrap_or(0);
+    let n = n.min(b - a).min(len - b);
+    if n < 2 {
+        return None;
+    }
+    let xf = audio
+        .iter()
+        .map(|c| {
+            (0..n)
+                .map(|i| {
+                    let t = (i as f32 + 0.5) / n as f32;
+                    c[a + i] * (1.0 - t) + c[b + i] * t
+                })
+                .collect()
+        })
+        .collect();
+    Some(((a, b + n), xf))
+}
+
+/// Blend the first and last `n` frames of `clip` (replacing [a, b)) with the
+/// audio around it, so the paste doesn't click.
+pub fn smooth_insert(audio: &[Vec<f32>], (a, b): (usize, usize), clip: &mut [Vec<f32>], n: usize) {
+    let len = audio.first().map(|c| c.len()).unwrap_or(0);
+    let clen = clip.first().map(|c| c.len()).unwrap_or(0);
+    let n = n.min(clen / 2);
+    if n < 2 {
+        return;
+    }
+    for (c, ch) in clip.iter_mut().enumerate() {
+        let Some(src) = audio.get(c) else { continue };
+        // In: from what was playing at `a` into the clip.
+        if a + n <= len {
+            for i in 0..n {
+                let t = (i as f32 + 0.5) / n as f32;
+                ch[i] = src[a + i] * (1.0 - t) + ch[i] * t;
+            }
+        }
+        // Out: from the clip into what plays after `b`.
+        if b >= n {
+            for i in 0..n {
+                let t = (i as f32 + 0.5) / n as f32;
+                let k = clen - n + i;
+                ch[k] = ch[k] * (1.0 - t) + src[b - n + i] * t;
+            }
+        }
+    }
+}
+
 pub fn apply_edit(
     doc: &mut Document,
     label: &str,

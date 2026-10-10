@@ -40,7 +40,7 @@ impl NativeMenu {
         let app_menu = Submenu::new("Audemo", true);
         let _ = app_menu.append(&item("about", "About Audemo", None));
         let _ = app_menu.append(&sep());
-        let _ = app_menu.append(&item("prefs", "Preferences…", acc(false, Code::Comma)));
+        let _ = app_menu.append(&item("prefs", "Settings…", acc(false, Code::Comma)));
         let _ = app_menu.append(&sep());
         let _ = app_menu.append(&PredefinedMenuItem::hide(None));
         let _ = app_menu.append(&PredefinedMenuItem::hide_others(None));
@@ -182,6 +182,7 @@ impl NativeMenu {
         let _ = view.append(&sep());
         let _ = view.append(&item("spectral", "Show/Hide Spectral Frequency Display", None));
         let _ = view.append(&item("follow", "Follow Playhead On/Off", None));
+        let _ = view.append(&item("play_roll", "Play with Pre-roll and Post-roll", acc_mods(Modifiers::ALT, Code::Space)));
 
         let window = Submenu::new("Window", true);
         let workspace = Submenu::new("Workspace", true);
@@ -300,6 +301,7 @@ impl App {
             }
             "amp_stats" => Action::AmplitudeStatistics,
             "plugin_manager" => Action::PluginManager,
+            "play_roll" => Action::PlayWithRoll,
             "selview" => {
                 self.show_bottom = !self.show_bottom;
                 return;

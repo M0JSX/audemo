@@ -1,7 +1,34 @@
 //! Spectrogram for the spectral frequency display.
 
 use super::fft::{Complex, Fft};
-use super::util::hann;
+/// Analysis window for the spectral display (Preferences > Spectral Displays).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Window {
+    BlackmanHarris,
+    Blackman,
+    Hann,
+    Hamming,
+    Welch,
+    Rectangular,
+}
+
+pub fn window(kind: Window, n: usize) -> Vec<f32> {
+    use std::f64::consts::PI;
+    let m = (n.max(2) - 1) as f64;
+    (0..n)
+        .map(|i| {
+            let x = i as f64 / m;
+            (match kind {
+                Window::BlackmanHarris => 0.35875 - 0.48829 * (2.0 * PI * x).cos() + 0.14128 * (4.0 * PI * x).cos() - 0.01168 * (6.0 * PI * x).cos(),
+                Window::Blackman => 0.42 - 0.5 * (2.0 * PI * x).cos() + 0.08 * (4.0 * PI * x).cos(),
+                Window::Hann => 0.5 - 0.5 * (2.0 * PI * x).cos(),
+                Window::Hamming => 0.54 - 0.46 * (2.0 * PI * x).cos(),
+                Window::Welch => 1.0 - (2.0 * x - 1.0).powi(2),
+                Window::Rectangular => 1.0,
+            }) as f32
+        })
+        .collect()
+}
 
 /// Compute `cols` spectra covering samples [start, end) of `x`.
 /// Returns magnitudes in dBFS, column-major: `out[col * bins + bin]`,
@@ -12,13 +39,14 @@ pub fn spectrogram_range(
     end: f64,
     cols: usize,
     fft_size: usize,
+    kind: Window,
 ) -> Vec<f32> {
     let bins = fft_size / 2;
     let mut out = vec![-160.0f32; cols * bins];
     if x.is_empty() || cols == 0 || end <= start {
         return out;
     }
-    let w = hann(fft_size);
+    let w = window(kind, fft_size);
     let wsum: f32 = w.iter().sum();
     let norm = 2.0 / wsum;
     let fft = Fft::new(fft_size);

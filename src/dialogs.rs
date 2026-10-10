@@ -82,7 +82,7 @@ impl App {
                                 ui.selectable_value(&mut rate, r, format!("{r}"));
                             }
                         });
-                        ui.label(RichText::new("Hz").color(TEXT_DIM));
+                        ui.label(RichText::new("Hz").color(TEXT_DIM()));
                         ui.end_row();
                         ui.label("Channels:");
                         egui::ComboBox::from_id_source("nf_ch").width(120.0).selected_text(if channels == 1 { "Mono" } else { "Stereo" }).show_ui(ui, |ui| {
@@ -109,7 +109,7 @@ impl App {
                         }
                     });
                     if then_record {
-                        ui.label(RichText::new("Recording starts as soon as you click OK. Input is converted to this format when you stop.").color(TEXT_DIM).size(11.0));
+                        ui.label(RichText::new("Recording starts as soon as you click OK. Input is converted to this format when you stop.").color(TEXT_DIM()).size(11.0));
                     }
                     ui.add_space(6.0);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -135,7 +135,7 @@ impl App {
                     ui.set_min_width(420.0);
                     let (frames, ch, rate) = match self.doc() {
                         Some(d) => {
-                            ui.label(RichText::new(format!("{} • {}", d.name, d.format_label())).color(TEXT_DIM));
+                            ui.label(RichText::new(format!("{} • {}", d.name, d.format_label())).color(TEXT_DIM()));
                             let frames = if selection { let (a, b) = d.target_range(); b - a } else { d.len() };
                             (frames, d.n_ch(), d.sample_rate)
                         }
@@ -181,7 +181,7 @@ impl App {
                                         let mut q = 9 - settings.mp3_vbr_quality as i32;
                                         ui.add(egui::Slider::new(&mut q, 0..=9).show_value(false));
                                         settings.mp3_vbr_quality = (9 - q).clamp(0, 9) as u8;
-                                        ui.label(RichText::new(format!("V{} (≈{} kbps)", settings.mp3_vbr_quality, vbr_kbps(settings.mp3_vbr_quality))).color(TEXT_DIM));
+                                        ui.label(RichText::new(format!("V{} (≈{} kbps)", settings.mp3_vbr_quality, vbr_kbps(settings.mp3_vbr_quality))).color(TEXT_DIM()));
                                     });
                                 } else {
                                     ui.label("Bitrate");
@@ -217,7 +217,7 @@ impl App {
                         });
                         ui.end_row();
                         ui.label("Estimated size");
-                        ui.label(RichText::new(estimate_size(&settings, frames, ch, rate)).color(TEXT_DIM));
+                        ui.label(RichText::new(estimate_size(&settings, frames, ch, rate)).color(TEXT_DIM()));
                         ui.end_row();
                     });
                     if settings.container.lossy() {
@@ -226,10 +226,10 @@ impl App {
                         } else {
                             "Lossy formats discard detail on every save. Keep a WAV or FLAC copy for further editing.".to_string()
                         };
-                        ui.label(RichText::new(note).color(TEXT_DIM).size(11.0));
+                        ui.label(RichText::new(note).color(TEXT_DIM()).size(11.0));
                     }
                     if ch > 2 && settings.container.lossy() {
-                        ui.label(RichText::new("Only the first two channels are encoded.").color(WARN).size(11.0));
+                        ui.label(RichText::new("Only the first two channels are encoded.").color(WARN()).size(11.0));
                     }
                     ui.add_space(6.0);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -253,67 +253,9 @@ impl App {
                     next = Some(Dialog::Export { settings, path, selection });
                 }
             }
-            Dialog::Preferences { mut input, mut output, inputs, outputs, mut latency_ms } => {
-                let mut open = true;
-                centered(egui::Window::new("Preferences: Audio Hardware").open(&mut open)).show(ctx, |ui| {
-                    ui.set_min_width(460.0);
-                    egui::Grid::new("audiohw").num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
-                        ui.label("Default Input");
-                        let shown = input.clone().unwrap_or_else(|| "System default".into());
-                        egui::ComboBox::from_id_source("hw_in").width(300.0).selected_text(shown).show_ui(ui, |ui| {
-                            ui.selectable_value(&mut input, None, "System default");
-                            for n in &inputs {
-                                ui.selectable_value(&mut input, Some(n.clone()), n);
-                            }
-                        });
-                        ui.end_row();
-                        ui.label("Default Output");
-                        let shown = output.clone().unwrap_or_else(|| "System default".into());
-                        egui::ComboBox::from_id_source("hw_out").width(300.0).selected_text(shown).show_ui(ui, |ui| {
-                            ui.selectable_value(&mut output, None, "System default");
-                            for n in &outputs {
-                                ui.selectable_value(&mut output, Some(n.clone()), n);
-                            }
-                        });
-                        ui.end_row();
-                        ui.label("Output in use");
-                        ui.label(RichText::new(format!("{} @ {} Hz, {} ch", self.engine.device_name, self.engine.out_rate, self.engine.out_channels)).color(TEXT_DIM));
-                        ui.end_row();
-                        ui.label("Recording latency");
-                        ui.horizontal(|ui| {
-                            ui.add(egui::DragValue::new(&mut latency_ms).speed(0.5).range(0.0..=1000.0).fixed_decimals(1).suffix(" ms"));
-                            ui.label(RichText::new("moves multitrack takes earlier to line up with what you heard").color(TEXT_DIM).size(11.0));
-                        });
-                        ui.end_row();
-                    });
-                    ui.label(RichText::new("Recordings are captured at the input device's native rate and converted to the file's sample rate when you stop.").color(TEXT_DIM).size(11.0));
-                    ui.add_space(6.0);
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("Cancel").clicked() {
-                            keep = false;
-                        }
-                        if ui.add(egui::Button::new(RichText::new("  OK  ").color(Color32::WHITE))).clicked() {
-                            keep = false;
-                            if self.engine.is_recording() {
-                                self.stop_recording();
-                            }
-                            self.engine.input_name = input.clone();
-                            let out_changed = self.prefs.output_device != output;
-                            self.prefs.input_device = input.clone();
-                            self.prefs.output_device = output.clone();
-                            self.prefs.rec_offset_ms = latency_ms;
-                            self.prefs.save();
-                            if out_changed {
-                                match self.engine.set_output(output.clone()) {
-                                    Ok(()) => self.set_status(format!("Output: {} @ {} Hz", self.engine.device_name, self.engine.out_rate)),
-                                    Err(e) => next = Some(Dialog::Message { title: "Output device".into(), text: e }),
-                                }
-                            }
-                        }
-                    });
-                });
-                if open && keep {
-                    next = Some(Dialog::Preferences { input, output, inputs, outputs, latency_ms });
+            Dialog::Preferences(d) => {
+                if let Some(d) = self.preferences_window(ctx, d) {
+                    next = Some(Dialog::Preferences(d));
                 }
             }
             Dialog::MixPaste { mut mode, mut clip_db, mut orig_db } => {
@@ -335,7 +277,7 @@ impl App {
                         });
                         ui.end_row();
                     });
-                    ui.label(RichText::new("Pastes at the cursor or the start of the selection.").color(TEXT_DIM).size(11.0));
+                    ui.label(RichText::new("Pastes at the cursor or the start of the selection.").color(TEXT_DIM()).size(11.0));
                     ui.add_space(6.0);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.button("Cancel").clicked() {
@@ -368,7 +310,7 @@ impl App {
                         });
                         ui.end_row();
                     });
-                    ui.label(RichText::new("High-quality windowed-sinc resampling. Mono downmix averages both channels.").color(TEXT_DIM).size(11.0));
+                    ui.label(RichText::new("High-quality windowed-sinc resampling. Mono downmix averages both channels.").color(TEXT_DIM()).size(11.0));
                     ui.add_space(6.0);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.button("Cancel").clicked() {
@@ -396,7 +338,7 @@ impl App {
                         for (what, keys) in SHORTCUTS {
                             ui.label(*what);
                             let keys = if cfg!(target_os = "macos") { keys.replace("Ctrl+", "⌘") } else { keys.to_string() };
-                            ui.label(RichText::new(keys).monospace().color(WAVE_SEL));
+                            ui.label(RichText::new(keys).monospace().color(WAVE_SEL()));
                             ui.end_row();
                         }
                     });
@@ -414,7 +356,7 @@ impl App {
                     ui.label(format!("{} effects, all processed in 32-bit float.", self.effects.len()));
                     ui.label(format!("Audio output: {} @ {} Hz", self.engine.device_name, self.engine.out_rate));
                     if let Some(e) = &self.engine.error {
-                        ui.label(RichText::new(e).color(WARN));
+                        ui.label(RichText::new(e).color(WARN()));
                     }
                 });
                 if open {
@@ -472,7 +414,7 @@ impl App {
                 centered(egui::Window::new("Quit Audemo?")).show(ctx, |ui| {
                     ui.label("These files have unsaved changes:");
                     for n in &unsaved {
-                        ui.label(RichText::new(format!("•  {n}")).color(WARN));
+                        ui.label(RichText::new(format!("•  {n}")).color(WARN()));
                     }
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
@@ -519,7 +461,7 @@ impl App {
                         ui.add(egui::DragValue::new(&mut tracks).range(1..=64));
                         ui.end_row();
                         ui.label("Master:");
-                        ui.label(RichText::new("Stereo").color(TEXT_DIM));
+                        ui.label(RichText::new("Stereo").color(TEXT_DIM()));
                         ui.end_row();
                     });
                     ui.add_space(8.0);
@@ -592,13 +534,20 @@ impl App {
             None => (48000, String::new()),
         };
         let previewing_now = self.engine.is_playing_tag(PREVIEW_TAG);
+        let show_window = self.prefs.show_plugin_window;
         let Some(Dialog::Effect(d)) = &mut self.dialog else { return };
         let def: &EffectDef = &effects[d.idx];
         let is_plugin = crate::plugin::is_plugin(def);
         // A plug-in's controls come from an editing instance of it.
         if is_plugin && d.plugin.is_none() && d.error.is_none() {
             match crate::plugin::editor::PluginEditor::open(&d.params, sr) {
-                Ok(ed) => d.plugin = Some(ed),
+                Ok(mut ed) => {
+                    // Preferences > Effects: open the plug-in's own window too.
+                    if show_window && ed.has_window() {
+                        let _ = ed.toggle_window();
+                    }
+                    d.plugin = Some(ed);
+                }
                 Err(e) => d.error = Some(e),
             }
         }
@@ -643,7 +592,7 @@ impl App {
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.set_min_width(560.0);
-                ui.label(RichText::new(def.description).color(TEXT_DIM));
+                ui.label(RichText::new(def.description).color(TEXT_DIM()));
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     if is_plugin {
@@ -658,7 +607,7 @@ impl App {
                             }
                             let lat = ed.latency();
                             if lat > 0 {
-                                ui.label(RichText::new(format!("Latency {lat} samples (compensated when applied)")).color(TEXT_DIM).size(11.0));
+                                ui.label(RichText::new(format!("Latency {lat} samples (compensated when applied)")).color(TEXT_DIM()).size(11.0));
                             }
                         }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -708,13 +657,13 @@ impl App {
                 }
                 if let Some(e) = &d.error {
                     ui.add_space(4.0);
-                    ui.label(RichText::new(e).color(WARN));
+                    ui.label(RichText::new(e).color(WARN()));
                 }
                 ui.separator();
                 ui.horizontal(|ui| {
                     if rack_mode {
                         let hint = if track_mode { "Changes are heard live as the session plays (Space)." } else { "Changes are heard live while the rack's master power is on." };
-                        ui.label(RichText::new(hint).color(TEXT_DIM).size(11.0));
+                        ui.label(RichText::new(hint).color(TEXT_DIM()).size(11.0));
                     } else {
                         let label = if d.previewing { "Stop Preview" } else { "Preview" };
                         if ui.add(egui::Button::new(label).min_size(vec2(118.0, 26.0))).on_hover_text("Loop the processed selection (Space)").clicked() {
@@ -734,7 +683,7 @@ impl App {
                         }
                     });
                 });
-                ui.label(RichText::new(scope.clone()).color(TEXT_DIM).size(11.0));
+                ui.label(RichText::new(scope.clone()).color(TEXT_DIM()).size(11.0));
             });
         let live_update = if rack_mode && d.params != before { d.rack_slot.map(|s| (s, d.params.clone())) } else { None };
         let live_track = if d.params != before { d.track_fx.map(|t| (t, d.params.clone())) } else { None };
@@ -798,7 +747,7 @@ fn graphic_eq_faders(ui: &mut Ui, def: &EffectDef, params: &mut Params) {
             ui.allocate_ui(vec2(w, 190.0), |ui| {
                 ui.vertical_centered(|ui| {
                     let mut v = params.f(pd.key);
-                    ui.label(RichText::new(format!("{v:+.0}")).font(FontId::monospace(9.0)).color(HOT));
+                    ui.label(RichText::new(format!("{v:+.0}")).font(FontId::monospace(9.0)).color(HOT()));
                     let r = ui.add(egui::Slider::new(&mut v, -20.0..=20.0).vertical().show_value(false));
                     if r.changed() {
                         params.set(pd.key, Value::F(v.round()));
@@ -807,7 +756,7 @@ fn graphic_eq_faders(ui: &mut Ui, def: &EffectDef, params: &mut Params) {
                         params.set(pd.key, Value::F(0.0));
                     }
                     let short = pd.label.replace(" kHz", "k").replace(" Hz", "");
-                    ui.label(RichText::new(short).font(FontId::proportional(9.0)).color(TEXT_DIM));
+                    ui.label(RichText::new(short).font(FontId::proportional(9.0)).color(TEXT_DIM()));
                 });
             });
         }
@@ -894,7 +843,7 @@ fn response_curve(
     let size = vec2(ui.available_width().max(540.0), 190.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let p = ui.painter_at(rect);
-    p.rect_filled(rect, 3.0, LANE_BG);
+    p.rect_filled(rect, 3.0, LANE_BG());
     let fmin = 20.0f32;
     let fmax = (sr as f32 / 2.0).min(22000.0);
     let range_db = 24.0f32;
@@ -907,14 +856,14 @@ fn response_curve(
             continue;
         }
         let x = fx(f);
-        p.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(1.0_f32, LANE_GRID));
+        p.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(1.0_f32, LANE_GRID()));
         let label = if f >= 1000.0 { format!("{}k", f / 1000.0) } else { format!("{f}") };
-        p.text(pos2(x + 2.0, rect.bottom() - 2.0), Align2::LEFT_BOTTOM, label, FontId::monospace(9.5), TEXT_DIM);
+        p.text(pos2(x + 2.0, rect.bottom() - 2.0), Align2::LEFT_BOTTOM, label, FontId::monospace(9.5), TEXT_DIM());
     }
     for db in [-18.0, -12.0, -6.0, 0.0, 6.0, 12.0, 18.0] {
         let y = dy(db);
-        p.line_segment([pos2(rect.left(), y), pos2(rect.right(), y)], Stroke::new(1.0_f32, if db == 0.0 { BORDER } else { LANE_GRID }));
-        p.text(pos2(rect.left() + 3.0, y - 1.0), Align2::LEFT_BOTTOM, format!("{db:+.0}"), FontId::monospace(9.0), TEXT_DIM);
+        p.line_segment([pos2(rect.left(), y), pos2(rect.right(), y)], Stroke::new(1.0_f32, if db == 0.0 { BORDER() } else { LANE_GRID() }));
+        p.text(pos2(rect.left() + 3.0, y - 1.0), Align2::LEFT_BOTTOM, format!("{db:+.0}"), FontId::monospace(9.0), TEXT_DIM());
     }
     let n = (rect.width() as usize).max(2);
     let pts: Vec<_> = (0..n)
@@ -924,7 +873,7 @@ fn response_curve(
             pos2(x, dy(db).clamp(rect.top(), rect.bottom()))
         })
         .collect();
-    p.add(Shape::line(pts, Stroke::new(2.0_f32, WAVE)));
+    p.add(Shape::line(pts, Stroke::new(2.0_f32, WAVE())));
 
     // Handles.
     let find_range = |key: &str| {
@@ -940,8 +889,8 @@ fn response_curve(
         let c = pos2(fx(f), dy(g));
         handle_pos.push(c);
         let hot = *drag == Some(i);
-        p.circle_filled(c, if hot { 8.0 } else { 7.0 }, if hot { ACCENT } else { Color32::from_rgb(0x2a, 0x6a, 0x52) });
-        p.circle_stroke(c, 7.0, Stroke::new(1.0_f32, WAVE_SEL));
+        p.circle_filled(c, if hot { 8.0 } else { 7.0 }, if hot { ACCENT() } else { Color32::from_rgb(0x2a, 0x6a, 0x52) });
+        p.circle_stroke(c, 7.0, Stroke::new(1.0_f32, WAVE_SEL()));
         p.text(c, Align2::CENTER_CENTER, format!("{}", i + 1), FontId::proportional(10.0), Color32::WHITE);
     }
     if response.drag_started() {
@@ -979,7 +928,7 @@ fn response_curve(
             Align2::RIGHT_TOP,
             "Drag the numbered points",
             FontId::proportional(10.0),
-            TEXT_DIM,
+            TEXT_DIM(),
         );
     }
 }

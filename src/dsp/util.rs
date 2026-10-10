@@ -105,26 +105,138 @@ pub fn slice_range(chs: &[Vec<f32>], a: usize, b: usize) -> Vec<Vec<f32>> {
         .collect()
 }
 
-pub fn format_time(samples: f64, sr: u32) -> String {
-    let secs = (samples / sr.max(1) as f64).max(0.0);
-    let total_ms = (secs * 1000.0).round() as u64;
-    let ms = total_ms % 1000;
-    let s = (total_ms / 1000) % 60;
-    let m = (total_ms / 60_000) % 60;
-    let h = total_ms / 3_600_000;
-    if h > 0 {
-        format!("{h}:{m:02}:{s:02}.{ms:03}")
-    } else {
-        format!("{m}:{s:02}.{ms:03}")
+/// How times are shown and typed (Preferences > Time Display).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TimeStyle {
+    /// m:ss.ddd
+    Decimal,
+    /// hh:mm:ss:ff at `fps` (labelled with `nominal` frames per second;
+    /// `drop` uses SMPTE drop-frame numbering).
+    Frames { fps: f64, nominal: u32, drop: bool, hours: bool },
+    Samples,
+    /// bar:beat.hundredths at `tempo` beats per minute.
+    Bars { tempo: f64, per_bar: u32 },
+}
+
+static TIME_STYLE: std::sync::RwLock<TimeStyle> = std::sync::RwLock::new(TimeStyle::Decimal);
+
+pub fn set_time_style(t: TimeStyle) {
+    if let Ok(mut s) = TIME_STYLE.write() {
+        *s = t;
     }
 }
 
-/// Parse "m:ss.mmm", "h:mm:ss.mmm" or plain seconds into samples.
+pub fn time_style() -> TimeStyle {
+    TIME_STYLE.read().map(|s| *s).unwrap_or(TimeStyle::Decimal)
+}
+
+/// A position in samples as text, in the current time display format.
+pub fn format_time(samples: f64, sr: u32) -> String {
+    format_time_as(time_style(), samples, sr)
+}
+
+pub fn format_time_as(style: TimeStyle, samples: f64, sr: u32) -> String {
+    let samples = samples.max(0.0);
+    let secs = samples / sr.max(1) as f64;
+    match style {
+        TimeStyle::Decimal => {
+            let total_ms = (secs * 1000.0).round() as u64;
+            let ms = total_ms % 1000;
+            let s = (total_ms / 1000) % 60;
+            let m = (total_ms / 60_000) % 60;
+            let h = total_ms / 3_600_000;
+            if h > 0 {
+                format!("{h}:{m:02}:{s:02}.{ms:03}")
+            } else {
+                format!("{m}:{s:02}.{ms:03}")
+            }
+        }
+        TimeStyle::Samples => format!("{}", samples.round() as u64),
+        TimeStyle::Frames { fps, nominal, drop, hours } => {
+            let frames = (secs * fps + 1e-6).floor() as u64;
+            let n = nominal.max(1) as u64;
+            let label = if drop { drop_frame_label(frames, n) } else { frames };
+            let ff = label % n;
+            let total_s = label / n;
+            let (h, m, s) = (total_s / 3600, total_s / 60 % 60, total_s % 60);
+            let sep = if drop { ';' } else { ':' };
+            if hours {
+                format!("{h:02}:{m:02}:{s:02}{sep}{ff:02}")
+            } else {
+                format!("{:02}:{s:02}{sep}{ff:02}", total_s / 60)
+            }
+        }
+        TimeStyle::Bars { tempo, per_bar } => {
+            let beats = secs * tempo / 60.0;
+            let per = per_bar.max(1) as f64;
+            let bar = (beats / per).floor();
+            let beat = beats - bar * per;
+            let hundredths = ((beat - beat.floor()) * 100.0).floor();
+            format!("{}:{}.{:02}", bar as u64 + 1, beat.floor() as u64 + 1, hundredths as u64)
+        }
+    }
+}
+
+/// SMPTE drop-frame: frame numbers 0 and 1 are skipped at the start of
+/// every minute except every tenth (for 30 fps; 4 for 60 fps).
+fn drop_frame_label(frames: u64, nominal: u64) -> u64 {
+    let dropped = if nominal >= 60 { 4 } else { 2 };
+    let per_10min = nominal * 600 - dropped * 9;
+    let per_min = nominal * 60 - dropped;
+    let d = frames / per_10min;
+    let m = frames % per_10min;
+    let extra = if m < dropped { 0 } else { (m - dropped) / per_min };
+    frames + dropped * 9 * d + dropped * extra
+}
+
+fn drop_frame_index(label: u64, nominal: u64) -> u64 {
+    let dropped = if nominal >= 60 { 4 } else { 2 };
+    let total_min = label / (nominal * 60);
+    label - dropped * (total_min - total_min / 10)
+}
+
+/// Parse a time in the current display format (or plain seconds, or
+/// "m:ss.mmm") into samples.
 pub fn parse_time(text: &str, sr: u32) -> Option<f64> {
+    parse_time_as(time_style(), text, sr)
+}
+
+pub fn parse_time_as(style: TimeStyle, text: &str, sr: u32) -> Option<f64> {
     let t = text.trim();
     if t.is_empty() {
         return None;
     }
+    let sr_f = sr as f64;
+    let parsed = match style {
+        TimeStyle::Decimal => None,
+        TimeStyle::Samples => t.parse::<f64>().ok().filter(|v| *v >= 0.0),
+        TimeStyle::Frames { fps, nominal, drop, .. } => {
+            let parts: Vec<&str> = t.split([':', ';']).collect();
+            if parts.len() >= 2 {
+                let nums: Option<Vec<u64>> = parts.iter().map(|p| p.trim().parse::<u64>().ok()).collect();
+                nums.map(|v| {
+                    let ff = *v.last().unwrap();
+                    let secs = v[..v.len() - 1].iter().fold(0u64, |a, x| a * 60 + x);
+                    let label = secs * nominal as u64 + ff;
+                    let frames = if drop { drop_frame_index(label, nominal as u64) } else { label };
+                    frames as f64 / fps * sr_f
+                })
+            } else {
+                None
+            }
+        }
+        TimeStyle::Bars { tempo, per_bar } => {
+            let (bar, rest) = t.split_once(':')?;
+            let bar: f64 = bar.trim().parse().ok()?;
+            let beat: f64 = rest.trim().parse().ok()?;
+            let beats = (bar - 1.0).max(0.0) * per_bar as f64 + (beat - 1.0).max(0.0);
+            Some(beats * 60.0 / tempo * sr_f)
+        }
+    };
+    if parsed.is_some() {
+        return parsed;
+    }
+    // Decimal: "h:mm:ss.mmm", "m:ss.mmm" or seconds.
     let mut secs = 0.0f64;
     for part in t.split(':') {
         let v: f64 = part.trim().parse().ok()?;
@@ -133,5 +245,49 @@ pub fn parse_time(text: &str, sr: u32) -> Option<f64> {
     if secs < 0.0 {
         return None;
     }
-    Some(secs * sr as f64)
+    Some(secs * sr_f)
+}
+
+#[cfg(test)]
+mod time_tests {
+    use super::*;
+
+    #[test]
+    fn time_formats_round_trip() {
+        let sr = 48000;
+        let styles = [
+            TimeStyle::Decimal,
+            TimeStyle::Samples,
+            TimeStyle::Frames { fps: 75.0, nominal: 75, drop: false, hours: false },
+            TimeStyle::Frames { fps: 30.0, nominal: 30, drop: false, hours: true },
+            TimeStyle::Frames { fps: 30000.0 / 1001.0, nominal: 30, drop: true, hours: true },
+            TimeStyle::Frames { fps: 25.0, nominal: 25, drop: false, hours: true },
+            TimeStyle::Bars { tempo: 120.0, per_bar: 4 },
+        ];
+        for st in styles {
+            for secs in [0.0, 1.0, 59.5, 60.0, 61.25, 600.0, 3725.4] {
+                let s = secs * sr as f64;
+                let text = format_time_as(st, s, sr);
+                let back = parse_time_as(st, &text, sr).unwrap();
+                // Frame and bar formats are quantised to one frame / hundredth of a beat.
+                let tol = match st {
+                    TimeStyle::Frames { fps, .. } => sr as f64 / fps + 1.0,
+                    TimeStyle::Bars { .. } => sr as f64 * 0.006,
+                    _ => sr as f64 * 0.001,
+                };
+                assert!((back - s).abs() <= tol, "{st:?} {secs}s -> {text} -> {back}");
+            }
+        }
+    }
+
+    #[test]
+    fn drop_frame_numbering() {
+        let df = TimeStyle::Frames { fps: 30000.0 / 1001.0, nominal: 30, drop: true, hours: true };
+        let at = |frames: f64| format_time_as(df, frames * 1001.0 / 30000.0 * 48000.0, 48000);
+        assert_eq!(at(1799.0), "00:00:59;29");
+        assert_eq!(at(1800.0), "00:01:00;02");
+        assert_eq!(at(17982.0), "00:10:00;00");
+        assert_eq!(format_time_as(TimeStyle::Bars { tempo: 120.0, per_bar: 4 }, 48000.0 * 2.5, 48000), "2:2.00");
+        assert_eq!(format_time_as(TimeStyle::Samples, 1234.4, 48000), "1234");
+    }
 }

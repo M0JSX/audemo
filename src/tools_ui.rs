@@ -244,11 +244,11 @@ impl App {
 
     pub fn diagnostics_panel(&mut self, ui: &mut Ui) {
         let Some((doc_id, version, sr)) = self.doc().map(|d| (d.id, d.version, d.sample_rate)) else {
-            ui.label(RichText::new("Open a file to scan it.").color(TEXT_DIM));
+            ui.label(RichText::new("Open a file to scan it.").color(TEXT_DIM()));
             return;
         };
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Effect:").color(TEXT_DIM));
+            ui.label(RichText::new("Effect:").color(TEXT_DIM()));
             let before = self.diag.kind;
             egui::ComboBox::from_id_source("diag_kind").width(ui.available_width() - 4.0).selected_text(DIAG_KINDS[self.diag.kind]).show_ui(ui, |ui| {
                 for (i, k) in DIAG_KINDS.iter().enumerate() {
@@ -262,7 +262,7 @@ impl App {
         let d = &mut self.diag;
         egui::Grid::new("diag_params").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
             let row = |ui: &mut Ui, label: &str, v: &mut f32, lo: f32, hi: f32, suffix: &str| {
-                ui.label(RichText::new(label).color(TEXT_DIM).size(11.5));
+                ui.label(RichText::new(label).color(TEXT_DIM()).size(11.5));
                 hot_drag(ui, egui::DragValue::new(v).speed(0.2).range(lo..=hi).fixed_decimals(1).suffix(suffix));
                 ui.end_row();
             };
@@ -291,7 +291,7 @@ impl App {
             }
             let stale = self.diag.results.as_ref().map(|r| r.doc_id != doc_id || r.version != version).unwrap_or(false);
             if stale {
-                ui.label(RichText::new("File changed: scan again").color(WARN).size(11.0));
+                ui.label(RichText::new("File changed: scan again").color(WARN()).size(11.0));
             }
         });
         let results = self.diag.results.as_ref().filter(|r| r.doc_id == doc_id && r.version == version);
@@ -300,15 +300,15 @@ impl App {
         let items = r.items.clone();
         let mut select: Option<usize> = None;
         let list_h = (ui.available_height() - 30.0).max(40.0);
-        egui::Frame::none().fill(BG_LIST).inner_margin(egui::Margin::same(3.0)).show(ui, |ui| {
+        egui::Frame::none().fill(BG_LIST()).inner_margin(egui::Margin::same(3.0)).show(ui, |ui| {
             egui::ScrollArea::vertical().max_height(list_h).min_scrolled_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
                 if items.is_empty() {
-                    ui.label(RichText::new("Nothing found.").color(TEXT_DIM));
+                    ui.label(RichText::new("Nothing found.").color(TEXT_DIM()));
                     return;
                 }
                 egui::Grid::new("diag_list").num_columns(4).spacing([10.0, 2.0]).striped(true).show(ui, |ui| {
                     for h in ["#", "Start", "Length", if kind == 0 { "Height" } else { "Level" }] {
-                        ui.label(RichText::new(h).color(TEXT_DIM).size(11.0));
+                        ui.label(RichText::new(h).color(TEXT_DIM()).size(11.0));
                     }
                     ui.end_row();
                     for (i, f) in items.iter().enumerate().take(5000) {
@@ -353,7 +353,7 @@ impl App {
                 apply = Some(None);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(RichText::new(format!("{} found", items.len())).color(TEXT_DIM).size(11.0));
+                ui.label(RichText::new(format!("{} found", items.len())).color(TEXT_DIM()).size(11.0));
             });
         });
         if let Some(w) = apply {
@@ -485,20 +485,20 @@ impl App {
         });
         let list_h = (ui.available_height() - 150.0).max(50.0);
         let mut remove: Option<usize> = None;
-        egui::Frame::none().fill(BG_LIST).inner_margin(egui::Margin::same(3.0)).show(ui, |ui| {
+        egui::Frame::none().fill(BG_LIST()).inner_margin(egui::Margin::same(3.0)).show(ui, |ui| {
             egui::ScrollArea::vertical().max_height(list_h).min_scrolled_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
                 if self.batch.files.is_empty() {
-                    ui.label(RichText::new("Add files to process.").color(TEXT_DIM));
+                    ui.label(RichText::new("Add files to process.").color(TEXT_DIM()));
                 }
                 let next = self.batch.files.iter().position(|f| f.1 == BatchStatus::Pending);
                 for (i, (p, st)) in self.batch.files.iter().enumerate() {
                     ui.horizontal(|ui| {
                         let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                         let (mark, col) = match st {
-                            BatchStatus::Done(_) => ("✔", WAVE),
-                            BatchStatus::Failed(_) => ("✖", RECORD),
-                            BatchStatus::Pending if running && next == Some(i) => ("…", HOT),
-                            BatchStatus::Pending => ("•", TEXT_DIM),
+                            BatchStatus::Done(_) => ("✔", WAVE()),
+                            BatchStatus::Failed(_) => ("✖", RECORD()),
+                            BatchStatus::Pending if running && next == Some(i) => ("…", HOT()),
+                            BatchStatus::Pending => ("•", TEXT_DIM()),
                         };
                         ui.label(RichText::new(mark).color(col));
                         let r = ui.label(name).on_hover_text(p.display().to_string());
@@ -507,7 +507,7 @@ impl App {
                                 r.on_hover_text(format!("Saved as {out}"));
                             }
                             BatchStatus::Failed(e) => {
-                                ui.label(RichText::new(e).color(RECORD).size(10.5));
+                                ui.label(RichText::new(e).color(RECORD()).size(10.5));
                             }
                             _ => {}
                         }
@@ -527,21 +527,21 @@ impl App {
         }
         let names = self.batch_process_names();
         egui::Grid::new("batch_opts").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-            ui.label(RichText::new("Process").color(TEXT_DIM));
+            ui.label(RichText::new("Process").color(TEXT_DIM()));
             egui::ComboBox::from_id_source("batch_proc").width(180.0).selected_text(names[self.batch.process.min(names.len() - 1)].clone()).show_ui(ui, |ui| {
                 for (i, n) in names.iter().enumerate() {
                     ui.selectable_value(&mut self.batch.process, i, n);
                 }
             });
             ui.end_row();
-            ui.label(RichText::new("Format").color(TEXT_DIM));
+            ui.label(RichText::new("Format").color(TEXT_DIM()));
             egui::ComboBox::from_id_source("batch_fmt").width(180.0).selected_text(self.batch.format.summary()).show_ui(ui, |ui| {
                 for f in batch_formats() {
                     ui.selectable_value(&mut self.batch.format, f, f.summary());
                 }
             });
             ui.end_row();
-            ui.label(RichText::new("Sample rate").color(TEXT_DIM));
+            ui.label(RichText::new("Sample rate").color(TEXT_DIM()));
             let rate_label = self.batch.rate.map(|r| format!("{r} Hz")).unwrap_or_else(|| "Keep original".into());
             egui::ComboBox::from_id_source("batch_rate").width(180.0).selected_text(rate_label).show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.batch.rate, None, "Keep original");
@@ -550,7 +550,7 @@ impl App {
                 }
             });
             ui.end_row();
-            ui.label(RichText::new("Save to").color(TEXT_DIM));
+            ui.label(RichText::new("Save to").color(TEXT_DIM()));
             ui.horizontal(|ui| {
                 let label = self.batch.out_dir.as_ref().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Same folder as each file".into());
                 if ui.button(label).on_hover_text("Choose an output folder").clicked() {
@@ -563,7 +563,7 @@ impl App {
                 }
             });
             ui.end_row();
-            ui.label(RichText::new("Name suffix").color(TEXT_DIM));
+            ui.label(RichText::new("Name suffix").color(TEXT_DIM()));
             ui.add(egui::TextEdit::singleline(&mut self.batch.suffix).desired_width(120.0));
             ui.end_row();
         });
@@ -607,14 +607,14 @@ impl App {
     /// Title, artist and the other tags of the active file.
     pub fn metadata_panel(&mut self, ui: &mut Ui) {
         let Some(doc) = self.doc_mut() else {
-            ui.label(RichText::new("Open a file to edit its metadata.").color(TEXT_DIM));
+            ui.label(RichText::new("Open a file to edit its metadata.").color(TEXT_DIM()));
             return;
         };
         let mut changed = false;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             egui::Grid::new("meta_grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
                 for t in export::TAGS {
-                    ui.label(RichText::new(t.label()).color(TEXT_DIM));
+                    ui.label(RichText::new(t.label()).color(TEXT_DIM()));
                     let mut v = doc.meta.get(t).to_string();
                     let edit = if t == export::Tag::Comment {
                         egui::TextEdit::multiline(&mut v).desired_rows(2).desired_width(f32::INFINITY)
@@ -637,7 +637,7 @@ impl App {
             });
             ui.label(
                 RichText::new("Saved with the file: RIFF INFO in WAV, ID3 in MP3, Vorbis comments in FLAC, iTunes tags in M4A. WAV files also keep their markers.")
-                    .color(TEXT_DIM)
+                    .color(TEXT_DIM())
                     .size(10.5),
             );
         });

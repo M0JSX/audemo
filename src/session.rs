@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::dsp::effects::fade_shape;
@@ -18,7 +19,6 @@ use crate::dsp::peaks::PeakCache;
 use crate::dsp::util::db_to_lin;
 use crate::engine::Buffer;
 
-pub const MAX_SESSION_UNDO: usize = 100;
 pub const SESSION_EXT: &str = "audemo";
 
 /// Track colours, cycled as tracks are added.
@@ -172,8 +172,35 @@ impl Envelope {
 
 /// Pan gains for -100 (left) .. +100 (right): the centre is unity and panning
 /// attenuates the opposite side (Audition's default pan law).
+// Settings from Preferences > Multitrack and Multitrack Clips.
+static EQUAL_POWER_PAN: AtomicBool = AtomicBool::new(false);
+static AUTO_CROSSFADE: AtomicBool = AtomicBool::new(true);
+static EQUAL_POWER_XFADE: AtomicBool = AtomicBool::new(true);
+static CLIP_FADE_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn set_mix_prefs(equal_power_pan: bool, auto_crossfade: bool, equal_power_crossfade: bool, clip_fade_ms: f32) {
+    EQUAL_POWER_PAN.store(equal_power_pan, Ordering::Relaxed);
+    AUTO_CROSSFADE.store(auto_crossfade, Ordering::Relaxed);
+    EQUAL_POWER_XFADE.store(equal_power_crossfade, Ordering::Relaxed);
+    CLIP_FADE_MS.store(clip_fade_ms.max(0.0).to_bits(), Ordering::Relaxed);
+}
+
+/// Fade shape of automatic crossfades (see `fade_shape`): ≈ equal power, or linear.
+fn crossfade_curve() -> f32 {
+    if EQUAL_POWER_XFADE.load(Ordering::Relaxed) {
+        0.233
+    } else {
+        0.0
+    }
+}
+
 pub fn pan_gains(pan: f32) -> (f32, f32) {
     let p = (pan / 100.0).clamp(-1.0, 1.0);
+    if EQUAL_POWER_PAN.load(Ordering::Relaxed) {
+        // Sinusoidal: constant power, −3 dB each side at centre.
+        let th = (p + 1.0) * std::f32::consts::FRAC_PI_4;
+        return (th.cos(), th.sin());
+    }
     let cut = |x: f32| (std::f32::consts::FRAC_PI_2 * x).cos();
     if p >= 0.0 {
         (cut(p), 1.0)
@@ -196,10 +223,19 @@ pub fn env_gain(db: f32) -> f32 {
 /// B fades in across the overlap. Returns the clips with those fades applied.
 pub fn effective_clips(clips: &[Clip]) -> Vec<Clip> {
     let mut v = clips.to_vec();
+    let curve = crossfade_curve();
     for (a, b) in crossfade_pairs(clips) {
         let x = v[a].end() - v[b].start;
-        v[a].fade_out = v[a].fade_out.max(x);
-        v[b].fade_in = v[b].fade_in.max(x);
+        if x > v[a].fade_out {
+            v[a].fade_out = x;
+            v[a].fade_out_curve = curve;
+            v[a].fade_out_cos = false;
+        }
+        if x > v[b].fade_in {
+            v[b].fade_in = x;
+            v[b].fade_in_curve = curve;
+            v[b].fade_in_cos = false;
+        }
     }
     for c in v.iter_mut() {
         let total = c.fade_in + c.fade_out;
@@ -214,6 +250,9 @@ pub fn effective_clips(clips: &[Clip]) -> Vec<Clip> {
 /// (earlier, later) index pairs of partially overlapping, unmuted clips.
 pub fn crossfade_pairs(clips: &[Clip]) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
+    if !AUTO_CROSSFADE.load(Ordering::Relaxed) {
+        return out;
+    }
     for (i, a) in clips.iter().enumerate() {
         for (j, b) in clips.iter().enumerate() {
             if i == j || a.mute || b.mute {
@@ -581,7 +620,7 @@ impl Session {
             master_fx: self.master_fx.clone(),
             master_fx_on: self.master_fx_on,
         });
-        if self.undo.len() > MAX_SESSION_UNDO {
+        if self.undo.len() > crate::app::undo_levels() {
             self.undo.remove(0);
         }
         self.redo.clear();
@@ -597,7 +636,7 @@ impl Session {
             master_fx: self.master_fx.clone(),
             master_fx_on: self.master_fx_on,
         });
-        if self.undo.len() > MAX_SESSION_UNDO {
+        if self.undo.len() > crate::app::undo_levels() {
             self.undo.remove(0);
         }
         self.redo.clear();
@@ -712,6 +751,7 @@ impl Session {
         let name = self.sources[&source].name.clone();
         self.push_undo("Insert Clip");
         let id = self.new_id();
+        let fade = ((f32::from_bits(CLIP_FADE_MS.load(Ordering::Relaxed)) as f64 * self.sample_rate as f64 / 1000.0) as usize).min(len / 2);
         self.tracks[track].clips.push(Clip {
             id,
             source,
@@ -720,8 +760,8 @@ impl Session {
             offset: 0,
             len,
             gain_db: 0.0,
-            fade_in: 0,
-            fade_out: 0,
+            fade_in: fade,
+            fade_out: fade,
             fade_in_curve: 0.0,
             fade_out_curve: 0.0,
             fade_in_cos: false,

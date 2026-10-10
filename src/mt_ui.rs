@@ -146,7 +146,7 @@ fn draw_meter(p: &egui::Painter, r: Rect, db: [f32; 2]) {
         }
         let x0 = r.left() + c as f32 * (w + 1.0);
         let top = r.bottom() - frac * r.height();
-        let col = if *d > -0.1 { RECORD } else if *d > -6.0 { Color32::from_rgb(0xe8, 0xd2, 0x3a) } else { Color32::from_rgb(0x2f, 0xd4, 0x8c) };
+        let col = if *d > -0.1 { RECORD() } else if *d > -6.0 { Color32::from_rgb(0xe8, 0xd2, 0x3a) } else { Color32::from_rgb(0x2f, 0xd4, 0x8c) };
         p.rect_filled(Rect::from_min_max(pos2(x0, top), pos2(x0 + w, r.bottom())), 0.0, col);
     }
 }
@@ -168,7 +168,7 @@ fn colour(c: [u8; 3]) -> Color32 {
     Color32::from_rgb(c[0], c[1], c[2])
 }
 
-fn safe_file_name(s: &str) -> String {
+pub fn safe_file_name(s: &str) -> String {
     let stem = std::path::Path::new(s).file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| s.to_string());
     let v: String = stem.chars().map(|c| if c.is_alphanumeric() || " -_.()".contains(c) { c } else { '_' }).collect();
     if v.trim().is_empty() {
@@ -510,6 +510,7 @@ impl App {
             }
         }
         let follow = self.follow;
+        let centered = self.prefs.autoscroll == crate::prefs::AutoScroll::Centered;
         let recording = self.engine.is_recording();
         let rec_head = self.transport_info().map(|t| t.0);
         let Some(si) = self.active_session.filter(|&i| i < self.sessions.len()) else { return };
@@ -527,7 +528,11 @@ impl App {
         let head = if recording { rec_head } else if st.playing && st.tag == s.id { Some(st.pos) } else { None };
         if let (true, Some(h)) = (follow, head) {
             let span = s.view_end - s.view_start;
-            if h > s.view_end - span * 0.02 || h < s.view_start {
+            if centered && !recording && (h > s.view_start + span / 2.0 || h < s.view_start) {
+                s.view_start = h - span / 2.0;
+                s.view_end = s.view_start + span;
+                s.clamp_view();
+            } else if h > s.view_end - span * 0.02 || h < s.view_start {
                 s.view_start = h - span * 0.05;
                 s.view_end = s.view_start + span;
                 if recording {
@@ -545,11 +550,17 @@ impl App {
         let st = self.engine.status();
         let s = &mut self.sessions[si];
         if st.playing && st.tag == s.id {
-            // Space leaves the cursor where playback stopped.
+            // Space leaves the cursor where playback stopped (unless
+            // "Return CTI to start position on stop" is on).
             self.engine.stop();
-            s.cursor = st.pos.max(0.0) as usize;
+            if !self.prefs.return_to_start {
+                s.cursor = st.pos.max(0.0) as usize;
+            }
             return;
         }
+        let rate = s.sample_rate;
+        self.prepare_output_rate(rate);
+        let s = &mut self.sessions[si];
         let end_all = s.end();
         let (mut start, mut end, mut loop_start) = match s.sel_range() {
             Some((a, b)) if s.cursor >= a && s.cursor < b => (s.cursor, b, a),
@@ -946,10 +957,11 @@ impl App {
                 }
             }
             Action::ZoomIn | Action::ZoomOut => {
+                let zoom_step = self.zoom_step(matches!(a, Action::ZoomIn));
                 let s = &mut self.sessions[si];
                 let pos = if playing { st.pos } else { s.cursor as f64 };
                 let anchor = if pos >= s.view_start && pos <= s.view_end { pos } else { (s.view_start + s.view_end) / 2.0 };
-                s.zoom(if matches!(a, Action::ZoomIn) { 0.5 } else { 2.0 }, anchor);
+                s.zoom(zoom_step, anchor);
             }
             Action::ZoomFull => {
                 let s = &mut self.sessions[si];
@@ -1059,7 +1071,7 @@ impl App {
                 None => "Master".to_string(),
             };
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Rack:").color(TEXT_DIM));
+                ui.label(RichText::new("Rack:").color(TEXT_DIM()));
                 egui::ComboBox::from_id_source("track_rack_owner").width(ui.available_width() - 30.0).selected_text(title).show_ui(ui, |ui| {
                     for (i, t) in s.tracks.iter().enumerate() {
                         let label = if t.is_bus() { format!("{} (bus)", t.name) } else { t.name.clone() };
@@ -1103,7 +1115,7 @@ impl App {
         }
         let mut op: Option<Op> = None;
         let list_h = (ui.available_height() - 64.0).max(80.0);
-        egui::Frame::none().fill(BG_LIST).inner_margin(egui::Margin::same(2.0)).show(ui, |ui| {
+        egui::Frame::none().fill(BG_LIST()).inner_margin(egui::Margin::same(2.0)).show(ui, |ui| {
             egui::ScrollArea::vertical().max_height(list_h).min_scrolled_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
                 let n = slots.len();
                 for i in 0..crate::app::RACK_SLOTS {
@@ -1113,23 +1125,23 @@ impl App {
                             if icon_button_sized(ui, Icon::Power, on, if on { "Turn effect off" } else { "Turn effect on" }, vec2(18.0, 18.0), true).clicked() {
                                 op = Some(Op::Toggle(i));
                             }
-                            ui.label(RichText::new(format!("{:>2}", i + 1)).monospace().color(TEXT_DIM));
+                            ui.label(RichText::new(format!("{:>2}", i + 1)).monospace().color(TEXT_DIM()));
                             // A plug-in that isn't available keeps its slot (and settings).
                             let def = idx.map(|k| &effects[k]);
                             let editable = def.map(|d| !d.params.is_empty()).unwrap_or(false);
                             match def {
                                 Some(def) => {
-                                    if ui.selectable_label(false, RichText::new(def.name).color(if on && rack_on { TEXT } else { TEXT_DIM })).on_hover_text("Click to edit settings").clicked() && editable {
+                                    if ui.selectable_label(false, RichText::new(def.name).color(if on && rack_on { TEXT() } else { TEXT_DIM() })).on_hover_text("Click to edit settings").clicked() && editable {
                                         op = Some(Op::Edit(i));
                                     }
                                 }
                                 None => {
                                     let name = crate::plugin::split_id(eid).and_then(|(_, c)| crate::plugin::find(c)).map(|p| p.name).unwrap_or_else(|| eid.to_string());
-                                    ui.label(RichText::new(format!("{name} (unavailable)")).color(WARN)).on_hover_text("This plug-in isn't installed, is disabled, or failed to load. Its settings are kept; audio passes through unchanged.");
+                                    ui.label(RichText::new(format!("{name} (unavailable)")).color(WARN())).on_hover_text("This plug-in isn't installed, is disabled, or failed to load. Its settings are kept; audio passes through unchanged.");
                                 }
                             }
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.menu_button(RichText::new("▸").color(TEXT_DIM), |ui| {
+                                ui.menu_button(RichText::new("▸").color(TEXT_DIM()), |ui| {
                                     if editable && ui.button("Edit Effect…").clicked() {
                                         op = Some(Op::Edit(i));
                                         ui.close_menu();
@@ -1153,7 +1165,7 @@ impl App {
                             ui.label(RichText::new(format!("{:>2}", i + 1)).monospace().color(Color32::from_rgb(0x66, 0x66, 0x66)));
                             if i == n {
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    ui.menu_button(RichText::new("▸").color(TEXT), |ui| {
+                                    ui.menu_button(RichText::new("▸").color(TEXT()), |ui| {
                                         for cat in std::iter::once(crate::dsp::effects::Category::Basic).chain(crate::dsp::effects::Category::MENU_ORDER) {
                                             let items: Vec<(usize, &str)> = effects
                                                 .iter()
@@ -1188,7 +1200,7 @@ impl App {
         });
         ui.add_space(3.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Effects run live, before the fader. Only real-time effects are listed.").color(TEXT_DIM).size(10.5));
+            ui.label(RichText::new("Effects run live, before the fader. Only real-time effects are listed.").color(TEXT_DIM()).size(10.5));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let tip = if rack_on { "Rack power: on" } else { "Rack power: off (bypassed)" };
                 if icon_button_sized(ui, Icon::Power, rack_on, tip, vec2(22.0, 22.0), true).clicked() {
@@ -1276,7 +1288,7 @@ impl App {
             ui.allocate_ui_at_rect(rect, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(rect.height() * 0.38);
-                    ui.label(RichText::new("No multitrack session open").color(TEXT_DIM));
+                    ui.label(RichText::new("No multitrack session open").color(TEXT_DIM()));
                     ui.add_space(6.0);
                     if ui.button("New Multitrack Session…").clicked() {
                         self.actions.push(Action::NewSession);
@@ -1294,7 +1306,7 @@ impl App {
     fn mt_tabs(&mut self, ui: &mut Ui) {
         let rect = ui.available_rect_before_wrap();
         let header = Rect::from_min_size(rect.min, vec2(rect.width(), 24.0));
-        ui.painter().rect_filled(header, 0.0, BG_HEADER);
+        ui.painter().rect_filled(header, 0.0, BG_HEADER());
         let mut switch = None;
         let mut close = false;
         ui.allocate_ui_at_rect(header, |ui| {
@@ -1311,17 +1323,17 @@ impl App {
                     };
                     let active = self.mt.view == view;
                     let font = if active { bold(12.0) } else { FontId::proportional(12.0) };
-                    let w = ui.fonts(|f| f.layout_no_wrap(title.clone(), font.clone(), TEXT).size().x) + 16.0;
+                    let w = ui.fonts(|f| f.layout_no_wrap(title.clone(), font.clone(), TEXT()).size().x) + 16.0;
                     let (r, resp) = ui.allocate_exact_size(vec2(w, 22.0), Sense::click());
                     if active {
-                        ui.painter().rect_filled(Rect::from_min_max(pos2(r.left(), r.top() + 1.0), pos2(r.right(), header.bottom())), Rounding { nw: 3.0, ne: 3.0, sw: 0.0, se: 0.0 }, BG_PANEL);
+                        ui.painter().rect_filled(Rect::from_min_max(pos2(r.left(), r.top() + 1.0), pos2(r.right(), header.bottom())), Rounding { nw: 3.0, ne: 3.0, sw: 0.0, se: 0.0 }, BG_PANEL());
                     }
-                    ui.painter().text(r.center(), Align2::CENTER_CENTER, &title, font, if active { Color32::WHITE } else { TEXT_DIM });
+                    ui.painter().text(r.center(), Align2::CENTER_CENTER, &title, font, if active { Color32::WHITE } else { TEXT_DIM() });
                     if resp.clicked() {
                         self.mt.view = view;
                     }
                     if view == MtView::Editor && !self.sessions.is_empty() {
-                        ui.menu_button(RichText::new("▾").color(TEXT), |ui| {
+                        ui.menu_button(RichText::new("▾").color(TEXT()), |ui| {
                             for (i, s) in self.sessions.iter().enumerate() {
                                 if ui.selectable_label(Some(i) == self.active_session, s.display_name()).clicked() {
                                     switch = Some(i);
@@ -1349,6 +1361,7 @@ impl App {
     }
 
     fn mt_editor(&mut self, ui: &mut Ui, si: usize) {
+        let (show_names, wheel_base) = (self.prefs.show_clip_names, self.wheel_base());
         let full = ui.available_rect_before_wrap();
         ui.allocate_rect(full, Sense::hover());
         if full.width() < 300.0 || full.height() < 100.0 {
@@ -1383,8 +1396,8 @@ impl App {
 
         // ------------------------------------------------ ruler
         painter.rect_filled(Rect::from_min_max(full.min, pos2(full.right(), ruler.bottom())), 0.0, Color32::from_rgb(0x2b, 0x2b, 0x2b));
-        painter.line_segment([pos2(full.left(), ruler.bottom()), pos2(full.right(), ruler.bottom())], Stroke::new(1.0_f32, BORDER));
-        painter.text(pos2(full.left() + 6.0, ruler.center().y), Align2::LEFT_CENTER, "hms", FontId::proportional(11.0), TEXT_DIM);
+        painter.line_segment([pos2(full.left(), ruler.bottom()), pos2(full.right(), ruler.bottom())], Stroke::new(1.0_f32, BORDER()));
+        painter.text(pos2(full.left() + 6.0, ruler.center().y), Align2::LEFT_CENTER, "hms", FontId::proportional(11.0), TEXT_DIM());
         {
             let px_per_s = v.width as f64 / ((v.end - v.start) / sr);
             let step = *RULER_STEPS.iter().find(|&&x| x * px_per_s >= 84.0).unwrap_or(&3600.0);
@@ -1394,15 +1407,15 @@ impl App {
                 let t = i as f64 * step;
                 let x = v.x(t * sr);
                 if x >= lanes.left() - 0.5 && x <= lanes.right() + 0.5 {
-                    painter.line_segment([pos2(x, ruler.bottom() - 9.0), pos2(x, ruler.bottom())], Stroke::new(1.0_f32, TEXT_DIM));
-                    painter.text(pos2(x + 3.0, ruler.top() + 3.0), Align2::LEFT_TOP, ruler_label(t, step), FontId::monospace(10.5), TEXT_DIM);
+                    painter.line_segment([pos2(x, ruler.bottom() - 9.0), pos2(x, ruler.bottom())], Stroke::new(1.0_f32, TEXT_DIM()));
+                    painter.text(pos2(x + 3.0, ruler.top() + 3.0), Align2::LEFT_TOP, ruler_label(t, step), FontId::monospace(10.5), TEXT_DIM());
                     // Faint grid line down through the tracks.
                     painter.line_segment([pos2(x, body.top()), pos2(x, body.bottom())], Stroke::new(1.0_f32, Color32::from_rgb(0x30, 0x30, 0x30)));
                 }
                 for k in 1..5 {
                     let xm = v.x((t + step * k as f64 / 5.0) * sr);
                     if xm >= lanes.left() && xm <= lanes.right() {
-                        painter.line_segment([pos2(xm, ruler.bottom() - 4.0), pos2(xm, ruler.bottom())], Stroke::new(1.0_f32, BORDER));
+                        painter.line_segment([pos2(xm, ruler.bottom() - 4.0), pos2(xm, ruler.bottom())], Stroke::new(1.0_f32, BORDER()));
                     }
                 }
             }
@@ -1439,13 +1452,13 @@ impl App {
                 continue;
             }
             let lane = Rect::from_min_max(pos2(lanes_x, row.top()), row.max);
-            let bg = if ti == s.selected_track { Color32::from_rgb(0x1a, 0x20, 0x26) } else { LANE_BG };
+            let bg = if ti == s.selected_track { Color32::from_rgb(0x1a, 0x20, 0x26) } else { LANE_BG() };
             clip_painter.rect_filled(lane, 0.0, bg);
             if t.is_bus() {
                 clip_painter.rect_filled(lane, 0.0, Color32::from_rgba_unmultiplied(0x9a, 0x9a, 0xa8, 14));
                 let feeds: Vec<&str> = s.tracks.iter().filter(|x| x.output == Some(t.id) || x.sends.iter().any(|sd| sd.bus == t.id)).map(|x| x.name.as_str()).collect();
                 let text = if feeds.is_empty() { "Bus track: set a track's Out to this bus, or add a send in the Mixer".to_string() } else { format!("Bus track, fed by: {}", feeds.join(", ")) };
-                clip_painter.text(pos2(lanes.left() + 8.0, lane.center().y), Align2::LEFT_CENTER, text, FontId::proportional(11.0), TEXT_DIM);
+                clip_painter.text(pos2(lanes.left() + 8.0, lane.center().y), Align2::LEFT_CENTER, text, FontId::proportional(11.0), TEXT_DIM());
             }
             if let Some((a, b)) = sel {
                 let x0 = v.x(a as f64).max(lane.left());
@@ -1462,7 +1475,7 @@ impl App {
                 }
                 let r = Rect::from_min_max(pos2(x0, lane.top() + 1.0), pos2(x1.max(x0 + 2.0), lane.bottom() - 1.0));
                 let selected = s.selected_clips.contains(&c.id);
-                draw_clip(&clip_painter, r, c, s.sources.get(&c.source).map(|a| a.as_ref()), colour(t.colour), selected, t.mute || c.mute, &v, lane);
+                draw_clip(&clip_painter, r, c, s.sources.get(&c.source).map(|a| a.as_ref()), colour(t.colour), selected, t.mute || c.mute, &v, lane, show_names);
             }
             // Automatic crossfades where clips overlap.
             for (ia, ib) in crossfade_pairs(&t.clips) {
@@ -1523,7 +1536,7 @@ impl App {
                         let x1 = v.x(rec_start as f64 + frames as f64 / ratio);
                         let r = Rect::from_min_max(pos2(x0, lane.top() + 1.0), pos2(x1.max(x0 + 2.0), lane.bottom() - 1.0));
                         clip_painter.rect_filled(r, 2.0, Color32::from_rgba_unmultiplied(0xd8, 0x32, 0x2c, 70));
-                        clip_painter.rect_stroke(r, 2.0, Stroke::new(1.0_f32, RECORD));
+                        clip_painter.rect_stroke(r, 2.0, Stroke::new(1.0_f32, RECORD()));
                         let body_r = Rect::from_min_max(pos2(r.left(), r.top() + CLIP_BAR), r.max);
                         let mid = body_r.center().y;
                         let amp = body_r.height() * 0.48;
@@ -1883,8 +1896,8 @@ impl App {
                 if let Some(ti) = track_at(p.y) {
                     let row = rows[ti];
                     let x = p.x.max(lanes.left());
-                    painter.line_segment([pos2(x, row.top()), pos2(x, row.bottom())], Stroke::new(2.0_f32, HOT));
-                    painter.rect_stroke(Rect::from_min_max(pos2(lanes.left(), row.top()), row.max), 0.0, Stroke::new(1.0_f32, HOT));
+                    painter.line_segment([pos2(x, row.top()), pos2(x, row.bottom())], Stroke::new(2.0_f32, HOT()));
+                    painter.rect_stroke(Rect::from_min_max(pos2(lanes.left(), row.top()), row.max), 0.0, Stroke::new(1.0_f32, HOT()));
                 }
             }
             if let Some(d) = resp.dnd_release_payload::<DocDrag>() {
@@ -1907,7 +1920,7 @@ impl App {
                     s.view_end += shift;
                     s.clamp_view();
                 } else {
-                    let f = 0.85f64.powf(scroll.y as f64 / 40.0);
+                    let f = wheel_base.powf(scroll.y as f64 / 40.0);
                     s.zoom(f, v.s(p.x));
                 }
             }
@@ -1916,14 +1929,14 @@ impl App {
         // ------------------------------------------------ cursor, playhead, selection edges
         let cx = v.x(s.cursor as f64);
         if cx >= lanes.left() && cx <= lanes.right() {
-            painter.line_segment([pos2(cx, ruler.top()), pos2(cx, body.bottom())], Stroke::new(1.0_f32, CURSOR));
-            painter.add(Shape::convex_polygon(vec![pos2(cx - 5.0, ruler.top()), pos2(cx + 5.0, ruler.top()), pos2(cx, ruler.top() + 7.0)], CURSOR, Stroke::NONE));
+            painter.line_segment([pos2(cx, ruler.top()), pos2(cx, body.bottom())], Stroke::new(1.0_f32, CURSOR()));
+            painter.add(Shape::convex_polygon(vec![pos2(cx - 5.0, ruler.top()), pos2(cx + 5.0, ruler.top()), pos2(cx, ruler.top() + 7.0)], CURSOR(), Stroke::NONE));
         }
         let head = if recording { rec_info.map(|(_, start, in_rate)| start as f64 + self.engine.recorded_frames() as f64 * sr / in_rate as f64) } else if playing { Some(st.pos) } else { None };
         if let Some(h) = head {
             let hx = v.x(h);
             if hx >= lanes.left() && hx <= lanes.right() {
-                let col = if recording { RECORD } else { PLAYHEAD };
+                let col = if recording { RECORD() } else { PLAYHEAD() };
                 painter.line_segment([pos2(hx, ruler.top()), pos2(hx, body.bottom())], Stroke::new(1.5_f32, col));
                 painter.add(Shape::convex_polygon(vec![pos2(hx - 6.0, ruler.top()), pos2(hx + 6.0, ruler.top()), pos2(hx, ruler.top() + 9.0)], col, Stroke::NONE));
             }
@@ -1960,7 +1973,7 @@ impl App {
             let hr = Rect::from_min_max(row.min, pos2(lanes_x - 1.0, row.bottom()));
             let selected = ti == s.selected_track;
             let hp = painter.with_clip_rect(header_clip);
-            hp.rect_filled(hr, 0.0, if selected { Color32::from_rgb(0x46, 0x46, 0x46) } else { BG_PANEL });
+            hp.rect_filled(hr, 0.0, if selected { Color32::from_rgb(0x46, 0x46, 0x46) } else { BG_PANEL() });
             hp.rect_filled(Rect::from_min_size(hr.min, vec2(4.0, hr.height())), 0.0, colour(s.tracks[ti].colour));
             let hresp = ui.interact(hr, ui.id().with(("mt_head", s.id, ti)), Sense::click());
             if hresp.clicked() {
@@ -1993,13 +2006,13 @@ impl App {
                 for (label, on, tip, col) in [
                     ("M", t.mute, "Mute", Color32::from_rgb(0x4d, 0xa3, 0xff)),
                     ("S", t.solo, "Solo", Color32::from_rgb(0xe8, 0xc4, 0x3a)),
-                    ("R", t.arm, "Arm for Record", RECORD),
+                    ("R", t.arm, "Arm for Record", RECORD()),
                     ("A", t.show_env, "Show volume (yellow) and pan (blue) automation", VOL_ENV_COL),
                 ] {
                     if is_bus && (label == "S" || label == "R") {
                         continue;
                     }
-                    let btn = egui::Button::new(RichText::new(label).font(bold(11.0)).color(if on { Color32::BLACK } else { TEXT }))
+                    let btn = egui::Button::new(RichText::new(label).font(bold(11.0)).color(if on { Color32::BLACK } else { TEXT() }))
                         .fill(if on { col } else { Color32::from_rgb(0x2c, 0x2c, 0x2c) })
                         .min_size(vec2(20.0, 18.0));
                     if ui.add(btn).on_hover_text(tip).clicked() {
@@ -2019,7 +2032,7 @@ impl App {
                 child.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 3.0;
                     let auto_tip = "Automated: edit the line on the track (A shows it), or right-click the line to clear it";
-                    ui.label(RichText::new("Vol").color(TEXT_DIM).size(11.0));
+                    ui.label(RichText::new("Vol").color(TEXT_DIM()).size(11.0));
                     if t.vol_env.is_empty() {
                         let r = hot_drag(ui, egui::DragValue::new(&mut t.volume_db).speed(0.2).range(-96.0..=12.0).fixed_decimals(1).suffix(" dB"));
                         if r.double_clicked() {
@@ -2031,7 +2044,7 @@ impl App {
                     } else {
                         ui.label(RichText::new("Auto").color(VOL_ENV_COL).size(11.5)).on_hover_text(auto_tip);
                     }
-                    ui.label(RichText::new("Pan").color(TEXT_DIM).size(11.0));
+                    ui.label(RichText::new("Pan").color(TEXT_DIM()).size(11.0));
                     if t.pan_env.is_empty() {
                         let r = hot_drag(ui, egui::DragValue::new(&mut t.pan).speed(0.5).range(-100.0..=100.0).fixed_decimals(0));
                         if r.double_clicked() {
@@ -2049,9 +2062,9 @@ impl App {
                 child.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 3.0;
                     if t.is_bus() {
-                        ui.label(RichText::new("BUS  → Master").color(TEXT_DIM).size(11.0));
+                        ui.label(RichText::new("BUS  → Master").color(TEXT_DIM()).size(11.0));
                     } else {
-                        ui.label(RichText::new("Out").color(TEXT_DIM).size(11.0));
+                        ui.label(RichText::new("Out").color(TEXT_DIM()).size(11.0));
                         let current = t.output.and_then(|id| buses.iter().find(|b| b.0 == id)).map(|b| b.1.clone()).unwrap_or_else(|| "Master".into());
                         egui::ComboBox::from_id_source(("mt_out", t.id)).width(78.0).selected_text(current).show_ui(ui, |ui| {
                             if ui.selectable_label(t.output.is_none(), "Master").clicked() {
@@ -2066,7 +2079,7 @@ impl App {
                     }
                     let n = t.fx.len();
                     let label = if n == 0 { "fx".to_string() } else { format!("fx {n}") };
-                    let col = if n > 0 && t.fx_on { Color32::from_rgb(0xc7, 0x7d, 0xff) } else { TEXT_DIM };
+                    let col = if n > 0 && t.fx_on { Color32::from_rgb(0xc7, 0x7d, 0xff) } else { TEXT_DIM() };
                     if ui.add(egui::Button::new(RichText::new(label).color(col).size(11.0)).min_size(vec2(30.0, 18.0))).on_hover_text("Show this track's effects rack").clicked() {
                         show_rack = Some(ti);
                     }
@@ -2123,21 +2136,21 @@ impl App {
         }
 
         // ------------------------------------------------ master row
-        painter.rect_filled(master, 0.0, BG_PANEL);
-        painter.line_segment([pos2(master.left(), master.top()), pos2(master.right(), master.top())], Stroke::new(1.0_f32, BORDER));
+        painter.rect_filled(master, 0.0, BG_PANEL());
+        painter.line_segment([pos2(master.left(), master.top()), pos2(master.right(), master.top())], Stroke::new(1.0_f32, BORDER()));
         {
             let inner = Rect::from_min_max(pos2(master.left() + 10.0, master.top() + 6.0), pos2(lanes_x + 260.0, master.bottom() - 4.0));
             let mut child = ui.child_ui(inner, Layout::left_to_right(Align::Center), None);
             child.label(RichText::new("Mix").font(bold(12.0)).color(Color32::WHITE));
             child.add_space(60.0);
-            child.label(RichText::new("Master").color(TEXT_DIM).size(11.0));
+            child.label(RichText::new("Master").color(TEXT_DIM()).size(11.0));
             let r = hot_drag(&mut child, egui::DragValue::new(&mut s.master_db).speed(0.2).range(-96.0..=12.0).fixed_decimals(1).suffix(" dB"));
             if r.changed() {
                 s.touch();
             }
             let end = s.end();
             child.add_space(16.0);
-            child.label(RichText::new(format!("{} tracks · {} · {} Hz", s.tracks.len(), format_time(end as f64, s.sample_rate), s.sample_rate)).color(TEXT_DIM).size(11.0));
+            child.label(RichText::new(format!("{} tracks · {} · {} Hz", s.tracks.len(), format_time(end as f64, s.sample_rate), s.sample_rate)).color(TEXT_DIM()).size(11.0));
         }
 
         // ------------------------------------------------ clip context menu
@@ -2256,7 +2269,7 @@ impl App {
         let solo_col = Color32::from_rgb(0xe8, 0xc4, 0x3a);
         let fx_col = Color32::from_rgb(0xc7, 0x7d, 0xff);
         let small_btn = |ui: &mut Ui, label: &str, on: bool, col: Color32| -> bool {
-            ui.add(egui::Button::new(RichText::new(label).font(bold(11.0)).color(if on { Color32::BLACK } else { TEXT })).fill(if on { col } else { Color32::from_rgb(0x2c, 0x2c, 0x2c) }).min_size(vec2(26.0, 20.0))).clicked()
+            ui.add(egui::Button::new(RichText::new(label).font(bold(11.0)).color(if on { Color32::BLACK } else { TEXT() })).fill(if on { col } else { Color32::from_rgb(0x2c, 0x2c, 0x2c) }).min_size(vec2(26.0, 20.0))).clicked()
         };
         let fader = |ui: &mut Ui, vol: &mut f32, auto: bool, meter: [f32; 2], changed: &mut bool| {
             ui.horizontal(|ui| {
@@ -2282,7 +2295,7 @@ impl App {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     for (ti, t) in s.tracks.iter_mut().enumerate() {
                         let meter = meters.get(ti).copied().unwrap_or([-120.0; 2]);
-                        egui::Frame::none().fill(if t.is_bus() { Color32::from_rgb(0x34, 0x34, 0x3c) } else { BG_PANEL }).inner_margin(egui::Margin::same(6.0)).rounding(3.0).show(ui, |ui| {
+                        egui::Frame::none().fill(if t.is_bus() { Color32::from_rgb(0x34, 0x34, 0x3c) } else { BG_PANEL() }).inner_margin(egui::Margin::same(6.0)).rounding(3.0).show(ui, |ui| {
                             ui.set_width(112.0);
                             ui.set_min_height(strip_h);
                             ui.vertical_centered(|ui| {
@@ -2294,7 +2307,7 @@ impl App {
                                 // Effects rack summary.
                                 let names: Vec<&str> = t.fx.iter().map(|f| f.effect).collect();
                                 let label = if names.is_empty() { "fx: none".to_string() } else { format!("fx: {}", names.len()) };
-                                if ui.add(egui::Button::new(RichText::new(label).size(11.0).color(if names.is_empty() || !t.fx_on { TEXT_DIM } else { fx_col })).min_size(vec2(100.0, 18.0))).on_hover_text("Open this track's effects rack").clicked() {
+                                if ui.add(egui::Button::new(RichText::new(label).size(11.0).color(if names.is_empty() || !t.fx_on { TEXT_DIM() } else { fx_col })).min_size(vec2(100.0, 18.0))).on_hover_text("Open this track's effects rack").clicked() {
                                     open_rack = Some(Some(ti));
                                 }
                                 // Sends.
@@ -2334,11 +2347,11 @@ impl App {
                                         undo = Some("Add Send");
                                     }
                                 } else {
-                                    ui.label(RichText::new("Bus").color(TEXT_DIM).size(11.0));
+                                    ui.label(RichText::new("Bus").color(TEXT_DIM()).size(11.0));
                                 }
                                 ui.separator();
                                 // Pan.
-                                ui.label(RichText::new("Pan").color(TEXT_DIM).size(10.5));
+                                ui.label(RichText::new("Pan").color(TEXT_DIM()).size(10.5));
                                 if t.pan_env.is_empty() {
                                     let r = hot_drag(ui, egui::DragValue::new(&mut t.pan).speed(0.5).range(-100.0..=100.0).fixed_decimals(0));
                                     if r.double_clicked() {
@@ -2358,7 +2371,7 @@ impl App {
                                         if small_btn(ui, "S", t.solo, solo_col) {
                                             toggles.push((ti, false));
                                         }
-                                        if small_btn(ui, "R", t.arm, RECORD) {
+                                        if small_btn(ui, "R", t.arm, RECORD()) {
                                             t.arm = !t.arm;
                                         }
                                     }
@@ -2383,14 +2396,14 @@ impl App {
                                         }
                                     });
                                 } else {
-                                    ui.label(RichText::new("→ Master").color(TEXT_DIM).size(11.0));
+                                    ui.label(RichText::new("→ Master").color(TEXT_DIM()).size(11.0));
                                 }
                             });
                         });
                     }
                     ui.add_space(12.0);
                     // Master strip.
-                    egui::Frame::none().fill(BG_PANEL).inner_margin(egui::Margin::same(6.0)).rounding(3.0).show(ui, |ui| {
+                    egui::Frame::none().fill(BG_PANEL()).inner_margin(egui::Margin::same(6.0)).rounding(3.0).show(ui, |ui| {
                         ui.set_width(112.0);
                         ui.set_min_height(strip_h);
                         ui.vertical_centered(|ui| {
@@ -2399,7 +2412,7 @@ impl App {
                             ui.label(RichText::new("Mix").font(bold(12.0)).color(Color32::WHITE));
                             let n = s.master_fx.len();
                             let label = if n == 0 { "fx: none".to_string() } else { format!("fx: {n}") };
-                            if ui.add(egui::Button::new(RichText::new(label).size(11.0).color(if n == 0 || !s.master_fx_on { TEXT_DIM } else { fx_col })).min_size(vec2(100.0, 18.0))).on_hover_text("Open the master effects rack").clicked() {
+                            if ui.add(egui::Button::new(RichText::new(label).size(11.0).color(if n == 0 || !s.master_fx_on { TEXT_DIM() } else { fx_col })).min_size(vec2(100.0, 18.0))).on_hover_text("Open the master effects rack").clicked() {
                                 open_rack = Some(None);
                             }
                             ui.add_space(fader_h.min(10.0));
@@ -2443,14 +2456,15 @@ impl App {
 
 /// A clip: name bar, waveform (per channel), fade curves, selection outline.
 #[allow(clippy::too_many_arguments)]
-fn draw_clip(p: &egui::Painter, r: Rect, c: &Clip, src: Option<&Source>, track_col: Color32, selected: bool, muted: bool, v: &TView, lane: Rect) {
+#[allow(clippy::too_many_arguments)]
+fn draw_clip(p: &egui::Painter, r: Rect, c: &Clip, src: Option<&Source>, track_col: Color32, selected: bool, muted: bool, v: &TView, lane: Rect, names: bool) {
     let base = if muted { Color32::from_rgb(0x3a, 0x3a, 0x3a) } else { track_col };
     let fill = if selected { base.linear_multiply(0.42) } else { base.linear_multiply(0.24) };
     p.rect_filled(r, 3.0, fill);
     let bar = Rect::from_min_max(r.min, pos2(r.right(), r.top() + CLIP_BAR));
     p.rect_filled(bar, Rounding { nw: 3.0, ne: 3.0, sw: 0.0, se: 0.0 }, if selected { base.linear_multiply(0.85) } else { base.linear_multiply(0.5) });
     let text_x = r.left().max(lane.left()) + 4.0;
-    if r.right() - text_x > 20.0 {
+    if names && r.right() - text_x > 20.0 {
         let label = if c.gain_db.abs() > 0.05 { format!("{}  ({:+.1} dB)", c.name, c.gain_db) } else { c.name.clone() };
         p.with_clip_rect(bar.intersect(lane)).text(pos2(text_x, bar.center().y), Align2::LEFT_CENTER, label, FontId::proportional(10.5), if selected { Color32::BLACK } else { Color32::WHITE });
     }
@@ -2486,7 +2500,7 @@ fn draw_clip(p: &egui::Painter, r: Rect, c: &Clip, src: Option<&Source>, track_c
         }
         p.extend(shapes);
     } else {
-        p.text(wave.center(), Align2::CENTER_CENTER, "Offline", FontId::proportional(10.5), TEXT_DIM);
+        p.text(wave.center(), Align2::CENTER_CENTER, "Offline", FontId::proportional(10.5), TEXT_DIM());
     }
     // Fade curves and handles.
     let spp = v.spp();

@@ -127,6 +127,8 @@ pub struct Shared {
     tag: u64,
     volume: f32,
     peaks: [f32; 2],
+    /// Device output channels that Audemo's left and right play on.
+    out_map: [usize; 2],
 }
 
 /// Live state of a recording in progress, shared with the input callback.
@@ -187,9 +189,27 @@ impl RecView {
 struct Recording {
     _stream: cpal::Stream,
     shared: Arc<Mutex<RecShared>>,
+    /// Device input channels recorded as left and right.
+    map: [usize; 2],
     channels: usize,
     rate: u32,
     view: RecView,
+}
+
+/// How the audio hardware is set up (from Preferences > Audio Hardware and
+/// Audio Channel Mapping).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AudioConfig {
+    /// Audio API name ("CoreAudio", "WASAPI", "ALSA" …); None = default.
+    pub host: Option<String>,
+    pub output: Option<String>,
+    pub input: Option<String>,
+    /// Frames per buffer (0 = the device's default).
+    pub buffer: u32,
+    /// Output sample rate (0 = the device's default).
+    pub rate: u32,
+    pub out_map: [usize; 2],
+    pub in_map: [usize; 2],
 }
 
 pub struct Engine {
@@ -197,9 +217,14 @@ pub struct Engine {
     _stream: Option<cpal::Stream>,
     pub out_rate: u32,
     pub out_channels: usize,
+    /// Frames per buffer actually in use (None = the device decides).
+    pub out_buffer: Option<u32>,
     pub device_name: String,
-    pub input_name: Option<String>,
-    pub output_choice: Option<String>,
+    pub host_name: String,
+    pub config: AudioConfig,
+    /// A sample rate requested for the file being played ("force hardware
+    /// to document sample rate").
+    rate_override: Option<u32>,
     pub error: Option<String>,
     rec: Option<Recording>,
 }
@@ -211,9 +236,57 @@ pub struct Status {
     pub tag: u64,
 }
 
-/// Names of the available (input, output) devices.
-pub fn list_devices() -> (Vec<String>, Vec<String>) {
-    let host = cpal::default_host();
+/// Names of the audio APIs this system offers ("Device Class").
+pub fn hosts() -> Vec<String> {
+    cpal::available_hosts().into_iter().map(|h| h.name().to_string()).collect()
+}
+
+/// The audio API named `name`, or the system default.
+fn host(name: Option<&str>) -> cpal::Host {
+    if let Some(n) = name {
+        if let Some(id) = cpal::available_hosts().into_iter().find(|h| h.name() == n) {
+            if let Ok(h) = cpal::host_from_id(id) {
+                return h;
+            }
+        }
+    }
+    cpal::default_host()
+}
+
+pub fn default_host_name() -> String {
+    cpal::default_host().id().name().to_string()
+}
+
+/// What an output device supports: (channels, sample rates, buffer-size range).
+pub fn output_caps(host_name: Option<&str>, name: Option<&str>) -> (usize, Vec<u32>, Option<(u32, u32)>) {
+    let Some(d) = find_output(host_name, name) else { return (2, Vec::new(), None) };
+    let ch = d.default_output_config().map(|c| c.channels() as usize).unwrap_or(2);
+    let mut rates = Vec::new();
+    let mut buf = None;
+    if let Ok(ranges) = d.supported_output_configs() {
+        for r in ranges {
+            for rate in [8000, 11025, 16000, 22050, 32000, 44100, 48000, 88200, 96000, 176400, 192000] {
+                if r.min_sample_rate().0 <= rate && rate <= r.max_sample_rate().0 && !rates.contains(&rate) {
+                    rates.push(rate);
+                }
+            }
+            if let cpal::SupportedBufferSize::Range { min, max } = r.buffer_size() {
+                buf = Some((*min, *max));
+            }
+        }
+    }
+    rates.sort_unstable();
+    (ch, rates, buf)
+}
+
+/// Input channels of an input device.
+pub fn input_channels(host_name: Option<&str>, name: Option<&str>) -> usize {
+    find_input(host_name, name).and_then(|d| d.default_input_config().ok()).map(|c| c.channels() as usize).unwrap_or(2)
+}
+
+/// Names of the available (input, output) devices of `host_name`.
+pub fn list_devices(host_name: Option<&str>) -> (Vec<String>, Vec<String>) {
+    let host = host(host_name);
     let ins = host
         .input_devices()
         .map(|it| it.filter_map(|d| d.name().ok()).collect())
@@ -225,8 +298,8 @@ pub fn list_devices() -> (Vec<String>, Vec<String>) {
     (ins, outs)
 }
 
-fn find_output(name: Option<&str>) -> Option<cpal::Device> {
-    let host = cpal::default_host();
+fn find_output(host_name: Option<&str>, name: Option<&str>) -> Option<cpal::Device> {
+    let host = host(host_name);
     if let Some(n) = name {
         if let Ok(mut it) = host.output_devices() {
             if let Some(d) = it.find(|d| d.name().map(|x| x == n).unwrap_or(false)) {
@@ -237,8 +310,8 @@ fn find_output(name: Option<&str>) -> Option<cpal::Device> {
     host.default_output_device()
 }
 
-fn find_input(name: Option<&str>) -> Option<cpal::Device> {
-    let host = cpal::default_host();
+fn find_input(host_name: Option<&str>, name: Option<&str>) -> Option<cpal::Device> {
+    let host = host(host_name);
     if let Some(n) = name {
         if let Ok(mut it) = host.input_devices() {
             if let Some(d) = it.find(|d| d.name().map(|x| x == n).unwrap_or(false)) {
@@ -250,7 +323,7 @@ fn find_input(name: Option<&str>) -> Option<cpal::Device> {
 }
 
 impl Engine {
-    pub fn new(output: Option<String>, input: Option<String>) -> Self {
+    pub fn new(config: AudioConfig) -> Self {
         let shared = Arc::new(Mutex::new(Shared {
             buffer: Arc::new(Vec::new()),
             stream: None,
@@ -267,15 +340,18 @@ impl Engine {
             tag: 0,
             volume: 1.0,
             peaks: [0.0; 2],
+            out_map: config.out_map,
         }));
         let mut engine = Engine {
             shared,
             _stream: None,
             out_rate: 48000,
             out_channels: 2,
+            out_buffer: None,
             device_name: "No output device".into(),
-            input_name: input,
-            output_choice: output,
+            host_name: String::new(),
+            config,
+            rate_override: None,
             error: None,
             rec: None,
         };
@@ -285,33 +361,101 @@ impl Engine {
         engine
     }
 
-    /// Switch output device (None = system default) and reopen the stream.
-    pub fn set_output(&mut self, name: Option<String>) -> Result<(), String> {
+    /// Apply a new hardware setup, reopening the output if it changed.
+    pub fn set_config(&mut self, config: AudioConfig) -> Result<(), String> {
+        let reopen = config.host != self.config.host || config.output != self.config.output || config.buffer != self.config.buffer || config.rate != self.config.rate;
+        if let Ok(mut s) = self.shared.lock() {
+            s.out_map = config.out_map;
+        }
+        self.config = config;
+        if !reopen && self._stream.is_some() {
+            return Ok(());
+        }
         self.stop();
         self._stream = None;
-        self.output_choice = name;
+        self.rate_override = None;
         let r = self.open_output();
         self.error = r.clone().err();
         r
     }
 
+    /// Run the output at `rate` if the device can (None = the configured
+    /// rate). Returns true if the output was reopened.
+    pub fn set_rate_override(&mut self, rate: Option<u32>) -> bool {
+        let want = rate.or(if self.config.rate > 0 { Some(self.config.rate) } else { None });
+        if rate == self.rate_override || want == Some(self.out_rate) && rate.is_some() {
+            self.rate_override = rate;
+            return false;
+        }
+        self.rate_override = rate;
+        self.stop();
+        self._stream = None;
+        let r = self.open_output();
+        self.error = r.err();
+        true
+    }
+
     fn open_output(&mut self) -> Result<(), String> {
-        let device = find_output(self.output_choice.as_deref()).ok_or("No audio output device found.")?;
+        let host_name = self.config.host.clone();
+        self.host_name = host(host_name.as_deref()).id().name().to_string();
+        let device = find_output(host_name.as_deref(), self.config.output.as_deref()).ok_or("No audio output device found.")?;
         self.device_name = device.name().unwrap_or_else(|_| "Default output".into());
         let supported = device.default_output_config().map_err(|e| e.to_string())?;
-        let fmt = supported.sample_format();
-        let cfg: cpal::StreamConfig = supported.into();
+        let mut fmt = supported.sample_format();
+        let mut buf_range = supported.buffer_size().clone();
+        let mut cfg: cpal::StreamConfig = supported.into();
+        // A chosen sample rate, if a configuration of the device offers it.
+        let want_rate = self.rate_override.or(if self.config.rate > 0 { Some(self.config.rate) } else { None });
+        if let Some(rate) = want_rate.filter(|r| *r != cfg.sample_rate.0) {
+            if let Ok(ranges) = device.supported_output_configs() {
+                let ranges: Vec<_> = ranges.collect();
+                let fits = |r: &cpal::SupportedStreamConfigRange| r.min_sample_rate().0 <= rate && rate <= r.max_sample_rate().0;
+                let pick = ranges
+                    .iter()
+                    .find(|r| fits(r) && r.channels() == cfg.channels && r.sample_format() == fmt)
+                    .or_else(|| ranges.iter().find(|r| fits(r) && r.channels() == cfg.channels))
+                    .or_else(|| ranges.iter().find(|r| fits(r)));
+                if let Some(r) = pick {
+                    let sc = r.clone().with_sample_rate(cpal::SampleRate(rate));
+                    fmt = sc.sample_format();
+                    buf_range = sc.buffer_size().clone();
+                    cfg = sc.into();
+                }
+            }
+        }
+        // A chosen buffer size, clamped to what the device accepts.
+        self.out_buffer = None;
+        if self.config.buffer > 0 {
+            let n = match buf_range {
+                cpal::SupportedBufferSize::Range { min, max } => self.config.buffer.clamp(min, max.max(min)),
+                cpal::SupportedBufferSize::Unknown => self.config.buffer,
+            };
+            cfg.buffer_size = cpal::BufferSize::Fixed(n);
+            self.out_buffer = Some(n);
+        }
         self.out_rate = cfg.sample_rate.0;
         self.out_channels = cfg.channels as usize;
-        let shared = self.shared.clone();
-        let stream = match fmt {
-            cpal::SampleFormat::F32 => build_output::<f32>(&device, &cfg, shared),
-            cpal::SampleFormat::I16 => build_output::<i16>(&device, &cfg, shared),
-            cpal::SampleFormat::U16 => build_output::<u16>(&device, &cfg, shared),
-            cpal::SampleFormat::I32 => build_output::<i32>(&device, &cfg, shared),
-            cpal::SampleFormat::F64 => build_output::<f64>(&device, &cfg, shared),
-            other => Err(format!("Unsupported output sample format {other:?}")),
-        }?;
+        let build = |cfg: &cpal::StreamConfig| {
+            let shared = self.shared.clone();
+            match fmt {
+                cpal::SampleFormat::F32 => build_output::<f32>(&device, cfg, shared),
+                cpal::SampleFormat::I16 => build_output::<i16>(&device, cfg, shared),
+                cpal::SampleFormat::U16 => build_output::<u16>(&device, cfg, shared),
+                cpal::SampleFormat::I32 => build_output::<i32>(&device, cfg, shared),
+                cpal::SampleFormat::F64 => build_output::<f64>(&device, cfg, shared),
+                other => Err(format!("Unsupported output sample format {other:?}")),
+            }
+        };
+        let stream = match build(&cfg) {
+            Ok(s) => s,
+            Err(_) if self.out_buffer.is_some() => {
+                // Some drivers refuse fixed sizes: fall back to the default.
+                cfg.buffer_size = cpal::BufferSize::Default;
+                self.out_buffer = None;
+                build(&cfg)?
+            }
+            Err(e) => return Err(e),
+        };
         stream.play().map_err(|e| e.to_string())?;
         self._stream = Some(stream);
         Ok(())
@@ -518,7 +662,7 @@ impl Engine {
             let n = (chunk.len() - off).min(total - i);
             for frame in chunk[off..off + n].chunks_exact(n_ch) {
                 for c in 0..keep {
-                    v.chans[c].push(frame[c]);
+                    v.chans[c].push(frame[r.map[c]]);
                 }
             }
             i += n - n % n_ch;
@@ -550,7 +694,7 @@ impl Engine {
         if let Some(r) = &self.rec {
             return Ok((r.rate, r.channels));
         }
-        let device = find_input(self.input_name.as_deref()).ok_or("No audio input device found.")?;
+        let device = find_input(self.config.host.as_deref(), self.config.input.as_deref()).ok_or("No audio input device found.")?;
         let supported = device.default_input_config().map_err(|e| e.to_string())?;
         let fmt = supported.sample_format();
         let cfg: cpal::StreamConfig = supported.into();
@@ -563,18 +707,20 @@ impl Engine {
             peaks: [0.0; 2],
         }));
         let s = shared.clone();
+        let n_in = cfg.channels.max(1) as usize;
+        let map = [self.config.in_map[0].min(n_in - 1), self.config.in_map[1].min(n_in - 1)];
         let stream = match fmt {
-            cpal::SampleFormat::F32 => build_input::<f32>(&device, &cfg, s),
-            cpal::SampleFormat::I16 => build_input::<i16>(&device, &cfg, s),
-            cpal::SampleFormat::U16 => build_input::<u16>(&device, &cfg, s),
-            cpal::SampleFormat::I32 => build_input::<i32>(&device, &cfg, s),
+            cpal::SampleFormat::F32 => build_input::<f32>(&device, &cfg, s, map),
+            cpal::SampleFormat::I16 => build_input::<i16>(&device, &cfg, s, map),
+            cpal::SampleFormat::U16 => build_input::<u16>(&device, &cfg, s, map),
+            cpal::SampleFormat::I32 => build_input::<i32>(&device, &cfg, s, map),
             other => Err(format!("Unsupported input sample format {other:?}")),
         }?;
         stream.play().map_err(|e| e.to_string())?;
         let (rate, channels) = (cfg.sample_rate.0, cfg.channels as usize);
         let mut view = RecView::default();
         view.reset(channels.clamp(1, 2));
-        self.rec = Some(Recording { _stream: stream, shared, channels, rate, view });
+        self.rec = Some(Recording { _stream: stream, shared, map, channels, rate, view });
         Ok((rate, channels))
     }
 
@@ -657,7 +803,9 @@ where
                                 win = (start, start + MIX_BLOCK);
                             }
                         }
-                        for (c, out) in frame.iter_mut().enumerate() {
+                        // Audemo's left and right, then onto the mapped device channels.
+                        let mut lr = [0.0f32; 2];
+                        for (c, out) in lr.iter_mut().enumerate() {
                             let (a, b) = match &stream {
                                 Some(sb) => {
                                     let a = sb.sample(c, i0);
@@ -678,10 +826,20 @@ where
                                 }
                             };
                             let v = (a + (b - a) * fr) * st.volume;
-                            if c < 2 {
-                                pk[c] = pk[c].max(v.abs());
+                            pk[c] = pk[c].max(v.abs());
+                            *out = v;
+                        }
+                        frame.iter_mut().for_each(|s| *s = silence);
+                        if channels == 1 {
+                            frame[0] = T::from_sample((0.5 * (lr[0] + lr[1])).clamp(-1.0, 1.0));
+                        } else {
+                            let (ml, mr) = (st.out_map[0].min(channels - 1), st.out_map[1].min(channels - 1));
+                            if ml == mr {
+                                frame[ml] = T::from_sample((0.5 * (lr[0] + lr[1])).clamp(-1.0, 1.0));
+                            } else {
+                                frame[ml] = T::from_sample(lr[0].clamp(-1.0, 1.0));
+                                frame[mr] = T::from_sample(lr[1].clamp(-1.0, 1.0));
                             }
-                            *out = T::from_sample(v.clamp(-1.0, 1.0));
                         }
                         st.pos += step;
                         if st.pos >= st.end {
@@ -715,6 +873,7 @@ fn build_input<T>(
     device: &cpal::Device,
     cfg: &cpal::StreamConfig,
     shared: Arc<Mutex<RecShared>>,
+    map: [usize; 2],
 ) -> Result<cpal::Stream, String>
 where
     T: cpal::SizedSample,
@@ -731,7 +890,7 @@ where
                 let s: &mut RecShared = &mut guard;
                 for frame in input.chunks(channels) {
                     for c in 0..2 {
-                        let v: f32 = cpal::Sample::to_sample::<f32>(frame[c.min(frame.len() - 1)]);
+                        let v: f32 = cpal::Sample::to_sample::<f32>(frame[map[c].min(frame.len() - 1)]);
                         s.peaks[c] = s.peaks[c].max(v.abs());
                     }
                     for &smp in frame {

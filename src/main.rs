@@ -3,6 +3,7 @@
 
 mod analysis_ui;
 mod app;
+mod autosave;
 mod dialogs;
 mod dsp;
 mod editor;
@@ -17,6 +18,7 @@ mod panels;
 mod plugin;
 mod plugin_ui;
 mod prefs;
+mod prefs_ui;
 mod session;
 mod theme;
 mod tools_ui;
@@ -37,11 +39,11 @@ impl eframe::App for app::App {
             self.left_column(ctx);
         }
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(theme::BG_DEEP).inner_margin(egui::Margin::same(2.0)))
+            .frame(egui::Frame::none().fill(theme::BG_DEEP()).inner_margin(egui::Margin::same(2.0)))
             .show(ctx, |ui| {
                 self.transport_bar(ui);
                 egui::CentralPanel::default()
-                    .frame(egui::Frame::none().fill(theme::BG_DEEP).inner_margin(egui::Margin::same(2.0)))
+                    .frame(egui::Frame::none().fill(theme::BG_DEEP()).inner_margin(egui::Margin::same(2.0)))
                     .show_inside(ui, |ui| self.editor_ui(ui));
             });
         self.dialogs(ctx);
