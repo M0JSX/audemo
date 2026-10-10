@@ -14,6 +14,8 @@ mod liverack;
 mod macmenu;
 mod mt_ui;
 mod panels;
+mod plugin;
+mod plugin_ui;
 mod prefs;
 mod session;
 mod theme;
@@ -49,6 +51,11 @@ impl eframe::App for app::App {
 }
 
 fn main() -> eframe::Result<()> {
+    // Plug-in scanning runs in a child process: `audemo --scan-vst3 <bundle>`.
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 3 && args[1] == "--scan-vst3" {
+        std::process::exit(plugin::scan_child(std::path::Path::new(&args[2])));
+    }
     let files: Vec<PathBuf> = std::env::args().skip(1).map(PathBuf::from).filter(|p| p.is_file()).collect();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

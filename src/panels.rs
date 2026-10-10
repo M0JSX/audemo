@@ -197,6 +197,9 @@ impl App {
                                 }
                             });
                         }
+                        ui.separator();
+                        if let Some(i) = crate::plugin_ui::plugin_menu(ui, &effects, has_doc, |_| true) { self.actions.push(Action::OpenEffect(i)); }
+                        if item(ui, "Audio Plug-In Manager…", "", true) { self.actions.push(Action::PluginManager); }
                     });
                     ui.menu_button("Favorites", |ui| {
                         for (label, id, preset) in FAVORITES {

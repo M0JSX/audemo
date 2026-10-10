@@ -384,6 +384,11 @@ impl App {
                     next = Some(Dialog::Convert { rate, channels });
                 }
             }
+            Dialog::PluginManager => {
+                if self.plugin_manager(ctx) {
+                    next = Some(Dialog::PluginManager);
+                }
+            }
             Dialog::Shortcuts => {
                 let mut open = true;
                 centered(egui::Window::new("Keyboard Shortcuts")).open(&mut open).show(ctx, |ui| {
@@ -589,6 +594,18 @@ impl App {
         let previewing_now = self.engine.is_playing_tag(PREVIEW_TAG);
         let Some(Dialog::Effect(d)) = &mut self.dialog else { return };
         let def: &EffectDef = &effects[d.idx];
+        let is_plugin = crate::plugin::is_plugin(def);
+        // A plug-in's controls come from an editing instance of it.
+        if is_plugin && d.plugin.is_none() && d.error.is_none() {
+            match crate::plugin::editor::PluginEditor::open(&d.params, sr) {
+                Ok(ed) => d.plugin = Some(ed),
+                Err(e) => d.error = Some(e),
+            }
+        }
+        if let Some(ed) = d.plugin.as_mut() {
+            ed.poll_window();
+            ctx.request_repaint_after(std::time::Duration::from_millis(if ed.window_open() { 30 } else { 200 }));
+        }
         let rack_mode = d.rack_slot.is_some() || d.track_fx.is_some();
         let track_mode = d.track_fx.is_some();
         let scope = if let Some((sid, tid, slot_id)) = d.track_fx {
@@ -629,6 +646,29 @@ impl App {
                 ui.label(RichText::new(def.description).color(TEXT_DIM));
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
+                    if is_plugin {
+                        if let Some(ed) = d.plugin.as_mut() {
+                            if ed.has_window() {
+                                let label = if ed.window_open() { "Hide Plug-In Window" } else { "Show Plug-In Window" };
+                                if ui.button(label).on_hover_text("The plug-in's own controls").clicked() {
+                                    if let Err(e) = ed.toggle_window() {
+                                        d.error = Some(e);
+                                    }
+                                }
+                            }
+                            let lat = ed.latency();
+                            if lat > 0 {
+                                ui.label(RichText::new(format!("Latency {lat} samples (compensated when applied)")).color(TEXT_DIM).size(11.0));
+                            }
+                        }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.small_button("Reset").on_hover_text("The plug-in's default settings").clicked() {
+                                d.params = def.default_params();
+                                d.preset = "(Default)".into();
+                            }
+                        });
+                        return;
+                    }
                     ui.label("Presets:");
                     let mut chosen: Option<String> = None;
                     egui::ComboBox::from_id_source("presets").width(240.0).selected_text(d.preset.clone()).show_ui(ui, |ui| {
@@ -655,9 +695,17 @@ impl App {
                     response_curve(ui, def, &mut d.params, &mut d.drag_handle, sr, resp);
                     ui.add_space(4.0);
                 }
-                egui::ScrollArea::vertical().max_height(360.0).auto_shrink([false, true]).show(ui, |ui| {
-                    param_grid(ui, def, &mut d.params, sr);
-                });
+                if is_plugin {
+                    if let Some(ed) = d.plugin.as_mut() {
+                        egui::ScrollArea::vertical().max_height(420.0).auto_shrink([false, true]).show(ui, |ui| {
+                            ed.ui(ui, &mut d.params);
+                        });
+                    }
+                } else {
+                    egui::ScrollArea::vertical().max_height(360.0).auto_shrink([false, true]).show(ui, |ui| {
+                        param_grid(ui, def, &mut d.params, sr);
+                    });
+                }
                 if let Some(e) = &d.error {
                     ui.add_space(4.0);
                     ui.label(RichText::new(e).color(WARN));

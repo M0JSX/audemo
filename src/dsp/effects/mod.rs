@@ -44,6 +44,8 @@ pub enum Category {
     Stereo,
     TimePitch,
     Generate,
+    /// Third-party plug-ins (VST3, Audio Units).
+    Plugin,
 }
 
 impl Category {
@@ -73,6 +75,7 @@ impl Category {
             Category::Stereo => "Stereo Imagery",
             Category::TimePitch => "Time and Pitch",
             Category::Generate => "Generate",
+            Category::Plugin => "Plug-ins",
         }
     }
 }

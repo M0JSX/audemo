@@ -50,7 +50,20 @@ pub const RT_EFFECTS: &[&str] = &[
 ];
 
 pub fn supports(id: &str) -> bool {
-    RT_EFFECTS.contains(&id)
+    RT_EFFECTS.contains(&id) || (is_plugin_id(id) && PLUGIN_MAKER.get().is_some())
+}
+
+fn is_plugin_id(id: &str) -> bool {
+    id.starts_with("vst3:") || id.starts_with("au:")
+}
+
+/// Creates streaming instances of third-party plug-ins (ids `vst3:…`, `au:…`);
+/// installed by the host so this module stays dependency-free.
+pub type PluginMaker = fn(&str, &Params, u32) -> Option<Box<dyn RtEffect>>;
+static PLUGIN_MAKER: std::sync::OnceLock<PluginMaker> = std::sync::OnceLock::new();
+
+pub fn set_plugin_maker(f: PluginMaker) {
+    let _ = PLUGIN_MAKER.set(f);
 }
 
 /// A streaming instance of effect `id` with parameters `p`.
@@ -77,6 +90,7 @@ pub fn make(id: &str, p: &Params, sr: u32) -> Option<Box<dyn RtEffect>> {
         "stereo_expander" => Box::new(Expander::new(sr)),
         "channel_mixer" => Box::new(Matrix::default()),
         "pan" => Box::new(Pan::default()),
+        _ if is_plugin_id(id) => return PLUGIN_MAKER.get().and_then(|f| f(id, p, sr)),
         _ => return None,
     };
     e.set_params(p);

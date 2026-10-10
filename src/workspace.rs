@@ -299,6 +299,9 @@ impl App {
                                                 }
                                             });
                                         }
+                                        if let Some(ei) = crate::plugin_ui::plugin_menu(ui, &effects, true, |_| true) {
+                                            add = Some((i, ei));
+                                        }
                                     })
                                     .response
                                     .on_hover_text("Add an effect");
@@ -383,6 +386,7 @@ impl App {
                 error: None,
                 rack_slot: Some(i),
                 track_fx: None,
+                plugin: None,
             }));
         }
     }

@@ -1163,6 +1163,9 @@ impl App {
                                                 }
                                             });
                                         }
+                                        if let Some(ei) = crate::plugin_ui::plugin_menu(ui, &effects, true, |e| crate::dsp::effects::rt::supports(e.id)) {
+                                            op = Some(Op::Add(ei));
+                                        }
                                     })
                                     .response
                                     .on_hover_text("Add an effect");
@@ -1248,6 +1251,7 @@ impl App {
                     error: None,
                     rack_slot: None,
                     track_fx: Some((session_id, owner_id, slot_id)),
+                    plugin: None,
                 }));
             }
         }

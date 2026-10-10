@@ -444,6 +444,8 @@ pub struct EffectDialog {
     /// Editing a multitrack rack slot: (session id, track id or None for the
     /// master, slot id). Changes are heard live.
     pub track_fx: Option<(u64, Option<u64>, u64)>,
+    /// A VST3 plug-in's controls (an editing instance of the plug-in).
+    pub plugin: Option<crate::plugin::editor::PluginEditor>,
 }
 
 pub enum Dialog {
@@ -455,6 +457,7 @@ pub enum Dialog {
     MixPaste { mode: usize, clip_db: f32, orig_db: f32 },
     Convert { rate: u32, channels: usize },
     Shortcuts,
+    PluginManager,
     About,
     Message { title: String, text: String },
     ConfirmClose { doc: usize },
@@ -554,6 +557,7 @@ pub enum Action {
     Nudge(f64),
     ClearHistory,
     AmplitudeStatistics,
+    PluginManager,
     SetMode(Mode),
     NewSession,
     MtAddTrack,
@@ -601,6 +605,11 @@ pub struct App {
     pub dialog: Option<Dialog>,
     pub job: Option<Job>,
     pub saving: Option<SaveJob>,
+    /// A plug-in scan in progress.
+    pub plugin_scan: Option<Arc<std::sync::Mutex<crate::plugin::ScanProgress>>>,
+    /// Bumped whenever the effect list changes (plug-ins rescanned).
+    pub effects_gen: u64,
+    pub plugin_filter: String,
     pub loads: Vec<(PathBuf, LoadIntent, Receiver<Result<io::Decoded, String>>)>,
     pub status: String,
     pub status_at: Instant,
@@ -663,6 +672,8 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, open: Vec<PathBuf>) -> Self {
         crate::theme::apply(&cc.egui_ctx);
+        let wake = cc.egui_ctx.clone();
+        crate::plugin::init_main_thread(move || wake.request_repaint());
         let prefs = Prefs::load();
         let engine = Engine::new(prefs.output_device.clone(), prefs.input_device.clone());
         let browser_dir = prefs
@@ -680,12 +691,15 @@ impl App {
                 None => format!("Output: {} @ {} Hz", engine.device_name, engine.out_rate),
             },
             engine,
-            effects: Arc::new(effects::registry()),
+            effects: Arc::new(Self::all_effects()),
             clipboard: None,
             noise_print: None,
             dialog: None,
             job: None,
             saving: None,
+            plugin_scan: None,
+            effects_gen: 0,
+            plugin_filter: String::new(),
             loads: Vec::new(),
             status_at: Instant::now(),
             show_spectral: false,
@@ -740,9 +754,55 @@ impl App {
         if !open.is_empty() {
             app.actions.push(Action::OpenPaths(open));
         }
+        if crate::plugin::needs_first_scan() {
+            app.plugin_scan = Some(crate::plugin::start_scan(false));
+        }
         #[cfg(any(target_os = "macos", audemo_check_menu))]
         app.init_native_menu();
         app
+    }
+
+    /// Built-in effects followed by the enabled plug-ins.
+    pub fn all_effects() -> Vec<EffectDef> {
+        let mut v = effects::registry();
+        v.extend(crate::plugin::effect_defs());
+        v
+    }
+
+    fn poll_plugin_scan(&mut self) {
+        let done = self.plugin_scan.as_ref().map(|p| p.lock().map(|p| p.finished).unwrap_or(true)).unwrap_or(false);
+        if done {
+            let found = self.plugin_scan.take().and_then(|p| p.lock().ok().map(|p| p.found)).unwrap_or(0);
+            self.reload_plugins();
+            let n = crate::plugin::snapshot().plugins.len();
+            self.set_status(format!("Plug-in scan finished: {found} new or updated, {n} available."));
+        }
+    }
+
+    /// Rebuild the effect list after plug-ins were scanned, enabled or
+    /// disabled, keeping rack slots and the last effect pointing at the same
+    /// effects (by id).
+    pub fn reload_plugins(&mut self) {
+        let old = self.effects.clone();
+        let new = Self::all_effects();
+        let remap = |i: usize| old.get(i).and_then(|e| new.iter().position(|n| n.id == e.id));
+        self.rack.retain_mut(|s| match remap(s.idx) {
+            Some(i) => {
+                s.idx = i;
+                true
+            }
+            None => false,
+        });
+        self.last_effect = self.last_effect.take().and_then(|(i, p)| remap(i).map(|i| (i, p)));
+        if let Some(Dialog::Effect(d)) = &mut self.dialog {
+            match remap(d.idx) {
+                Some(i) => d.idx = i,
+                None => self.dialog = None,
+            }
+        }
+        self.effects = Arc::new(new);
+        self.effects_gen += 1;
+        self.rack_touched();
     }
 
     pub fn doc(&self) -> Option<&Document> {
@@ -826,6 +886,8 @@ impl App {
     pub fn frame(&mut self, ctx: &egui::Context) {
         #[cfg(any(target_os = "macos", audemo_check_menu))]
         self.poll_native_menu(ctx);
+        crate::plugin::pump();
+        self.poll_plugin_scan();
         self.poll_loads();
         self.poll_job();
         self.poll_save();
@@ -2008,8 +2070,10 @@ impl App {
                     error: None,
                     rack_slot: None,
                     track_fx: None,
+                    plugin: None,
                 }));
             }
+            Action::PluginManager => self.dialog = Some(Dialog::PluginManager),
             Action::ApplyEffect(idx, params) => {
                 self.close_effect_dialog();
                 self.run_effect(idx, params);

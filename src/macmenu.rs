@@ -12,6 +12,8 @@ use crate::dsp::effects::Category;
 pub struct NativeMenu {
     _menu: Menu,
     recent: Vec<PathBuf>,
+    /// The effect list this menu was built from (plug-ins change it).
+    effects_gen: u64,
 }
 
 fn acc(shift: bool, code: Code) -> Option<Accelerator> {
@@ -144,6 +146,23 @@ impl NativeMenu {
             }
             let _ = effects.append(&sub);
         }
+        let _ = effects.append(&sep());
+        for (format, title) in [(crate::plugin::Format::Au, "Audio Units"), (crate::plugin::Format::Vst3, "VST 3")] {
+            let sub = Submenu::new(title, true);
+            let groups = crate::plugin_ui::plugins_by_vendor(&app.effects, format, |_| true);
+            if groups.is_empty() {
+                let _ = sub.append(&MenuItem::with_id(format!("none:{title}"), "None found (scan in the Audio Plug-In Manager)", false, None));
+            }
+            for (vendor, items) in groups {
+                let vs = Submenu::new(&vendor, true);
+                for (i, name) in items {
+                    let _ = vs.append(&item(&format!("fx:{i}"), &format!("{name}…"), None));
+                }
+                let _ = sub.append(&vs);
+            }
+            let _ = effects.append(&sub);
+        }
+        let _ = effects.append(&item("plugin_manager", "Audio Plug-In Manager…", None));
 
         let favorites = Submenu::new("Favorites", true);
         for (i, (label, _, _)) in FAVORITES.iter().enumerate() {
@@ -186,7 +205,7 @@ impl NativeMenu {
             menu.append(sub).ok()?;
         }
         menu.init_for_nsapp();
-        Some(NativeMenu { _menu: menu, recent: app.prefs.recent.clone() })
+        Some(NativeMenu { _menu: menu, recent: app.prefs.recent.clone(), effects_gen: app.effects_gen })
     }
 }
 
@@ -201,7 +220,7 @@ impl App {
 
     /// Handle native menu clicks; rebuild when the recent list changes.
     pub fn poll_native_menu(&mut self, ctx: &eframe::egui::Context) {
-        let stale = self.native_menu.as_ref().map(|m| m.recent != self.prefs.recent).unwrap_or(false);
+        let stale = self.native_menu.as_ref().map(|m| m.recent != self.prefs.recent || m.effects_gen != self.effects_gen).unwrap_or(false);
         if stale {
             self.native_menu = NativeMenu::build(self);
         }
@@ -280,6 +299,7 @@ impl App {
                 return;
             }
             "amp_stats" => Action::AmplitudeStatistics,
+            "plugin_manager" => Action::PluginManager,
             "selview" => {
                 self.show_bottom = !self.show_bottom;
                 return;
