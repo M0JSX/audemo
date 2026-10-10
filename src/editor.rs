@@ -42,6 +42,10 @@ fn f_frac(f: f32, nyq: f32) -> f32 {
 fn frac_f(x: f32, nyq: f32) -> f32 {
     if SPEC_LOG.load(std::sync::atomic::Ordering::Relaxed) {
         const LO: f32 = 20.0;
+        // The bottom edge reaches 0 Hz, so selections can include DC and rumble.
+        if x <= 0.002 {
+            return 0.0;
+        }
         LO * (nyq / LO).max(1.0).powf(x.clamp(0.0, 1.0))
     } else {
         x.clamp(0.0, 1.0) * nyq
@@ -463,7 +467,19 @@ impl App {
         let spectral_tool = tool.spectral() && !middle && spec_area.is_some();
         // Drags and clicks that start in the spectral display belong to the spectral tool.
         let spec_busy = spectral_tool && (self.spec_drag.is_some() || origin.or(hover).and_then(spec_lane_at).is_some());
-        let brush_r = |r: Rect| -> (f64, f32) { ((self.brush_px as f64 / 2.0) * v.spp(), self.brush_px / 2.0 / r.height().max(1.0) * nyq) };
+        // Brush radius in (samples, Hz); on a log scale the Hz radius is
+        // taken where the stroke is, so it matches the circle on screen.
+        let brush_r = |r: Rect, pts: &[(f64, f32)]| -> (f64, f32) {
+            let d = self.brush_px / 2.0 / r.height().max(1.0);
+            let rf = if SPEC_LOG.load(std::sync::atomic::Ordering::Relaxed) && !pts.is_empty() {
+                let fc = pts.iter().map(|p| p.1).sum::<f32>() / pts.len() as f32;
+                let c = f_frac(fc, nyq);
+                ((frac_f((c + d).min(1.0), nyq) - frac_f((c - d).max(0.0), nyq)) / 2.0).max(1.0)
+            } else {
+                d * nyq
+            };
+            ((self.brush_px as f64 / 2.0) * v.spp(), rf)
+        };
         if spectral_tool {
             if resp.drag_started() {
                 if let Some(o) = origin.filter(|o| spec_lane_at(*o).is_some()) {
@@ -491,7 +507,7 @@ impl App {
             }
             if resp.drag_stopped() {
                 if let (Some((dtool, pts)), Some(r)) = (self.spec_drag.take(), origin.and_then(spec_lane_at).or(spec_area.map(|a| lane_rect(a, 0)))) {
-                    let (rt, rf) = brush_r(r);
+                    let (rt, rf) = brush_r(r, &pts);
                     if let Some(shape) = build_spec_shape(dtool, pts, rt, rf) {
                         if dtool == Tool::SpotHeal {
                             self.actions.push(Action::SpectralHeal(Some(shape)));
@@ -518,7 +534,7 @@ impl App {
         if let Some(area) = spec_area {
             let drawing = self.spec_drag.as_ref().and_then(|(t, pts)| {
                 let r = lane_rect(area, 0);
-                let (rt, rf) = brush_r(r);
+                let (rt, rf) = brush_r(r, pts);
                 build_spec_shape(*t, pts.clone(), rt, rf).map(|s| (s, *t == Tool::SpotHeal))
             });
             for c in 0..n_ch {

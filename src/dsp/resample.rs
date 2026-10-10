@@ -5,7 +5,7 @@ use std::f64::consts::PI;
 /// Resample `x` by `ratio` = output_rate / input_rate.
 /// Sinc kernel half-width in input samples (Preferences > Data > Sample
 /// Rate Conversion quality): 8 low, 16 medium, 32 high.
-static HALF_WIDTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(32);
+static HALF_WIDTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(16);
 
 pub fn set_quality(half_width: u32) {
     HALF_WIDTH.store(half_width.clamp(4, 64), std::sync::atomic::Ordering::Relaxed);

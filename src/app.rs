@@ -213,8 +213,10 @@ impl Document {
 
     pub fn push_undo(&mut self, label: &str) {
         self.undo.push(self.snapshot(label.to_string()));
-        if self.undo.len() > undo_levels() {
-            self.undo.remove(0);
+        let keep = undo_levels();
+        if self.undo.len() > keep {
+            let excess = self.undo.len() - keep;
+            self.undo.drain(..excess);
         }
         self.redo.clear();
     }
@@ -817,6 +819,14 @@ impl App {
         crate::session::set_mix_prefs(p.pan_law == crate::prefs::PanLaw::EqualPower, p.auto_crossfade, p.crossfade_curve == crate::prefs::FadeCurve::EqualPower, p.clip_fade_ms);
         crate::export::set_write_encoder(p.write_encoder);
         UNDO_LEVELS.store(p.undo_levels as usize, std::sync::atomic::Ordering::Relaxed);
+        // Fewer undo levels: let go of the oldest steps now.
+        let keep = p.undo_levels as usize;
+        for d in self.docs.iter_mut() {
+            if d.undo.len() > keep {
+                let excess = d.undo.len() - keep;
+                d.undo.drain(..excess);
+            }
+        }
         // Mix settings changed: rebuild the live mix of a playing session.
         for s in self.sessions.iter_mut() {
             s.version += 1;
@@ -824,7 +834,15 @@ impl App {
     }
 
     /// OK in Preferences: keep the new settings and apply what changed.
-    pub fn apply_prefs(&mut self, ctx: &egui::Context, new: Prefs) {
+    pub fn apply_prefs(&mut self, ctx: &egui::Context, mut new: Prefs, opened_with: &Prefs) {
+        // Keep what changed elsewhere while the window was open (recent
+        // files, the last Save As format, the Media Browser).
+        new.recent = self.prefs.recent.clone();
+        new.export = self.prefs.export;
+        new.browser_dir = self.prefs.browser_dir.clone();
+        if new.browser_autoplay == opened_with.browser_autoplay {
+            new.browser_autoplay = self.prefs.browser_autoplay;
+        }
         let old = std::mem::replace(&mut self.prefs, new);
         self.prefs.save();
         self.apply_runtime_prefs(ctx);
@@ -2157,8 +2175,13 @@ impl App {
                         let active = vec![true; d.n_ch()];
                         let n = (smooth_ms as f64 * d.sample_rate as f64 / 1000.0) as usize;
                         match smooth_join(&d.audio, a, b, n) {
-                            // Crossfade across the join so it doesn't click.
-                            Some((range, xf)) => apply_edit(d, "Delete", range, &active, xf, None, false),
+                            // Crossfade across the join so it doesn't click. Markers
+                            // move as for a plain delete of [a, b).
+                            Some((range, xf)) => {
+                                let markers: Vec<Marker> = d.markers.iter().filter(|m| m.pos <= a || m.pos >= b).map(|m| Marker { pos: if m.pos >= b { m.pos - (b - a) } else { m.pos }, name: m.name.clone() }).collect();
+                                apply_edit(d, "Delete", range, &active, xf, None, false);
+                                d.markers = markers;
+                            }
                             None => apply_edit(d, "Delete", (a, b), &active, vec![Vec::new(); d.n_ch()], None, false),
                         }
                         d.cursor = a;

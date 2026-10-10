@@ -53,6 +53,20 @@ enum Item {
     Prune { dir: PathBuf, prefix: String, keep: usize },
 }
 
+/// A short tag telling apart backups of different things with the same
+/// name: a hash of the saved path, or of the open item's id when unsaved.
+fn tag(path: Option<&Path>, id: u64) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    let bytes: Vec<u8> = match path {
+        Some(p) => p.to_string_lossy().as_bytes().to_vec(),
+        None => format!("untitled:{id}").into_bytes(),
+    };
+    for b in bytes {
+        h = (h ^ b as u64).wrapping_mul(0x100000001b3);
+    }
+    format!("{:06x}", h & 0xff_ffff)
+}
+
 fn prune(dir: &Path, prefix: &str, keep: usize) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     let mut found: Vec<PathBuf> = rd
@@ -112,7 +126,7 @@ impl App {
         for s in self.sessions.iter().filter(|s| s.dirty) {
             let Some(dir) = self.backup_dir_for(s.path.as_deref()) else { continue };
             let name = crate::mt_ui::safe_file_name(&s.name);
-            let prefix = format!("{name} backup ");
+            let prefix = format!("{name} [{}] session backup ", tag(s.path.as_deref(), s.id));
             let file = dir.join(format!("{prefix}{t}.{}", crate::session::SESSION_EXT));
             let files_dir = dir.join(format!("{prefix}{t} Files"));
             let mut paths: BTreeMap<u64, PathBuf> = BTreeMap::new();
@@ -148,7 +162,7 @@ impl App {
             for d in self.docs.iter().filter(|d| d.dirty && d.len() > 0) {
                 let Some(dir) = self.backup_dir_for(d.path.as_deref()) else { continue };
                 let stem = Path::new(&d.name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled".into());
-                let prefix = format!("{} backup ", crate::mt_ui::safe_file_name(&stem));
+                let prefix = format!("{} [{}] backup ", crate::mt_ui::safe_file_name(&stem), tag(d.path.as_deref(), d.id));
                 let markers = d.markers.iter().map(|m| (m.pos, m.name.clone())).collect();
                 items.push(Item::Audio { path: dir.join(format!("{prefix}{t}.wav")), audio: d.audio.clone(), rate: d.sample_rate, meta: d.meta.clone(), markers });
                 items.push(Item::Prune { dir, prefix, keep });

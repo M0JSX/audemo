@@ -151,7 +151,9 @@ pub fn set_look(ctx: &egui::Context, p: &crate::prefs::Prefs) {
     set("TEXT_DIM", if light { 0x4e4e4e } else { 0x9a9a9a });
     let c = p.colors;
     set("WAVE", c[0]);
-    set("WAVE_DIM", mix(c[0], 0x000000, 0.5));
+    // The dimmed waveform follows a custom waveform colour.
+    let wave_default = crate::prefs::DEFAULT_COLORS[0];
+    set("WAVE_DIM", if c[0] == wave_default { 0x2d6e55 } else { mix(c[0], 0x000000, 0.5) });
     set("SEL_FILL", c[1]);
     set("PLAYHEAD", c[2]);
     set("CURSOR", c[2]);
@@ -177,7 +179,7 @@ fn apply_visuals(ctx: &egui::Context, off: i32) {
     v.window_rounding = Rounding::same(3.0);
     v.menu_rounding = Rounding::same(2.0);
     v.selection.bg_fill = g(0x5c5c5c);
-    v.selection.stroke = Stroke::new(1.0_f32, TEXT());
+    v.selection.stroke = Stroke::new(1.0_f32, if off > 60 { TEXT() } else { Color32::WHITE });
     v.hyperlink_color = HOT();
     v.override_text_color = Some(TEXT());
     v.widgets.noninteractive.bg_fill = BG_PANEL();
@@ -320,7 +322,13 @@ pub fn icon_button_sized(ui: &mut Ui, icon: Icon, active: bool, tip: &str, size:
     } else if active {
         HOT()
     } else {
-        Color32::from_rgb(0xd0, 0xd0, 0xd0)
+        // Light icons on dark panels; dark ones on light panels.
+        let t = TEXT();
+        if t.r() < 0x80 {
+            t
+        } else {
+            Color32::from_rgb(0xd0, 0xd0, 0xd0)
+        }
     };
     let pad = (rect.height() * 0.25).max(4.0);
     let inner = Rect::from_center_size(rect.center(), vec2(rect.height() - pad * 2.0, rect.height() - pad * 2.0));

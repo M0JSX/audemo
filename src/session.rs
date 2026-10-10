@@ -172,10 +172,13 @@ impl Envelope {
 
 /// Pan gains for -100 (left) .. +100 (right): the centre is unity and panning
 /// attenuates the opposite side (Audition's default pan law).
+/// Undo steps kept per session (snapshots are small; no audio).
+pub const MAX_SESSION_UNDO: usize = 100;
+
 // Settings from Preferences > Multitrack and Multitrack Clips.
 static EQUAL_POWER_PAN: AtomicBool = AtomicBool::new(false);
 static AUTO_CROSSFADE: AtomicBool = AtomicBool::new(true);
-static EQUAL_POWER_XFADE: AtomicBool = AtomicBool::new(true);
+static EQUAL_POWER_XFADE: AtomicBool = AtomicBool::new(false);
 static CLIP_FADE_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 pub fn set_mix_prefs(equal_power_pan: bool, auto_crossfade: bool, equal_power_crossfade: bool, clip_fade_ms: f32) {
@@ -185,13 +188,10 @@ pub fn set_mix_prefs(equal_power_pan: bool, auto_crossfade: bool, equal_power_cr
     CLIP_FADE_MS.store(clip_fade_ms.max(0.0).to_bits(), Ordering::Relaxed);
 }
 
-/// Fade shape of automatic crossfades (see `fade_shape`): ≈ equal power, or linear.
-fn crossfade_curve() -> f32 {
-    if EQUAL_POWER_XFADE.load(Ordering::Relaxed) {
-        0.233
-    } else {
-        0.0
-    }
+/// Fade shape for automatic crossfades (see `fade_shape`): ≈ equal power,
+/// or None to keep each clip's own fade shape.
+fn crossfade_curve() -> Option<f32> {
+    EQUAL_POWER_XFADE.load(Ordering::Relaxed).then_some(0.233)
 }
 
 pub fn pan_gains(pan: f32) -> (f32, f32) {
@@ -228,13 +228,17 @@ pub fn effective_clips(clips: &[Clip]) -> Vec<Clip> {
         let x = v[a].end() - v[b].start;
         if x > v[a].fade_out {
             v[a].fade_out = x;
-            v[a].fade_out_curve = curve;
-            v[a].fade_out_cos = false;
+            if let Some(c) = curve {
+                v[a].fade_out_curve = c;
+                v[a].fade_out_cos = false;
+            }
         }
         if x > v[b].fade_in {
             v[b].fade_in = x;
-            v[b].fade_in_curve = curve;
-            v[b].fade_in_cos = false;
+            if let Some(c) = curve {
+                v[b].fade_in_curve = c;
+                v[b].fade_in_cos = false;
+            }
         }
     }
     for c in v.iter_mut() {
@@ -620,7 +624,7 @@ impl Session {
             master_fx: self.master_fx.clone(),
             master_fx_on: self.master_fx_on,
         });
-        if self.undo.len() > crate::app::undo_levels() {
+        if self.undo.len() > MAX_SESSION_UNDO {
             self.undo.remove(0);
         }
         self.redo.clear();
@@ -636,7 +640,7 @@ impl Session {
             master_fx: self.master_fx.clone(),
             master_fx_on: self.master_fx_on,
         });
-        if self.undo.len() > crate::app::undo_levels() {
+        if self.undo.len() > MAX_SESSION_UNDO {
             self.undo.remove(0);
         }
         self.redo.clear();

@@ -117,7 +117,7 @@ pref_enum!(WindowFn {
 });
 pref_enum!(SrcQuality { Low = "low": "Low (faster)", Medium = "medium": "Medium", High = "high": "High (slower)" });
 pref_enum!(PanLaw { LrCut = "lr_cut": "L/R Cut (Logarithmic)", EqualPower = "equal_power": "Equal Power (Sinusoidal)" });
-pref_enum!(FadeCurve { EqualPower = "equal_power": "Equal Power", Linear = "linear": "Linear" });
+pref_enum!(FadeCurve { Linear = "linear": "Linear (clip fade shapes)", EqualPower = "equal_power": "Equal Power" });
 pref_enum!(BackupLocation { WithSession = "session": "Same folder as the session (Backup)", Folder = "folder": "Centralized folder" });
 pref_enum!(AppearancePreset { Default = "default": "Default", Darkest = "darkest": "Darkest", Light = "light": "Light", Custom = "custom": "Custom" });
 
@@ -170,7 +170,6 @@ prefs! {
     sample_rate: u32 = 0,
     /// Reopen the output at each file's own sample rate when playing it.
     force_doc_rate: bool = false,
-    machine_defaults: bool = true,
     // Audio channel mapping: device channels (0-based) for Audemo's L and R.
     out_map_l: u32 = 0,
     out_map_r: u32 = 1,
@@ -203,14 +202,14 @@ prefs! {
     backup_files: bool = true,
     // Data
     dither: bool = true,
-    smooth_delete: bool = true,
+    smooth_delete: bool = false,
     smooth_delete_ms: f32 = 2.0,
     smooth_edits: bool = false,
     smooth_edits_ms: f32 = 2.0,
-    src_quality: SrcQuality = SrcQuality::High,
+    src_quality: SrcQuality = SrcQuality::Medium,
     // Effects
     show_plugin_window: bool = false,
-    scan_at_startup: bool = true,
+    scan_at_startup: bool = false,
     rack_entire: bool = false,
     // Markers & metadata
     copy_markers: bool = true,
@@ -223,7 +222,7 @@ prefs! {
     pan_law: PanLaw = PanLaw::LrCut,
     // Multitrack clips
     auto_crossfade: bool = true,
-    crossfade_curve: FadeCurve = FadeCurve::EqualPower,
+    crossfade_curve: FadeCurve = FadeCurve::Linear,
     clip_fade_ms: f32 = 0.0,
     show_clip_names: bool = true,
     // Playback and recording
@@ -234,7 +233,7 @@ prefs! {
     /// Recording latency compensation for multitrack overdubs, in ms.
     rec_offset_ms: f32 = 0.0,
     // Spectral displays
-    spec_window: WindowFn = WindowFn::BlackmanHarris,
+    spec_window: WindowFn = WindowFn::Hann,
     spec_size: u32 = 1024,
     spec_range_db: f32 = 115.0,
     spec_log: bool = false,

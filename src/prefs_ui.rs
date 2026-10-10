@@ -75,6 +75,8 @@ impl Page {
 pub struct PrefsDialog {
     pub page: Page,
     pub edit: Prefs,
+    /// The settings when the window opened.
+    opened_with: Prefs,
     hosts: Vec<String>,
     /// Device lists and capabilities for `listed`: (host, output) they describe.
     listed: (Option<String>, Option<String>, Option<String>),
@@ -93,6 +95,7 @@ impl PrefsDialog {
         let mut d = PrefsDialog {
             page,
             edit: prefs.clone(),
+            opened_with: prefs.clone(),
             hosts: crate::engine::hosts(),
             listed: (Some("\u{0}".into()), None, None),
             inputs: Vec::new(),
@@ -229,6 +232,20 @@ fn device_combo(ui: &mut Ui, id: &str, value: &mut Option<String>, devices: &[St
     });
 }
 
+/// A device-channel choice. A saved channel the current device doesn't
+/// have is shown as such and kept unless another is picked.
+fn channel_combo(ui: &mut Ui, id: (&str, &str), v: &mut u32, names: &[String]) {
+    let k = *v as usize;
+    let shown = names.get(k).cloned().unwrap_or_else(|| format!("{} (not on this device; channel {} is used)", k + 1, names.len().max(1)));
+    egui::ComboBox::from_id_source(id).width(300.0).selected_text(shown).show_ui(ui, |ui| {
+        for (i, n) in names.iter().enumerate() {
+            if ui.selectable_label(i == k, n).clicked() {
+                *v = i as u32;
+            }
+        }
+    });
+}
+
 fn hex_color(v: u32) -> Color32 {
     Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
 }
@@ -290,7 +307,7 @@ impl App {
         if ok {
             let mut new = d.edit.clone();
             new.sanitize();
-            self.apply_prefs(ctx, new);
+            self.apply_prefs(ctx, new, &d.opened_with);
             return None;
         }
         if cancel || !open {
@@ -328,10 +345,6 @@ impl App {
                         ui.checkbox(&mut p.browser_autoplay, "Auto-Play files when selected");
                     });
                 });
-                ui.add_space(8.0);
-                if ui.button("Reset All Warning Dialogs").clicked() {
-                    self.set_status("Warning dialogs will be shown again.");
-                }
             }
             Page::Appearance => {
                 group(ui, |ui| {
@@ -418,13 +431,7 @@ impl App {
                     egui::Grid::new("outmap").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                         for (label, v) in [("Audemo 1 (L)", &mut p.out_map_l), ("Audemo 2 (R)", &mut p.out_map_r)] {
                             ui.label(label);
-                            let mut k = (*v as usize).min(out_names.len().saturating_sub(1));
-                            egui::ComboBox::from_id_source(("om", label)).width(300.0).selected_text(out_names.get(k).cloned().unwrap_or_default()).show_ui(ui, |ui| {
-                                for (i, n) in out_names.iter().enumerate() {
-                                    ui.selectable_value(&mut k, i, n);
-                                }
-                            });
-                            *v = k as u32;
+                            channel_combo(ui, ("om", label), v, &out_names);
                             ui.end_row();
                         }
                     });
@@ -436,13 +443,7 @@ impl App {
                     egui::Grid::new("inmap").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                         for (label, v) in [("Audemo 1 (L)", &mut p.in_map_l), ("Audemo 2 (R)", &mut p.in_map_r)] {
                             ui.label(label);
-                            let mut k = (*v as usize).min(in_names.len().saturating_sub(1));
-                            egui::ComboBox::from_id_source(("im", label)).width(300.0).selected_text(in_names.get(k).cloned().unwrap_or_default()).show_ui(ui, |ui| {
-                                for (i, n) in in_names.iter().enumerate() {
-                                    ui.selectable_value(&mut k, i, n);
-                                }
-                            });
-                            *v = k as u32;
+                            channel_combo(ui, ("im", label), v, &in_names);
                             ui.end_row();
                         }
                     });
@@ -526,8 +527,6 @@ impl App {
                         self.engine.out_buffer.map(|n| format!("{n} samples")).unwrap_or_else(|| "set by the device".into())
                     ),
                 );
-                ui.add_space(10.0);
-                ui.checkbox(&mut p.machine_defaults, "Use machine-specific device defaults");
             }
             Page::AutoSave => {
                 group(ui, |ui| {
@@ -651,7 +650,7 @@ impl App {
                 group(ui, |ui| {
                     row(ui, "Undo levels", |ui| {
                         ui.add(egui::DragValue::new(&mut p.undo_levels).range(5..=500));
-                        ui.label(RichText::new("per file and per session").color(TEXT_DIM()).size(11.0));
+                        ui.label(RichText::new("per audio file (sessions keep 100)").color(TEXT_DIM()).size(11.0));
                     });
                 });
                 note(ui, "Each undo step of a destructive edit keeps a copy of the audio it replaced. Fewer levels use less memory.");
