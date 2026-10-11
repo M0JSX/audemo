@@ -179,7 +179,10 @@ impl App {
         let sr = doc.sample_rate as f64;
 
         // ------------------------------------------------ overview strip
-        painter.rect_filled(overview_strip, 0.0, Color32::from_rgb(0x1c, 0x1c, 0x1c));
+        // Grey margins either side (as the ruler below); dark only behind
+        // the overview itself.
+        painter.rect_filled(overview_strip, 0.0, Color32::from_rgb(0x2b, 0x2b, 0x2b));
+        painter.rect_filled(overview, 0.0, Color32::from_rgb(0x1c, 0x1c, 0x1c));
         {
             let total = doc.max_span();
             let cols = overview.width().max(1.0) as usize;
