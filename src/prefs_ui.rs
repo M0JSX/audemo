@@ -267,7 +267,10 @@ impl App {
             .collapsible(false)
             .resizable(false)
             .fixed_size([820.0, 560.0])
-            .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, -10.0))
+            // Opens centred; drag the title bar to move it (an anchor would pin it).
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center() - vec2(0.0, 10.0))
+            .constrain(true)
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.horizontal_top(|ui| {
