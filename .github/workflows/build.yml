@@ -147,8 +147,11 @@ jobs:
           bash scripts/package-android.sh 2>&1 | tee android.log
           status=${PIPESTATUS[0]}
           if [ "$status" != "0" ]; then
-            msg=$(grep -E "^error|error:|^  --> |^   --> |panicked|cannot find|undefined" android.log | head -60 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
-            echo "::error title=Android build failed::$msg"
+            sed 's/\x1b\[[0-9;]*m//g' android.log > plain.log
+            msg=$(grep -E -A6 "^error|fatal error|^  --> |^   --> |panicked|undefined symbol|cannot find" plain.log | head -80 | cut -c1-240 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=Android build errors::$msg"
+            msg=$(tail -40 plain.log | cut -c1-240 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=Android build log tail::$msg"
           fi
           exit $status
 
