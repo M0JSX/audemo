@@ -581,6 +581,7 @@ impl Track {
 pub struct SessionSnapshot {
     pub label: String,
     pub tracks: Vec<Track>,
+    pub markers: Vec<crate::export::Marker>,
     pub master_db: f32,
     pub master_fx: Vec<FxSlot>,
     pub master_fx_on: bool,
@@ -645,6 +646,8 @@ pub struct Session {
     pub show_grid: bool,
     pub metronome_on: bool,
     pub metronome_db: f32,
+    /// Session markers (cue, CD track, cart timer, subclip; points or ranges).
+    pub markers: Vec<crate::export::Marker>,
 }
 
 impl Session {
@@ -676,6 +679,7 @@ impl Session {
             show_grid: false,
             metronome_on: false,
             metronome_db: -6.0,
+            markers: Vec::new(),
         };
         for _ in 0..n_tracks {
             s.add_track_silent();
@@ -753,6 +757,7 @@ impl Session {
         self.undo.push(SessionSnapshot {
             label: label.to_string(),
             tracks: self.tracks.clone(),
+            markers: self.markers.clone(),
             master_db: self.master_db,
             master_fx: self.master_fx.clone(),
             master_fx_on: self.master_fx_on,
@@ -769,6 +774,7 @@ impl Session {
         self.undo.push(SessionSnapshot {
             label: label.to_string(),
             tracks: tracks_before,
+            markers: self.markers.clone(),
             master_db: self.master_db,
             master_fx: self.master_fx.clone(),
             master_fx_on: self.master_fx_on,
@@ -783,6 +789,7 @@ impl Session {
         let cur = SessionSnapshot {
             label: s.label.clone(),
             tracks: std::mem::replace(&mut self.tracks, s.tracks),
+            markers: std::mem::replace(&mut self.markers, s.markers),
             master_db: self.master_db,
             master_fx: std::mem::replace(&mut self.master_fx, s.master_fx),
             master_fx_on: self.master_fx_on,
@@ -1161,6 +1168,12 @@ impl Session {
                     v.push(c.start);
                     v.push(c.end());
                 }
+            }
+        }
+        for m in &self.markers {
+            v.push(m.pos);
+            if m.is_range() {
+                v.push(m.end());
             }
         }
         // Beats, when the beat grid is shown.
@@ -1543,6 +1556,29 @@ pub fn mix_into(m: &MixState, a: usize, b: usize, out: &mut [Vec<f32>], peaks: &
 
 // ---------------------------------------------------------------- file format
 
+/// A free-text field on one line: backslash, tab and newline escaped.
+fn esc_field(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\t', "\\t").replace('\n', "\\n").replace('\r', "")
+}
+
+fn unesc_field(s: &str) -> String {
+    let mut o = String::with_capacity(s.len());
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        if c == '\\' {
+            match it.next() {
+                Some('t') => o.push('\t'),
+                Some('n') => o.push('\n'),
+                Some(x) => o.push(x),
+                None => {}
+            }
+        } else {
+            o.push(c);
+        }
+    }
+    o
+}
+
 fn clean(s: &str) -> String {
     s.replace(['\t', '\n', '\r'], " ")
 }
@@ -1564,6 +1600,9 @@ pub fn to_text(s: &Session, paths: &BTreeMap<u64, PathBuf>, base: Option<&Path>)
     let fx_line = |key: &str, f: &FxSlot| format!("{key}\t{}\t{}\t{}\t{}\n", f.effect, f.on as u8, f.params.to_text(), f.sidechain.unwrap_or(0));
     for f in &s.master_fx {
         o.push_str(&fx_line("mfx", f));
+    }
+    for m in &s.markers {
+        o.push_str(&format!("marker\t{}\t{}\t{}\t{}\t{}\n", m.pos, m.len, m.kind.csv_name(), esc_field(&m.name), esc_field(&m.description)));
     }
     for (id, src) in &s.sources {
         if let Some(p) = paths.get(id) {
@@ -1670,6 +1709,21 @@ pub fn from_text(id: u64, text: &str, base: Option<&Path>, effects: &[EffectDef]
         match f[0] {
             "name" => s.name = f.get(1).unwrap_or(&"").to_string(),
             "rate" => s.sample_rate = num(1)? as u32,
+            "marker" => {
+                let kind = match f.get(3).copied().unwrap_or("Cue") {
+                    "Track" => crate::export::MarkerKind::CdTrack,
+                    "Cart" => crate::export::MarkerKind::CartTimer,
+                    "Subclip" => crate::export::MarkerKind::Subclip,
+                    _ => crate::export::MarkerKind::Cue,
+                };
+                s.markers.push(crate::export::Marker {
+                    pos: num(1)? as usize,
+                    len: num(2).unwrap_or(0.0) as usize,
+                    name: unesc_field(f.get(4).unwrap_or(&"")),
+                    kind,
+                    description: unesc_field(f.get(5).unwrap_or(&"")),
+                });
+            }
             "tempo" => {
                 s.tempo = num(1).unwrap_or(120.0).clamp(20.0, 400.0);
                 s.beats_per_bar = num(2).unwrap_or(4.0).clamp(1.0, 32.0) as u32;
@@ -1827,6 +1881,7 @@ pub fn from_text(id: u64, text: &str, base: Option<&Path>, effects: &[EffectDef]
     }
     s.reserve_ids(max_id);
     s.view_end = s.max_span().min(s.sample_rate as f64 * 60.0).max(s.end() as f64 * 1.05);
+    s.markers.sort_by_key(|m| m.pos);
     Ok(ParsedSession { session: s, sources })
 }
 

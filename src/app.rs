@@ -581,6 +581,8 @@ pub enum Action {
     AddMarker,
     /// Edit > Marker > Add CD Track / Cartridge Timer marker.
     AddMarkerKind(MarkerKind),
+    /// Show a panel (bring its tab forward).
+    ShowPanel(Panel),
     MarkerCmd(crate::markers_ui::MarkerCmd),
     ZeroCross(crate::markers_ui::ZeroMode),
     PlayToggle,
@@ -2539,6 +2541,7 @@ impl App {
             Action::AddMarker => self.add_marker(MarkerKind::Cue),
             Action::AddMarkerKind(k) => self.add_marker(k),
             Action::MarkerCmd(c) => self.marker_cmd(c),
+            Action::ShowPanel(p) => self.show_panel(p),
             Action::ZeroCross(z) => self.zero_cross(z),
             Action::PlayToggle if self.engine.is_recording() => self.stop_recording(),
             Action::Stop if self.engine.is_recording() => self.stop_recording(),

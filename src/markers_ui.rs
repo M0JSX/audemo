@@ -180,6 +180,11 @@ impl App {
     }
 
     pub fn markers_tab(&mut self, ui: &mut Ui) {
+        if self.mode == crate::app::Mode::Multitrack {
+            if let Some(si) = self.active_session {
+                return self.session_markers_tab(ui, si);
+            }
+        }
         let sel = self.marker_selection();
         let has_doc = self.doc().is_some();
         let any_range_sel = self.doc().map(|d| sel.iter().any(|&i| d.markers[i].is_range())).unwrap_or(false);
@@ -610,6 +615,241 @@ pub enum MarkerCmd {
     ExportCsv,
     ImportCsv,
     ExportAudio,
+}
+
+// ---------------------------------------------------------------- session markers
+
+impl App {
+    /// M in the Multitrack editor: a marker at the playhead, or a range over
+    /// the time selection when stopped.
+    pub fn mt_add_marker(&mut self, si: usize, kind: MarkerKind) {
+        let st = self.engine.status();
+        let marker_name = self.prefs.marker_name.clone();
+        let s = &mut self.sessions[si];
+        let playing = st.playing && st.tag == s.id;
+        let pos = if playing { st.pos.max(0.0) as usize } else { s.cursor };
+        let name = format!("{} {:02}", marker_name.trim(), s.markers.len() + 1);
+        let mut m = match s.sel_range().filter(|(a, b)| !playing && b > a) {
+            Some((a, b)) => Marker::range(a, b - a, name),
+            None => Marker::point(pos, name),
+        };
+        m.kind = kind;
+        s.push_undo("Add Marker");
+        s.markers.push(m.clone());
+        s.markers.sort_by_key(|m| m.pos);
+        s.dirty = true;
+        if let Some(i) = s.markers.iter().position(|x| *x == m) {
+            self.mt.marker_sel = std::iter::once(i).collect();
+        }
+    }
+
+    /// Markers panel commands for the active session.
+    pub fn mt_marker_cmd(&mut self, si: usize, cmd: MarkerCmd) {
+        let sel: Vec<usize> = self.mt.marker_sel.iter().copied().filter(|&i| i < self.sessions[si].markers.len()).collect();
+        let s = &mut self.sessions[si];
+        match cmd {
+            MarkerCmd::Delete if !sel.is_empty() => {
+                s.push_undo("Delete Markers");
+                for &i in sel.iter().rev() {
+                    s.markers.remove(i);
+                }
+                s.dirty = true;
+                self.mt.marker_sel.clear();
+            }
+            MarkerCmd::SelectAll => self.mt.marker_sel = (0..s.markers.len()).collect(),
+            MarkerCmd::Merge if sel.len() >= 2 => {
+                s.push_undo("Merge Markers");
+                let a = sel.iter().map(|&i| s.markers[i].pos).min().unwrap_or(0);
+                let b = sel.iter().map(|&i| s.markers[i].end()).max().unwrap_or(0);
+                let first = s.markers[sel[0]].clone();
+                for &i in sel.iter().rev() {
+                    s.markers.remove(i);
+                }
+                s.markers.push(Marker { pos: a, len: b - a, ..first });
+                s.markers.sort_by_key(|m| m.pos);
+                s.dirty = true;
+                self.mt.marker_sel.clear();
+            }
+            MarkerCmd::ToRange => match (s.sel_range(), sel.first()) {
+                (Some((a, b)), Some(&i)) if b > a => {
+                    s.push_undo("Convert Marker");
+                    s.markers[i].pos = a;
+                    s.markers[i].len = b - a;
+                    s.markers.sort_by_key(|m| m.pos);
+                    s.dirty = true;
+                }
+                _ => self.set_status("Select a time range first: the marker becomes a range over it."),
+            },
+            MarkerCmd::ToPoint if !sel.is_empty() => {
+                s.push_undo("Convert Markers");
+                for &i in &sel {
+                    s.markers[i].len = 0;
+                }
+                s.dirty = true;
+            }
+            MarkerCmd::ExportCsv => {
+                let csv = markers_to_csv(&s.markers, s.sample_rate);
+                let n = s.markers.len();
+                let mut dlg = rfd::FileDialog::new().add_filter("Markers (CSV)", &["csv"]).set_file_name(format!("{} Markers.csv", s.name));
+                if let Some(dir) = s.path.as_deref().and_then(|p| p.parent()) {
+                    dlg = dlg.set_directory(dir);
+                }
+                if let Some(p) = dlg.save_file() {
+                    match std::fs::write(&p, csv) {
+                        Ok(()) => self.set_status(format!("Exported {n} marker(s) to {}", p.display())),
+                        Err(e) => self.set_status(format!("Couldn't write {}: {e}", p.display())),
+                    }
+                }
+            }
+            MarkerCmd::ImportCsv => {
+                let Some(p) = rfd::FileDialog::new().add_filter("Markers (CSV)", &["csv", "txt"]).pick_file() else { return };
+                let text = match std::fs::read_to_string(&p) {
+                    Ok(t) => t,
+                    Err(e) => return self.set_status(format!("Couldn't read {}: {e}", p.display())),
+                };
+                let s = &mut self.sessions[si];
+                let new = markers_from_csv(&text, s.sample_rate);
+                let n = new.len();
+                s.push_undo("Import Markers");
+                s.markers.extend(new);
+                s.markers.sort_by_key(|m| m.pos);
+                s.dirty = true;
+                self.set_status(format!("Imported {n} marker(s)"));
+            }
+            MarkerCmd::Delete | MarkerCmd::Merge | MarkerCmd::ToPoint => {}
+            _ => self.set_status("Playlists and range export work on files: open one in the Waveform editor (9)."),
+        }
+    }
+
+    /// The Markers panel while the Multitrack editor is showing.
+    fn session_markers_tab(&mut self, ui: &mut Ui, si: usize) {
+        let sel: Vec<usize> = self.mt.marker_sel.iter().copied().collect();
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("+ Marker").on_hover_text("Add a marker at the playhead, or a range marker over the time selection (M)").clicked() {
+                self.actions.push(Action::AddMarker);
+            }
+            if ui.add_enabled(sel.len() >= 2, egui::Button::new("Merge")).on_hover_text("Merge the selected markers into one range marker").clicked() {
+                self.actions.push(Action::MarkerCmd(MarkerCmd::Merge));
+            }
+            if ui.add_enabled(!sel.is_empty(), egui::Button::new("Delete")).clicked() {
+                self.actions.push(Action::MarkerCmd(MarkerCmd::Delete));
+            }
+            ui.menu_button("More", |ui| {
+                if ui.button("Export Markers (CSV)...").clicked() {
+                    self.actions.push(Action::MarkerCmd(MarkerCmd::ExportCsv));
+                    ui.close_menu();
+                }
+                if ui.button("Import Markers (CSV)...").clicked() {
+                    self.actions.push(Action::MarkerCmd(MarkerCmd::ImportCsv));
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.add_enabled(!sel.is_empty(), egui::Button::new("Convert to Range (Selection)")).clicked() {
+                    self.actions.push(Action::MarkerCmd(MarkerCmd::ToRange));
+                    ui.close_menu();
+                }
+                if ui.add_enabled(!sel.is_empty(), egui::Button::new("Convert to Point")).clicked() {
+                    self.actions.push(Action::MarkerCmd(MarkerCmd::ToPoint));
+                    ui.close_menu();
+                }
+                if ui.button("Select All Markers").clicked() {
+                    self.actions.push(Action::MarkerCmd(MarkerCmd::SelectAll));
+                    ui.close_menu();
+                }
+            });
+        });
+        ui.add_space(4.0);
+        let s = &mut self.sessions[si];
+        if s.markers.is_empty() {
+            ui.label(RichText::new("No markers in this session. Press M at the playhead, or with a time selection for a range marker.").color(TEXT_DIM()));
+            return;
+        }
+        let sr = s.sample_rate;
+        let mods = ui.input(|i| i.modifiers);
+        let mut clicked_row = None;
+        let mut changed = false;
+        let mut kind_change = None;
+        egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+            egui::Grid::new("session_markers").num_columns(6).striped(true).spacing([6.0, 3.0]).show(ui, |ui| {
+                for h in ["", "Name", "Start", "End", "Duration", "Type"] {
+                    ui.label(RichText::new(h).color(TEXT_DIM()).size(11.0));
+                }
+                ui.end_row();
+                for (i, m) in s.markers.iter_mut().enumerate() {
+                    let selected = self.mt.marker_sel.contains(&i);
+                    let icon = if m.is_range() { "▭" } else { "◆" };
+                    if ui.selectable_label(selected, RichText::new(icon).color(crate::mt_ui::marker_colour(m.kind))).clicked() {
+                        clicked_row = Some(i);
+                    }
+                    if ui.add(egui::TextEdit::singleline(&mut m.name).desired_width(110.0)).changed() {
+                        changed = true;
+                    }
+                    if ui.link(RichText::new(format_time(m.pos as f64, sr)).monospace().size(11.0)).clicked() {
+                        clicked_row = Some(i);
+                    }
+                    if m.is_range() {
+                        ui.label(RichText::new(format_time(m.end() as f64, sr)).monospace().size(11.0));
+                        ui.label(RichText::new(format_time(m.len as f64, sr)).monospace().size(11.0));
+                    } else {
+                        ui.label("");
+                        ui.label("");
+                    }
+                    let mut k = m.kind;
+                    egui::ComboBox::from_id_source(("smk", i)).width(84.0).selected_text(m.kind.label()).show_ui(ui, |ui| {
+                        for kk in MarkerKind::ALL {
+                            ui.selectable_value(&mut k, kk, kk.label());
+                        }
+                    });
+                    if k != m.kind {
+                        kind_change = Some((i, k));
+                    }
+                    ui.end_row();
+                }
+            });
+            if let [i] = self.mt.marker_sel.iter().copied().collect::<Vec<_>>()[..] {
+                if let Some(m) = s.markers.get_mut(i) {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("Description").color(TEXT_DIM()).size(11.0));
+                    if ui.add(egui::TextEdit::multiline(&mut m.description).desired_rows(2).desired_width(f32::INFINITY)).changed() {
+                        changed = true;
+                    }
+                }
+            }
+        });
+        if let Some((i, k)) = kind_change {
+            s.push_undo("Marker Type");
+            s.markers[i].kind = k;
+            changed = true;
+        }
+        if changed {
+            s.dirty = true;
+        }
+        if let Some(i) = clicked_row {
+            if mods.command {
+                if !self.mt.marker_sel.remove(&i) {
+                    self.mt.marker_sel.insert(i);
+                }
+            } else if mods.shift && !self.mt.marker_sel.is_empty() {
+                let a = *self.mt.marker_sel.iter().next().unwrap();
+                self.mt.marker_sel = (a.min(i)..=a.max(i)).collect();
+            } else {
+                self.mt.marker_sel = std::iter::once(i).collect();
+                let m = s.markers[i].clone();
+                if m.is_range() {
+                    s.sel = Some((m.pos, m.end()));
+                }
+                s.cursor = m.pos;
+                // Bring the marker into view.
+                let span = s.view_end - s.view_start;
+                if (m.pos as f64) < s.view_start || (m.pos as f64) > s.view_end {
+                    s.view_start = m.pos as f64 - span * 0.2;
+                    s.view_end = s.view_start + span;
+                    s.clamp_view();
+                }
+                self.actions.push(Action::SetCursor(m.pos));
+            }
+        }
+    }
 }
 
 #[cfg(test)]

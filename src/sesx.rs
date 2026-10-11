@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use crate::dsp::effects::EffectDef;
+use crate::export::{Marker, MarkerKind};
 use crate::session::{self, Clip, Envelope, ParsedSession, Session, Track, TrackKind};
 
 pub const EXT: &str = "sesx";
@@ -250,9 +251,16 @@ fn unescape(s: &str) -> String {
     o
 }
 
+/// The <sesx> element and the bodies of comments.
+fn parse_xml(src: &str) -> Result<(Element, Vec<String>), String> {
+    let (mut doc, comments) = parse_doc(src)?;
+    let root = doc.children.drain(..).find(|c| c.name == "sesx").ok_or("This isn't an Audition session (no <sesx> element).")?;
+    Ok((root, comments))
+}
+
 /// A small XML parser: elements, attributes, text and CDATA. Also returns
 /// the bodies of comments (for Audemo's embedded session).
-fn parse_xml(src: &str) -> Result<(Element, Vec<String>), String> {
+fn parse_doc(src: &str) -> Result<(Element, Vec<String>), String> {
     let b = src.as_bytes();
     let mut i = 0;
     let mut stack: Vec<Element> = vec![Element { name: "#document".into(), ..Default::default() }];
@@ -341,12 +349,109 @@ fn parse_xml(src: &str) -> Result<(Element, Vec<String>), String> {
             i = j;
         }
     }
-    let mut doc = stack.pop().ok_or_else(|| err("no document", 0))?;
+    let doc = stack.pop().ok_or_else(|| err("no document", 0))?;
     if !stack.is_empty() {
         return Err(err("unclosed elements", b.len()));
     }
-    let root = doc.children.drain(..).find(|c| c.name == "sesx").ok_or("This isn't an Audition session (no <sesx> element).")?;
-    Ok((root, comments))
+    Ok((doc, comments))
+}
+
+// ------------------------------------------------------------------ markers (XMP)
+
+fn guid(seed: u64) -> String {
+    // Deterministic, unique per marker: a 128-bit value from two mixes.
+    let mix = |mut x: u64| {
+        x ^= x >> 33;
+        x = x.wrapping_mul(0xff51afd7ed558ccd);
+        x ^= x >> 33;
+        x = x.wrapping_mul(0xc4ceb9fe1a85ec53);
+        x ^ (x >> 33)
+    };
+    let (a, b) = (mix(seed ^ 0x6175_6465_6d6f), mix(seed.wrapping_add(0x9e37_79b9_7f4a_7c15)));
+    format!("{:08x}-{:04x}-{:04x}-{:04x}-{:012x}", a >> 32, (a >> 16) & 0xffff, a & 0xffff, b >> 48, b & 0xffff_ffff_ffff)
+}
+
+/// Session markers as Audition's XMP block: cue markers (cart timers among
+/// them), CD track markers and subclip markers, ranges with a duration.
+fn xmp_markers(markers: &[Marker], rate: u32) -> String {
+    if markers.is_empty() {
+        return String::new();
+    }
+    let fr = format!("f{rate}");
+    let track = |title: &str, ty: &str, want: &dyn Fn(MarkerKind) -> bool| {
+        let mut items = String::new();
+        for (i, m) in markers.iter().enumerate().filter(|(_, m)| want(m.kind)) {
+            let g = guid(i as u64 * 1_000_003 + m.pos as u64);
+            items += "                        <rdf:li rdf:parseType=\"Resource\">\n";
+            items += &format!("                           <xmpDM:startTime>{}</xmpDM:startTime>\n", m.pos);
+            if m.is_range() {
+                items += &format!("                           <xmpDM:duration>{}</xmpDM:duration>\n", m.len);
+            }
+            items += &format!("                           <xmpDM:name>{}</xmpDM:name>\n", esc(&m.name));
+            if !m.description.is_empty() {
+                items += &format!("                           <xmpDM:comment>{}</xmpDM:comment>\n", esc(&m.description));
+            }
+            items += &format!("                           <xmpDM:cuePointParams>\n                              <rdf:Seq>\n                                 <rdf:li rdf:parseType=\"Resource\">\n                                    <xmpDM:key>marker_guid</xmpDM:key>\n                                    <xmpDM:value>xmp:id:{g}</xmpDM:value>\n                                 </rdf:li>\n                              </rdf:Seq>\n                           </xmpDM:cuePointParams>\n                           <xmpDM:guid>xmp:id:{g}</xmpDM:guid>\n");
+            items += "                        </rdf:li>\n";
+        }
+        let body = if items.is_empty() { String::new() } else { format!("                  <xmpDM:markers>\n                     <rdf:Seq>\n{items}                     </rdf:Seq>\n                  </xmpDM:markers>\n") };
+        format!("               <rdf:li rdf:parseType=\"Resource\">\n                  <xmpDM:trackName>{title}</xmpDM:trackName>\n                  <xmpDM:trackType>{ty}</xmpDM:trackType>\n                  <xmpDM:frameRate>{fr}</xmpDM:frameRate>\n{body}               </rdf:li>\n")
+    };
+    let tracks = track("CuePoint Markers", "Cue", &|k| matches!(k, MarkerKind::Cue | MarkerKind::CartTimer))
+        + &track("CD Track Markers", "Track", &|k| k == MarkerKind::CdTrack)
+        + &track("Subclip Markers", "InOut", &|k| k == MarkerKind::Subclip);
+    format!(
+        "    <xmpMetadata><![CDATA[<?xpacket begin=\"\u{feff}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"Audemo\">\n   <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n      <rdf:Description rdf:about=\"\"\n            xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\"\n            xmlns:dc=\"http://purl.org/dc/elements/1.1/\"\n            xmlns:xmpDM=\"http://ns.adobe.com/xmp/1.0/DynamicMedia/\">\n         <xmp:CreatorTool>Audemo</xmp:CreatorTool>\n         <dc:format>application/xml</dc:format>\n         <xmpDM:Tracks>\n            <rdf:Bag>\n{tracks}            </rdf:Bag>\n         </xmpDM:Tracks>\n      </rdf:Description>\n   </rdf:RDF>\n</x:xmpmeta>\n<?xpacket end=\"w\"?>]]></xmpMetadata>\n"
+    )
+}
+
+/// An XMP property written either as an attribute or as a child element.
+fn xmp_field<'a>(el: &'a Element, key: &str) -> Option<&'a str> {
+    el.attr(key).or_else(|| el.child(key).map(|c| c.text.as_str())).map(str::trim).filter(|v| !v.is_empty())
+}
+
+fn collect<'a>(el: &'a Element, name: &str, out: &mut Vec<&'a Element>) {
+    for c in &el.children {
+        if c.name == name {
+            out.push(c);
+        }
+        collect(c, name, out);
+    }
+}
+
+/// Markers from a session's XMP block.
+fn read_xmp_markers(xmp: &str, rate: u32) -> Vec<Marker> {
+    let Ok((doc, _)) = parse_doc(xmp) else { return Vec::new() };
+    let mut lis = Vec::new();
+    collect(&doc, "rdf:li", &mut lis);
+    let mut out = Vec::new();
+    for t in lis.into_iter().filter(|l| xmp_field(l, "xmpDM:trackType").is_some()) {
+        let ty = xmp_field(t, "xmpDM:trackType").unwrap_or("Cue");
+        let title = xmp_field(t, "xmpDM:trackName").unwrap_or("");
+        let kind = match ty {
+            "Track" => MarkerKind::CdTrack,
+            "InOut" => MarkerKind::Subclip,
+            _ if title.to_ascii_lowercase().contains("cart") => MarkerKind::CartTimer,
+            _ => MarkerKind::Cue,
+        };
+        // Times count frames at the track's rate ("f48000": samples).
+        let fr = xmp_field(t, "xmpDM:frameRate").and_then(|f| f.trim_start_matches('f').split('s').next().and_then(|n| n.parse::<f64>().ok())).filter(|f| *f > 0.0).unwrap_or(rate as f64);
+        let scale = rate as f64 / fr;
+        let Some(seq) = t.child("xmpDM:markers").and_then(|m| m.child("rdf:Seq")) else { continue };
+        for m in seq.all("rdf:li") {
+            let Some(start) = xmp_field(m, "xmpDM:startTime").and_then(|v| v.parse::<f64>().ok()) else { continue };
+            let dur = xmp_field(m, "xmpDM:duration").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+            out.push(Marker {
+                pos: (start * scale).round().max(0.0) as usize,
+                len: (dur * scale).round().max(0.0) as usize,
+                name: xmp_field(m, "xmpDM:name").unwrap_or("").to_string(),
+                kind,
+                description: xmp_field(m, "xmpDM:comment").unwrap_or("").to_string(),
+            });
+        }
+    }
+    out.sort_by_key(|m| m.pos);
+    out
 }
 
 // ------------------------------------------------------------------ writing
@@ -512,13 +617,14 @@ pub fn to_sesx(s: &Session, paths: &BTreeMap<u64, PathBuf>, base: &Path) -> Stri
     let linked = (s.tempo - 120.0).abs() < 1e-9 && s.beats_per_bar == 4;
     let native = session::to_text(s, paths, Some(base));
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>\n<!DOCTYPE sesx>\n<sesx version=\"1.9\">\n  <session appBuild=\"Audemo\" appVersion=\"{ver}\" audioChannelType=\"stereo\" bitDepth=\"32\" duration=\"{duration}\" sampleRate=\"{rate}\">\n    <tracks>\n{tracks}    </tracks>\n    <sessionState ctiPosition=\"{cti}\" smpteStart=\"0\">\n      <timeFormatState beatsPerBar=\"{bpb}\" beatsPerMinute=\"{bpm}\" customFrameRate=\"12\" linkToDefaultTimeSettings=\"{linked}\" noteLength=\"4\" subdivisions=\"16\" timeCodeDropFrame=\"false\" timeCodeFrameRate=\"30\" timeCodeNTSC=\"false\" timeFormat=\"timeFormatDecimal\"/>\n      <mixingOptionState defaultPanModeLogarithmic=\"true\" panPower=\"-3\" playOverlappingClips=\"false\"/>\n    </sessionState>\n  </session>\n  <files>\n{files}  </files>\n  <!-- {EMBED_TAG} (Audemo's complete copy of this session; Audition ignores it)\n{embed}\n  -->\n</sesx>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>\n<!DOCTYPE sesx>\n<sesx version=\"1.9\">\n  <session appBuild=\"Audemo\" appVersion=\"{ver}\" audioChannelType=\"stereo\" bitDepth=\"32\" duration=\"{duration}\" sampleRate=\"{rate}\">\n    <tracks>\n{tracks}    </tracks>\n    <sessionState ctiPosition=\"{cti}\" smpteStart=\"0\">\n      <timeFormatState beatsPerBar=\"{bpb}\" beatsPerMinute=\"{bpm}\" customFrameRate=\"12\" linkToDefaultTimeSettings=\"{linked}\" noteLength=\"4\" subdivisions=\"16\" timeCodeDropFrame=\"false\" timeCodeFrameRate=\"30\" timeCodeNTSC=\"false\" timeFormat=\"timeFormatDecimal\"/>\n      <mixingOptionState defaultPanModeLogarithmic=\"true\" panPower=\"-3\" playOverlappingClips=\"false\"/>\n    </sessionState>\n{xmp}  </session>\n  <files>\n{files}  </files>\n  <!-- {EMBED_TAG} (Audemo's complete copy of this session; Audition ignores it)\n{embed}\n  -->\n</sesx>\n",
         ver = env!("CARGO_PKG_VERSION"),
         rate = s.sample_rate,
         cti = s.cursor,
         bpb = s.beats_per_bar,
         bpm = fmt(s.tempo),
         embed = b64_encode(native.as_bytes()),
+        xmp = xmp_markers(&s.markers, s.sample_rate),
     )
 }
 
@@ -726,6 +832,9 @@ pub fn from_sesx(id: u64, text: &str, base: Option<&Path>, effects: &[EffectDef]
             }
         }
     }
+    if let Some(x) = ses.child("xmpMetadata") {
+        s.markers = read_xmp_markers(&x.text, rate);
+    }
     if s.tracks.is_empty() {
         s.add_track_silent();
     }
@@ -796,6 +905,23 @@ mod tests {
     <sessionState ctiPosition="0" smpteStart="0">
       <timeFormatState beatsPerBar="3" beatsPerMinute="96.5" linkToDefaultTimeSettings="false" noteLength="4" subdivisions="16"/>
     </sessionState>
+    <xmpMetadata><![CDATA[<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+ <rdf:Description rdf:about="" xmlns:xmpDM="http://ns.adobe.com/xmp/1.0/DynamicMedia/">
+  <xmpDM:Tracks><rdf:Bag>
+   <rdf:li rdf:parseType="Resource">
+    <xmpDM:trackName>CuePoint Markers</xmpDM:trackName><xmpDM:trackType>Cue</xmpDM:trackType><xmpDM:frameRate>f48000</xmpDM:frameRate>
+    <xmpDM:markers><rdf:Seq>
+     <rdf:li xmpDM:startTime="48000" xmpDM:name="Chorus"/>
+     <rdf:li rdf:parseType="Resource"><xmpDM:startTime>96000</xmpDM:startTime><xmpDM:duration>24000</xmpDM:duration><xmpDM:name>Outro</xmpDM:name></rdf:li>
+    </rdf:Seq></xmpDM:markers>
+   </rdf:li>
+   <rdf:li rdf:parseType="Resource">
+    <xmpDM:trackName>CD Track Markers</xmpDM:trackName><xmpDM:trackType>Track</xmpDM:trackType><xmpDM:frameRate>f24000</xmpDM:frameRate>
+    <xmpDM:markers><rdf:Seq><rdf:li xmpDM:startTime="12000" xmpDM:name="Track 1"/></rdf:Seq></xmpDM:markers>
+   </rdf:li>
+  </rdf:Bag></xmpDM:Tracks>
+ </rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>]]></xmpMetadata>
   </session>
   <files>
     <file absolutePath="C:\Audio\take1.wav" id="0" mediaHandler="AmioWav" relativePath="take1.wav"/>
@@ -824,7 +950,9 @@ mod tests {
         assert!((c.gain_db + 6.02).abs() < 0.01);
         assert_eq!((c.fade_in, c.fade_in_cos), (4800, true));
         assert_eq!((c.fade_out, c.fade_out_curve), (9600, 0.0));
-        assert_eq!(p.sources.len(), 1);
+        let m: Vec<(usize, usize, MarkerKind, &str)> = s.markers.iter().map(|m| (m.pos, m.len, m.kind, m.name.as_str())).collect();
+        assert_eq!(m, vec![(24000, 0, MarkerKind::CdTrack, "Track 1"), (48000, 0, MarkerKind::Cue, "Chorus"), (96000, 24000, MarkerKind::Cue, "Outro")]);
+                assert_eq!(p.sources.len(), 1);
         assert_eq!(p.sources[0].1.file_name().unwrap(), "take1.wav");
     }
 
@@ -845,6 +973,11 @@ mod tests {
         });
         s.tracks.push(t);
         s.tempo = 140.0;
+        s.markers = vec![
+            Marker { pos: 4410, len: 0, name: "Intro & go".into(), kind: MarkerKind::Cue, description: "Count in\t<here>\nline two".into() },
+            Marker { pos: 22050, len: 11025, name: "Verse".into(), kind: MarkerKind::CdTrack, description: String::new() },
+            Marker { pos: 30000, len: 500, name: "Sting".into(), kind: MarkerKind::Subclip, description: String::new() },
+        ];
         let base = Path::new("/sessions");
         let mut paths = BTreeMap::new();
         paths.insert(sid, PathBuf::from("/sessions/Test Files/take.wav"));
@@ -855,6 +988,13 @@ mod tests {
         let back = from_sesx(9, &xml, Some(base), &[]).unwrap();
         let c = &back.session.tracks[0].clips[0];
         assert_eq!((c.start, c.offset, c.len, c.group), (1000, 500, 20000, 7));
+        assert_eq!(back.session.markers, s.markers);
+        // Marker edits undo with the rest of the session.
+        let mut s3 = back.session;
+        s3.push_undo("Delete Markers");
+        s3.markers.clear();
+        s3.undo();
+        assert_eq!(s3.markers, s.markers);
         // Without the embedded copy (as Audition would save it), the XML
         // alone carries the essentials.
         let start = xml.find("<!-- audemo-session").unwrap();
@@ -867,6 +1007,12 @@ mod tests {
         assert_eq!(t2.name, "Lead <vocal>");
         assert!((t2.volume_db + 3.0).abs() < 0.01 && (t2.pan - 25.0).abs() < 1e-4);
         assert!((t2.vol_env.points[1].1 + 12.0).abs() < 0.05);
+        assert_eq!(s2.markers.len(), 3);
+        assert_eq!((s2.markers[0].pos, s2.markers[0].len, s2.markers[0].kind), (4410, 0, MarkerKind::Cue));
+        assert_eq!(s2.markers[0].name, "Intro & go");
+        assert_eq!(s2.markers[0].description, "Count in\t<here>\nline two");
+        assert_eq!((s2.markers[1].pos, s2.markers[1].len, s2.markers[1].kind), (22050, 11025, MarkerKind::CdTrack));
+        assert_eq!((s2.markers[2].kind, s2.markers[2].len), (MarkerKind::Subclip, 500));
         let c2 = &t2.clips[0];
         assert_eq!((c2.start, c2.offset, c2.len), (1000, 500, 20000));
         assert!(c2.looped && (c2.gain_db - 2.0).abs() < 0.01);

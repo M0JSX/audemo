@@ -66,8 +66,9 @@ impl App {
         let recent = self.prefs.recent.clone();
         let last = self.last_effect.as_ref().map(|(i, _)| effects[*i].name);
         let km = self.keymap.clone();
-        let has_markers = self.doc().map(|d| !d.markers.is_empty()).unwrap_or(false);
+        let has_markers = if in_mt { self.session().map(|s| !s.markers.is_empty()).unwrap_or(false) } else { self.doc().map(|d| !d.markers.is_empty()).unwrap_or(false) };
         let in_wave = self.mode == Mode::Waveform && self.doc().is_some();
+        let markers_io = in_wave || (in_mt && self.session().is_some());
         egui::TopBottomPanel::top("menu")
             .frame(egui::Frame::none().fill(BG_DEEP()).inner_margin(egui::Margin::symmetric(6.0, 3.0)))
             .show(ctx, |ui| {
@@ -110,10 +111,10 @@ impl App {
                         if item(ui, "Save All", "", has_doc) { self.actions.push(Action::SaveAll); }
                         ui.separator();
                         ui.menu_button("Import", |ui| {
-                            if item(ui, "Markers…", "", in_wave) { self.actions.push(Action::MarkerCmd(crate::markers_ui::MarkerCmd::ImportCsv)); }
+                            if item(ui, "Markers…", "", markers_io) { self.actions.push(Action::MarkerCmd(crate::markers_ui::MarkerCmd::ImportCsv)); }
                         });
                         ui.menu_button("Export", |ui| {
-                            if item(ui, "Markers…", "", in_wave && has_markers) { self.actions.push(Action::MarkerCmd(crate::markers_ui::MarkerCmd::ExportCsv)); }
+                            if item(ui, "Markers…", "", markers_io && has_markers) { self.actions.push(Action::MarkerCmd(crate::markers_ui::MarkerCmd::ExportCsv)); }
                         });
                         ui.separator();
                         if item(ui, "Exit", &km.label("quit"), true) { self.actions.push(Action::Quit); }

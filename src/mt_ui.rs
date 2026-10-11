@@ -135,6 +135,18 @@ pub struct MtState {
     /// Per-track meter levels in dB (L, R), decayed.
     pub meters: Vec<[f32; 2]>,
     meter_at: Option<std::time::Instant>,
+    /// Selected session markers (indices).
+    pub marker_sel: std::collections::BTreeSet<usize>,
+}
+
+/// Each marker type's colour on the multitrack timeline.
+pub fn marker_colour(k: export::MarkerKind) -> Color32 {
+    match k {
+        export::MarkerKind::Cue => MARKER(),
+        export::MarkerKind::CdTrack => Color32::from_rgb(0x6d, 0xe0, 0x8a),
+        export::MarkerKind::CartTimer => Color32::from_rgb(0xe0, 0x6a, 0xc8),
+        export::MarkerKind::Subclip => Color32::from_rgb(0x4d, 0xa3, 0xff),
+    }
 }
 
 /// Where the automation lines are drawn inside a lane (below the clip names).
@@ -1511,6 +1523,9 @@ impl App {
                 s.undo.clear();
                 s.redo.clear();
             }
+            Action::AddMarker => self.mt_add_marker(si, crate::app::MarkerKind::Cue),
+            Action::AddMarkerKind(k) => self.mt_add_marker(si, k),
+            Action::MarkerCmd(c) => self.mt_marker_cmd(si, c),
             Action::Save => self.save_session(false),
             Action::SaveAs => self.save_session(true),
             Action::Close(usize::MAX) => self.actions.push(Action::MtCloseSession(si)),
@@ -1523,7 +1538,6 @@ impl App {
             | Action::Crop
             | Action::CaptureNoise
             | Action::Convert(..)
-            | Action::AddMarker
             | Action::CopyToNew
             | Action::PasteNew
             | Action::MixPaste { .. }
@@ -2486,6 +2500,175 @@ impl App {
                     let f = wheel_base.powf(scroll.y as f64 / 40.0);
                     s.zoom(f, v.s(p.x));
                 }
+            }
+        }
+
+        // ------------------------------------------------ markers
+        // Flags in the ruler (drag to move; a range also by its end), lines
+        // down through the tracks; right-click for rename, type and delete.
+        {
+            const FLAG_H: f32 = 13.0;
+            let mut clip_snaps: Vec<usize> = vec![s.cursor];
+            for t in &s.tracks {
+                for c in &t.clips {
+                    clip_snaps.push(c.start);
+                    clip_snaps.push(c.end());
+                }
+            }
+            let snap = |p: f64, alt: bool| -> usize {
+                let p = p.max(0.0);
+                if !alt {
+                    let tol = 8.0 * v.spp();
+                    if let Some(&q) = clip_snaps.iter().min_by(|a, b| ((**a as f64) - p).abs().total_cmp(&((**b as f64) - p).abs())) {
+                        if ((q as f64) - p).abs() <= tol {
+                            return q;
+                        }
+                    }
+                }
+                p.round() as usize
+            };
+            let mut clicked: Option<(usize, bool)> = None;
+            let mut delete: Option<usize> = None;
+            let mut resort = false;
+            let mut open_panel = false;
+            for i in 0..s.markers.len() {
+                let m = s.markers[i].clone();
+                let (x0, x1) = (v.x(m.pos as f64), v.x(m.end() as f64));
+                if x1 < lanes.left() - 150.0 || x0 > lanes.right() {
+                    continue;
+                }
+                let selected = self.mt.marker_sel.contains(&i);
+                let col = marker_colour(m.kind);
+                let line = Stroke::new(1.0_f32, if selected { col } else { col.gamma_multiply(0.55) });
+                for x in if m.is_range() { vec![x0, x1] } else { vec![x0] } {
+                    if x >= lanes.left() && x <= lanes.right() {
+                        painter.line_segment([pos2(x, ruler.bottom() - FLAG_H), pos2(x, body.bottom())], line);
+                    }
+                }
+                if m.is_range() {
+                    let (a, b) = (x0.max(lanes.left()), x1.min(lanes.right()));
+                    if b > a {
+                        painter.rect_filled(Rect::from_min_max(pos2(a, ruler.bottom() - FLAG_H), pos2(b, ruler.bottom())), 0.0, col.gamma_multiply(if selected { 0.35 } else { 0.18 }));
+                    }
+                }
+                let top = ruler.bottom() - FLAG_H;
+                if x0 >= lanes.left() - 1.0 {
+                    painter.add(Shape::convex_polygon(vec![pos2(x0, top), pos2(x0 + 9.0, top + 4.5), pos2(x0, top + 9.0)], col, if selected { Stroke::new(1.0_f32, Color32::WHITE) } else { Stroke::NONE }));
+                }
+                let label_x = x0.max(lanes.left()) + 11.0;
+                let galley = painter.layout_no_wrap(m.name.clone(), FontId::proportional(10.5), if selected { Color32::WHITE } else { TEXT() });
+                let label_w = galley.size().x.min(160.0);
+                if label_x < lanes.right() {
+                    painter.with_clip_rect(Rect::from_min_max(pos2(label_x, top), pos2((label_x + 160.0).min(lanes.right()), ruler.bottom()))).galley(pos2(label_x, top - 1.0), galley, TEXT());
+                }
+                let hit = Rect::from_min_max(pos2(x0 - 4.0, top - 1.0), pos2(x0 + 13.0 + label_w, ruler.bottom())).intersect(Rect::from_min_max(pos2(lanes.left() - 4.0, ruler.top()), ruler.max));
+                if hit.width() <= 0.0 {
+                    continue;
+                }
+                let resp = ui.interact(hit, ui.id().with(("mt_marker", s.id, i)), Sense::click_and_drag()).on_hover_text(format!("{} ({}) at {}", m.name, m.kind.label(), format_time(m.pos as f64, s.sample_rate)));
+                if resp.hovered() {
+                    ui.ctx().set_cursor_icon(CursorIcon::Grab);
+                }
+                if resp.drag_started() {
+                    s.push_undo("Move Marker");
+                }
+                if resp.dragged() {
+                    ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+                    if let Some(p) = resp.interact_pointer_pos() {
+                        let at = snap(v.s(p.x.clamp(lanes.left(), lanes.right())), mods.alt);
+                        s.markers[i].pos = at;
+                        s.dirty = true;
+                    }
+                }
+                if resp.drag_stopped() {
+                    resort = true;
+                    clicked = Some((i, false));
+                }
+                if resp.clicked() {
+                    clicked = Some((i, true));
+                }
+                if resp.double_clicked() {
+                    open_panel = true;
+                }
+                resp.context_menu(|ui| {
+                    ui.label(RichText::new("Marker").color(TEXT_DIM()).size(11.0));
+                    let mk = &mut s.markers[i];
+                    if ui.add(egui::TextEdit::singleline(&mut mk.name).desired_width(180.0)).changed() {
+                        s.dirty = true;
+                    }
+                    ui.separator();
+                    for k in export::MarkerKind::ALL {
+                        let mk = &mut s.markers[i];
+                        if ui.radio(mk.kind == k, k.label()).clicked() && mk.kind != k {
+                            s.push_undo("Marker Type");
+                            s.markers[i].kind = k;
+                            s.dirty = true;
+                        }
+                    }
+                    ui.separator();
+                    if s.markers[i].is_range() && ui.button("Convert to Point").clicked() {
+                        s.push_undo("Convert Marker");
+                        s.markers[i].len = 0;
+                        s.dirty = true;
+                        ui.close_menu();
+                    }
+                    if ui.button("Show in Markers Panel").clicked() {
+                        open_panel = true;
+                        clicked = Some((i, false));
+                        ui.close_menu();
+                    }
+                    if ui.button("Delete Marker").clicked() {
+                        delete = Some(i);
+                        ui.close_menu();
+                    }
+                });
+                // A range's end.
+                if m.is_range() && x1 >= lanes.left() && x1 <= lanes.right() {
+                    let end_hit = Rect::from_min_max(pos2(x1 - 4.0, top - 1.0), pos2(x1 + 4.0, ruler.bottom()));
+                    let er = ui.interact(end_hit, ui.id().with(("mt_marker_end", s.id, i)), Sense::drag());
+                    if er.hovered() || er.dragged() {
+                        ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+                    }
+                    if er.drag_started() {
+                        s.push_undo("Resize Marker");
+                    }
+                    if er.dragged() {
+                        if let Some(p) = er.interact_pointer_pos() {
+                            let at = snap(v.s(p.x.clamp(lanes.left(), lanes.right())), mods.alt);
+                            s.markers[i].len = at.saturating_sub(s.markers[i].pos).max(1);
+                            s.dirty = true;
+                        }
+                    }
+                }
+            }
+            if let Some(i) = delete {
+                s.push_undo("Delete Marker");
+                s.markers.remove(i);
+                s.dirty = true;
+                self.mt.marker_sel.clear();
+            } else if let Some((i, click)) = clicked {
+                let moved = s.markers[i].clone();
+                if resort {
+                    s.markers.sort_by_key(|m| m.pos);
+                }
+                let i = s.markers.iter().position(|m| *m == moved).unwrap_or(i);
+                if click && mods.command {
+                    if !self.mt.marker_sel.remove(&i) {
+                        self.mt.marker_sel.insert(i);
+                    }
+                } else {
+                    self.mt.marker_sel = std::iter::once(i).collect();
+                }
+                if click {
+                    if moved.is_range() {
+                        s.sel = Some((moved.pos, moved.end()));
+                    }
+                    s.cursor = moved.pos;
+                    self.actions.push(Action::SetCursor(moved.pos));
+                }
+            }
+            if open_panel {
+                self.actions.push(Action::ShowPanel(crate::app::Panel::Markers));
             }
         }
 
