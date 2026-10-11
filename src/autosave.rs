@@ -48,7 +48,7 @@ fn stamp() -> String {
 
 enum Item {
     Text { path: PathBuf, text: String },
-    Audio { path: PathBuf, audio: crate::engine::Buffer, rate: u32, meta: export::Metadata, markers: Vec<(usize, String)> },
+    Audio { path: PathBuf, audio: crate::engine::Buffer, rate: u32, meta: export::Metadata, markers: Vec<crate::export::Marker> },
     /// Keep the newest `keep` backups in `dir` whose names start with `prefix`.
     Prune { dir: PathBuf, prefix: String, keep: usize },
 }
@@ -163,7 +163,7 @@ impl App {
                 let Some(dir) = self.backup_dir_for(d.path.as_deref()) else { continue };
                 let stem = Path::new(&d.name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled".into());
                 let prefix = format!("{} [{}] backup ", crate::mt_ui::safe_file_name(&stem), tag(d.path.as_deref(), d.id));
-                let markers = d.markers.iter().map(|m| (m.pos, m.name.clone())).collect();
+                let markers = d.markers.clone();
                 items.push(Item::Audio { path: dir.join(format!("{prefix}{t}.wav")), audio: d.audio.clone(), rate: d.sample_rate, meta: d.meta.clone(), markers });
                 items.push(Item::Prune { dir, prefix, keep });
             }

@@ -45,11 +45,7 @@ pub fn time_style_for(p: &Prefs) -> crate::dsp::util::TimeStyle {
 }
 pub const SAMPLE_RATES: [u32; 10] = [8000, 11025, 16000, 22050, 32000, 44100, 48000, 88200, 96000, 192000];
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Marker {
-    pub pos: usize,
-    pub name: String,
-}
+pub use crate::export::{Marker, MarkerKind};
 
 #[derive(Clone)]
 pub struct Snapshot {
@@ -98,6 +94,8 @@ pub struct Document {
     pub meta: export::Metadata,
     /// Format settings from the last Save As, reused by Save.
     pub export: Option<ExportSettings>,
+    /// Playlist panel: range markers to play in order.
+    pub playlist: Vec<crate::markers_ui::PlaylistItem>,
 }
 
 impl Document {
@@ -132,6 +130,7 @@ impl Document {
             recording: false,
             meta: export::Metadata::default(),
             export: None,
+            playlist: Vec::new(),
         }
     }
 
@@ -143,7 +142,12 @@ impl Document {
             .markers
             .into_iter()
             .enumerate()
-            .map(|(i, (pos, name))| Marker { pos, name: if name.trim().is_empty() { format!("Marker {:02}", i + 1) } else { name } })
+            .map(|(i, mut m)| {
+                if m.name.trim().is_empty() {
+                    m.name = format!("Marker {:02}", i + 1);
+                }
+                m
+            })
             .collect();
         d
     }
@@ -283,6 +287,7 @@ impl Document {
         }
         for m in self.markers.iter_mut() {
             m.pos = m.pos.min(len);
+            m.len = m.len.min(len - m.pos);
         }
     }
 
@@ -330,12 +335,7 @@ impl Document {
 
     /// Shift markers after `at` by `delta` samples (for inserts/deletes).
     pub fn shift_markers(&mut self, at: usize, removed: usize, inserted: usize) {
-        self.markers.retain(|m| !(m.pos > at && m.pos < at + removed));
-        for m in self.markers.iter_mut() {
-            if m.pos >= at + removed {
-                m.pos = m.pos - removed + inserted;
-            }
-        }
+        self.markers = self.markers.iter().filter_map(|m| m.after_edit(at, removed, inserted)).collect();
     }
 }
 
@@ -377,15 +377,16 @@ pub enum Panel {
     Diagnostics,
     BatchProcess,
     Metadata,
+    Playlist,
 }
 
 impl Panel {
     pub const TOP: [Panel; 2] = [Panel::Files, Panel::Favorites];
-    pub const MIDDLE: [Panel; 7] = [Panel::MediaBrowser, Panel::EffectsRack, Panel::Markers, Panel::Properties, Panel::Metadata, Panel::Diagnostics, Panel::BatchProcess];
+    pub const MIDDLE: [Panel; 8] = [Panel::MediaBrowser, Panel::EffectsRack, Panel::Markers, Panel::Playlist, Panel::Properties, Panel::Metadata, Panel::Diagnostics, Panel::BatchProcess];
     pub const BOTTOM: [Panel; 2] = [Panel::History, Panel::MatchLoudness];
     pub const METERS: [Panel; 3] = [Panel::Levels, Panel::FrequencyAnalysis, Panel::PhaseMeter];
     /// Every panel, in Window-menu order.
-    pub const ALL: [Panel; 14] = [
+    pub const ALL: [Panel; 15] = [
         Panel::BatchProcess,
         Panel::Diagnostics,
         Panel::EffectsRack,
@@ -399,6 +400,7 @@ impl Panel {
         Panel::MediaBrowser,
         Panel::Metadata,
         Panel::PhaseMeter,
+        Panel::Playlist,
         Panel::Properties,
     ];
     pub fn name(self) -> &'static str {
@@ -417,6 +419,7 @@ impl Panel {
             Panel::Diagnostics => "Diagnostics",
             Panel::BatchProcess => "Batch Process",
             Panel::Metadata => "Metadata",
+            Panel::Playlist => "Playlist",
         }
     }
 }
@@ -434,6 +437,8 @@ pub const RACK_SLOTS: usize = 16;
 pub struct RecTarget {
     pub doc_id: u64,
     pub range: (usize, usize),
+    /// Punch In: seconds of pre-roll recorded before the selection starts.
+    pub punch_lead: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -483,7 +488,7 @@ pub enum Dialog {
     Preferences(Box<crate::prefs_ui::PrefsDialog>),
     MixPaste { mode: usize, clip_db: f32, orig_db: f32 },
     Convert { rate: u32, channels: usize },
-    Shortcuts,
+    Shortcuts(Box<crate::shortcuts::ShortcutEditor>),
     PluginManager,
     About,
     Message { title: String, text: String },
@@ -553,6 +558,10 @@ pub enum Action {
     CaptureNoise,
     Convert(u32, usize),
     AddMarker,
+    /// Edit > Marker > Add CD Track / Cartridge Timer marker.
+    AddMarkerKind(MarkerKind),
+    MarkerCmd(crate::markers_ui::MarkerCmd),
+    ZeroCross(crate::markers_ui::ZeroMode),
     PlayToggle,
     Stop,
     Record,
@@ -580,6 +589,8 @@ pub enum Action {
     PreferencesPage(crate::prefs_ui::Page),
     /// Play the selection (or from the cursor) with pre-roll and post-roll.
     PlayWithRoll,
+    /// Punch In: record over the selection, hearing pre-roll and post-roll.
+    PunchRecord,
     ApplyRack,
     Audition(PathBuf),
     Pause,
@@ -699,6 +710,13 @@ pub struct App {
     pub sessions: Vec<crate::session::Session>,
     pub active_session: Option<usize>,
     pub mt: crate::mt_ui::MtState,
+    pub marks: crate::markers_ui::MarkerState,
+    /// A range-marker export in progress (reports its result).
+    pub marker_export: Option<Receiver<String>>,
+    /// Keyboard shortcuts in use (defaults plus the user's changes).
+    pub keymap: crate::shortcuts::Keymap,
+    /// Bumped when the shortcuts change (the macOS menu shows them).
+    pub keymap_gen: u64,
 }
 
 impl App {
@@ -783,12 +801,17 @@ impl App {
             sessions: Vec::new(),
             active_session: None,
             mt: Default::default(),
+            marks: Default::default(),
+            marker_export: None,
+            keymap: crate::shortcuts::Keymap::new(&[]),
+            keymap_gen: 0,
         };
         let opened_files = !open.is_empty();
         if opened_files {
             app.actions.push(Action::OpenPaths(open));
         }
         app.apply_runtime_prefs(&cc.egui_ctx);
+        app.rebuild_keymap();
         app.follow = app.prefs.follow;
         app.rack_entire = app.prefs.rack_entire;
         if crate::plugin::needs_first_scan() || app.prefs.scan_at_startup {
@@ -839,6 +862,7 @@ impl App {
         // files, the last Save As format, the Media Browser).
         new.recent = self.prefs.recent.clone();
         new.export = self.prefs.export;
+        new.shortcuts = self.prefs.shortcuts.clone();
         new.browser_dir = self.prefs.browser_dir.clone();
         if new.browser_autoplay == opened_with.browser_autoplay {
             new.browser_autoplay = self.prefs.browser_autoplay;
@@ -984,6 +1008,34 @@ impl App {
         matches!(self.job, Some(Job { kind: JobKind::Edit { .. }, .. }))
     }
 
+    /// A cue marker at the playhead, or (stopped, with a selection) a range
+    /// marker over the selection, as M does in Audition.
+    fn add_marker(&mut self, kind: MarkerKind) {
+        let playing = self.engine.status().playing;
+        let pos = self.display_pos() as usize;
+        let marker_name = self.prefs.marker_name.clone();
+        if let Some(d) = self.doc_mut() {
+            let n = d.markers.len() + 1;
+            let name = format!("{} {n:02}", marker_name.trim());
+            let mut m = match d.sel_range().filter(|_| !playing) {
+                Some((a, b)) => Marker::range(a, b - a, name),
+                None => Marker::point(pos, name),
+            };
+            m.kind = kind;
+            d.markers.push(m);
+            d.markers.sort_by_key(|m| m.pos);
+            d.dirty = true;
+        }
+    }
+
+    /// A new, unsaved file holding `audio`.
+    pub fn new_document_from(&mut self, name: String, audio: Vec<Vec<f32>>, sr: u32, origin: &str) {
+        let id = self.new_id();
+        let mut doc = Document::new(id, name, None, audio, sr, None, origin);
+        doc.dirty = true;
+        self.add_doc(doc);
+    }
+
     pub(crate) fn add_doc(&mut self, doc: Document) {
         self.docs.push(doc);
         self.active = Some(self.docs.len() - 1);
@@ -1045,13 +1097,23 @@ impl App {
         self.sync_sessions();
         self.poll_analysis();
         self.poll_tools();
+        self.poll_marker_export();
     }
 
     /// Keep the target file's live length and view in step with the input.
     fn track_recording(&mut self) {
         self.engine.poll_recording();
+        self.mt_punch_tick();
         let Some(t) = &self.rec_target else { return };
         let Some((rate, _)) = self.engine.recording_format() else { return };
+        if t.punch_lead.is_some() {
+            // Punch In ends with its post-roll (or when playback is stopped).
+            let st = self.engine.status();
+            if !st.playing || st.tag != t.doc_id {
+                self.stop_recording();
+            }
+            return;
+        }
         let frames = self.engine.recorded_frames();
         let doc_id = t.doc_id;
         let start = t.range.0;
@@ -1098,69 +1160,14 @@ impl App {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        use egui::{Key, KeyboardShortcut as KS, Modifiers as M};
-        let cmd = M::COMMAND;
-        let cs = M::COMMAND | M::SHIFT;
-        let mut acts = Vec::new();
-        ctx.input_mut(|i| {
-            // Longer modifier combos first: egui matches extra Shift loosely.
-            if i.consume_shortcut(&KS::new(cs, Key::S)) { acts.push(Action::SaveAs); }
-            if i.consume_shortcut(&KS::new(cs, Key::N)) { acts.push(Action::New); }
-            if i.consume_shortcut(&KS::new(cmd, Key::N)) { acts.push(Action::NewSession); }
-            if i.consume_shortcut(&KS::new(cmd, Key::O)) { acts.push(Action::Open); }
-            if i.consume_shortcut(&KS::new(cmd, Key::S)) { acts.push(Action::Save); }
-            if i.consume_shortcut(&KS::new(cmd, Key::Q)) { acts.push(Action::Quit); }
-            if i.consume_shortcut(&KS::new(cmd, Key::Comma)) { acts.push(Action::Preferences); }
-        });
+        // The Keyboard Shortcuts window is listening for a new key.
+        if matches!(&self.dialog, Some(Dialog::Shortcuts(e)) if e.capturing.is_some()) {
+            return;
+        }
         let typing = ctx.wants_keyboard_input();
         let modal = matches!(self.dialog, Some(ref d) if !matches!(d, Dialog::Effect(_)));
-        if !typing {
-            ctx.input_mut(|i| {
-                if i.consume_shortcut(&KS::new(cs, Key::Z)) { acts.push(Action::Redo); }
-                if i.consume_shortcut(&KS::new(cmd | M::ALT, Key::V)) { acts.push(Action::PasteNew); }
-                if i.consume_shortcut(&KS::new(cs, Key::V)) {
-                    acts.push(Action::Status("__mix_paste".into()));
-                }
-                if i.consume_key(M::ALT | M::SHIFT, Key::C) { acts.push(Action::CopyToNew); }
-                if i.consume_key(M::SHIFT, Key::R) { acts.push(Action::RepeatLast); }
-                if i.consume_shortcut(&KS::new(cmd, Key::Z)) { acts.push(Action::Undo); }
-                if i.consume_shortcut(&KS::new(cmd, Key::Y)) { acts.push(Action::Redo); }
-                if i.consume_shortcut(&KS::new(cmd, Key::X)) { acts.push(Action::Cut); }
-                if i.consume_shortcut(&KS::new(cmd, Key::C)) { acts.push(Action::Copy); }
-                if i.consume_shortcut(&KS::new(cmd, Key::V)) { acts.push(Action::Paste); }
-                if i.consume_shortcut(&KS::new(cmd, Key::A)) { acts.push(Action::SelectAll); }
-                if i.consume_shortcut(&KS::new(cmd, Key::T)) { acts.push(Action::Crop); }
-                if i.consume_shortcut(&KS::new(cmd, Key::K)) { acts.push(Action::MtSplit); }
-                if i.consume_shortcut(&KS::new(cmd, Key::U)) { acts.push(Action::SpectralHeal(None)); }
-                if i.consume_key(M::ALT, Key::A) { acts.push(Action::MtAddTrack); }
-                if i.consume_key(M::ALT, Key::B) { acts.push(Action::MtAddBus); }
-                if i.consume_key(M::NONE, Key::Num9) { acts.push(Action::SetMode(Mode::Waveform)); }
-                if i.consume_key(M::NONE, Key::Num0) { acts.push(Action::SetMode(Mode::Multitrack)); }
-                if i.consume_shortcut(&KS::new(cmd, Key::W)) { acts.push(Action::Close(usize::MAX)); }
-                if i.consume_key(M::ALT, Key::Space) { acts.push(Action::PlayWithRoll); }
-                if i.consume_key(M::SHIFT, Key::Space) { acts.push(Action::Record); }
-                if i.consume_key(M::SHIFT, Key::P) { acts.push(Action::CaptureNoise); }
-                if i.consume_key(M::SHIFT, Key::D) { acts.push(Action::Status("__toggle_spectral".into())); }
-                if i.consume_key(M::NONE, Key::Space) { acts.push(Action::PlayToggle); }
-                if i.consume_key(M::NONE, Key::Delete) || i.consume_key(M::NONE, Key::Backspace) { acts.push(Action::Delete); }
-                if i.consume_key(M::NONE, Key::Escape) { acts.push(Action::Deselect); }
-                if i.consume_key(M::NONE, Key::Home) { acts.push(Action::ToStart); }
-                if i.consume_key(M::NONE, Key::End) { acts.push(Action::ToEnd); }
-                if i.consume_key(M::NONE, Key::M) { acts.push(Action::AddMarker); }
-                if i.consume_key(M::NONE, Key::Equals) || i.consume_key(M::NONE, Key::Plus) { acts.push(Action::ZoomIn); }
-                if i.consume_key(M::NONE, Key::Minus) { acts.push(Action::ZoomOut); }
-                if i.consume_key(M::NONE, Key::Backslash) { acts.push(Action::ZoomFull); }
-                if i.consume_key(M::NONE, Key::ArrowLeft) { acts.push(Action::PrevMarker); }
-                if i.consume_key(M::NONE, Key::ArrowRight) { acts.push(Action::NextMarker); }
-                // Tool keys, as in Audition. Last, and only with no modifier
-                // held, so Shift+P, Shift+D, Alt+B etc. keep their meaning.
-                if i.modifiers.is_none() {
-                    for (key, tool) in [(Key::T, Tool::Selection), (Key::H, Tool::Hand), (Key::E, Tool::Marquee), (Key::D, Tool::Lasso), (Key::P, Tool::Brush), (Key::B, Tool::SpotHeal)] {
-                        if i.consume_key(M::NONE, key) { acts.push(Action::Status(format!("__tool:{}", tool as u8))); }
-                    }
-                }
-            });
-        }
+        let ids = ctx.input_mut(|i| self.keymap.pressed(i, typing));
+        let acts: Vec<Action> = ids.iter().filter_map(|id| crate::shortcuts::action(id)).collect();
         for a in acts {
             // In an effect dialog, Space toggles the preview and Esc closes it
             // (rack slots are heard through normal playback, so Space plays).
@@ -1194,6 +1201,10 @@ impl App {
                 }
                 if s == "__mix_paste" {
                     self.dialog = Some(Dialog::MixPaste { mode: 1, clip_db: 0.0, orig_db: 0.0 });
+                    continue;
+                }
+                if s == "__shortcuts" {
+                    self.dialog = Some(Dialog::Shortcuts(Box::default()));
                     continue;
                 }
             }
@@ -1808,16 +1819,70 @@ impl App {
             self.set_status("Recording was empty.");
             return;
         }
+        let mut rec = rec;
+        let mut range = t.range;
+        if let Some(lead) = t.punch_lead {
+            // Keep the part recorded over the selection (less the input
+            // latency set in Preferences); outside it the file is unchanged.
+            let offset = ((lead + self.prefs.rec_offset_ms as f64 / 1000.0) * rate as f64).round() as usize;
+            let want = ((range.1 - range.0) as f64 * rate as f64 / doc.sample_rate as f64).round() as usize;
+            let got = rec[0].len().saturating_sub(offset).min(want);
+            if got == 0 {
+                self.set_status("Punch In stopped before the selection: nothing was replaced.");
+                return;
+            }
+            for c in rec.iter_mut() {
+                *c = c[offset..offset + got].to_vec();
+            }
+            if got < want {
+                range.1 = range.0 + (got as f64 * doc.sample_rate as f64 / rate as f64).round() as usize;
+            }
+        }
         let secs = rec[0].len() as f64 / rate as f64;
         let mut audio = rec;
         if rate != doc.sample_rate {
             audio = resample_channels(&audio, doc.sample_rate as f64 / rate as f64);
         }
-        let audio = remap_channels(&audio, doc.n_ch());
+        let mut audio = remap_channels(&audio, doc.n_ch());
         let active = vec![true; doc.n_ch()];
-        apply_edit(doc, "Record", t.range, &active, audio, None, true);
+        if t.punch_lead.is_some() {
+            // Exactly the selection's length, so nothing after it moves.
+            for c in audio.iter_mut() {
+                c.resize(range.1 - range.0, 0.0);
+            }
+        }
+        apply_edit(doc, if t.punch_lead.is_some() { "Punch In" } else { "Record" }, range, &active, audio, None, true);
         doc.clamp_view();
         self.set_status(format!("Recorded {secs:.1} s"));
+    }
+
+    /// Punch In (waveform editor): play from the pre-roll before the
+    /// selection to the post-roll after it, recording all the while, then
+    /// replace just the selection with what was recorded over it.
+    fn punch_record(&mut self) {
+        if self.engine.is_recording() {
+            self.stop_recording();
+            return;
+        }
+        let Some(doc) = self.doc() else { return self.set_status("Open a file and select the part to record over.") };
+        let Some((a, b)) = doc.sel_range() else { return self.set_status("Select the part to record over, then Punch In.") };
+        let (id, sr, len, buf) = (doc.id, doc.sample_rate, doc.len(), doc.audio.clone());
+        let pre = self.prefs.preroll_s as f64 * sr as f64;
+        let post = self.prefs.postroll_s as f64 * sr as f64;
+        let start = (a as f64 - pre).max(0.0);
+        let end = (b as f64 + post).min(len as f64);
+        self.engine.stop();
+        if let Err(e) = self.engine.start_recording(Some(sr)) {
+            self.dialog = Some(Dialog::Message { title: "Can't record".into(), text: e });
+            return;
+        }
+        // The input starts now; so does playback from `start`.
+        self.prepare_output_rate(sr);
+        self.paused = None;
+        self.play_origin = a;
+        self.engine.play_ex(buf, None, sr, start, end, false, id);
+        self.rec_target = Some(RecTarget { doc_id: id, range: (a, b), punch_lead: Some((a as f64 - start) / sr as f64) });
+        self.set_status(format!("Punch In: recording over {} (pre-roll {:.1} s, post-roll {:.1} s). Space stops.", format_time((b - a) as f64, sr), self.prefs.preroll_s, self.prefs.postroll_s));
     }
 
     fn toggle_record(&mut self) {
@@ -1851,7 +1916,7 @@ impl App {
         d.sel = None;
         d.recording = true;
         d.pending = 0;
-        self.rec_target = Some(RecTarget { doc_id: d.id, range });
+        self.rec_target = Some(RecTarget { doc_id: d.id, range, punch_lead: None });
         self.set_status(format!("Recording at {rate} Hz. Press Stop, Space or Shift+Space to finish."));
     }
 
@@ -1887,13 +1952,13 @@ impl App {
     }
 
     /// The audio, markers and tags to write for the active document.
-    fn save_payload(doc: &Document, selection: bool) -> (Buffer, Vec<(usize, String)>) {
+    fn save_payload(doc: &Document, selection: bool) -> (Buffer, Vec<Marker>) {
         if selection {
             let (a, b) = doc.target_range();
-            let markers = doc.markers.iter().filter(|m| m.pos >= a && m.pos <= b).map(|m| (m.pos - a, m.name.clone())).collect();
+            let markers = doc.markers.iter().filter_map(|m| m.within(a, b)).collect();
             (Arc::new(slice_range(&doc.audio, a, b)), markers)
         } else {
-            (doc.audio.clone(), doc.markers.iter().map(|m| (m.pos, m.name.clone())).collect())
+            (doc.audio.clone(), doc.markers.clone())
         }
     }
 
@@ -2179,7 +2244,7 @@ impl App {
                             // Crossfade across the join so it doesn't click. Markers
                             // move as for a plain delete of [a, b).
                             Some((range, xf)) => {
-                                let markers: Vec<Marker> = d.markers.iter().filter(|m| m.pos <= a || m.pos >= b).map(|m| Marker { pos: if m.pos >= b { m.pos - (b - a) } else { m.pos }, name: m.name.clone() }).collect();
+                                let markers: Vec<Marker> = d.markers.iter().filter_map(|m| m.after_edit(a, b - a, 0)).collect();
                                 apply_edit(d, "Delete", range, &active, xf, None, false);
                                 d.markers = markers;
                             }
@@ -2195,10 +2260,7 @@ impl App {
                     if let Some((a, b)) = d.sel_range() {
                         d.push_undo("Crop");
                         let audio = slice_range(&d.audio, a, b);
-                        d.markers.retain(|m| m.pos >= a && m.pos <= b);
-                        for m in d.markers.iter_mut() {
-                            m.pos -= a;
-                        }
+                        d.markers = d.markers.iter().filter_map(|m| m.within(a, b)).collect();
                         d.set_audio(audio);
                         d.sel = None;
                         d.cursor = 0;
@@ -2349,16 +2411,10 @@ impl App {
                     Ok(out)
                 });
             }
-            Action::AddMarker => {
-                let pos = self.display_pos() as usize;
-                let marker_name = self.prefs.marker_name.clone();
-                if let Some(d) = self.doc_mut() {
-                    let n = d.markers.len() + 1;
-                    d.markers.push(Marker { pos, name: format!("{} {n:02}", marker_name.trim()) });
-                    d.markers.sort_by_key(|m| m.pos);
-                    d.dirty = true;
-                }
-            }
+            Action::AddMarker => self.add_marker(MarkerKind::Cue),
+            Action::AddMarkerKind(k) => self.add_marker(k),
+            Action::MarkerCmd(c) => self.marker_cmd(c),
+            Action::ZeroCross(z) => self.zero_cross(z),
             Action::PlayToggle if self.engine.is_recording() => self.stop_recording(),
             Action::Stop if self.engine.is_recording() => self.stop_recording(),
             Action::PlayToggle => self.play_toggle(),
@@ -2367,6 +2423,13 @@ impl App {
                 self.engine.stop();
             }
             Action::Record => self.toggle_record(),
+            Action::PunchRecord => {
+                if self.mode == Mode::Multitrack {
+                    self.mt_punch_record();
+                } else {
+                    self.punch_record();
+                }
+            }
             Action::ToStart => {
                 if let Some(d) = self.doc_mut() {
                     d.cursor = 0;
@@ -2512,7 +2575,7 @@ impl App {
                 let res = self.doc().map(|d| {
                     let (a, b) = d.target_range();
                     let markers: Vec<Marker> = if with_meta {
-                        d.markers.iter().filter(|m| m.pos >= a && m.pos <= b).map(|m| Marker { pos: m.pos - a, name: m.name.clone() }).collect()
+                        d.markers.iter().filter_map(|m| m.within(a, b)).collect()
                     } else {
                         Vec::new()
                     };
@@ -2746,9 +2809,7 @@ pub fn apply_edit(
             doc.sample_rate = r;
             doc.source_bits = None;
         }
-        for m in doc.markers.iter_mut() {
-            m.pos = (m.pos as f64 * ratio) as usize;
-        }
+        doc.markers = doc.markers.iter().map(|m| m.scaled(ratio)).collect();
         doc.cursor = (doc.cursor as f64 * ratio) as usize;
         doc.sel = None;
         doc.set_audio(out);
@@ -2816,7 +2877,7 @@ mod tests {
     #[test]
     fn markers_follow_edits() {
         let mut d = doc(100);
-        d.markers = vec![Marker { pos: 5, name: "a".into() }, Marker { pos: 15, name: "b".into() }, Marker { pos: 60, name: "c".into() }];
+        d.markers = vec![Marker::point(5, "a"), Marker::point(15, "b"), Marker::point(60, "c")];
         let all = vec![true, true];
         apply_edit(&mut d, "Delete", (10, 20), &all, vec![vec![], vec![]], None, false);
         let pos: Vec<usize> = d.markers.iter().map(|m| m.pos).collect();
@@ -2842,7 +2903,7 @@ mod tests {
     #[test]
     fn effects_keep_markers_inside_the_range() {
         let mut d = Document::new(1, "t".into(), None, vec![vec![0.1; 1000]], 1000, None, "t");
-        d.markers.push(Marker { pos: 500, name: "m".into() });
+        d.markers.push(Marker::point(500, "m"));
         apply_edit(&mut d, "fx", (0, 1000), &[true], vec![vec![0.2; 1000]], None, false);
         assert_eq!(d.markers.len(), 1, "same-length edit keeps the marker");
         apply_edit(&mut d, "del", (100, 200), &[true], vec![Vec::new()], None, false);

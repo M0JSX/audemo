@@ -133,11 +133,13 @@ macro_rules! prefs {
             pub recent: Vec<PathBuf>,
             /// Format last chosen in Save As.
             pub export: Option<crate::export::ExportSettings>,
+            /// Keyboard shortcuts changed from the defaults: (command, keys).
+            pub shortcuts: Vec<(String, String)>,
             $( $(#[$m])* pub $field: $ty, )*
         }
         impl Default for Prefs {
             fn default() -> Self {
-                Prefs { recent: Vec::new(), export: None, $( $field: $default, )* }
+                Prefs { recent: Vec::new(), export: None, shortcuts: Vec::new(), $( $field: $default, )* }
             }
         }
         impl Prefs {
@@ -239,6 +241,9 @@ prefs! {
     spec_size: u32 = 1024,
     spec_range_db: f32 = 115.0,
     spec_log: bool = false,
+    // Edit > Snapping (waveform editor)
+    snap_markers: bool = true,
+    snap_zero: bool = false,
     // Time display
     time_format: TimeFormat = TimeFormat::Decimal,
     custom_fps: f32 = 30.0,
@@ -348,6 +353,7 @@ impl Prefs {
             match k {
                 "recent" if !v.is_empty() => p.recent.push(PathBuf::from(v)),
                 "export" => p.export = crate::export::ExportSettings::from_text(v),
+                k if k.starts_with("shortcut.") => p.shortcuts.push((k["shortcut.".len()..].to_string(), v.to_string())),
                 _ => p.set_key(k, v),
             }
         }
@@ -397,6 +403,9 @@ impl Prefs {
         }
         for r in &self.recent {
             s += &format!("recent={}\n", r.display());
+        }
+        for (id, keys) in &self.shortcuts {
+            s += &format!("shortcut.{id}={keys}\n");
         }
         s
     }
@@ -452,6 +461,7 @@ mod tests {
             colors: [1, 2, 3, 4, 5, 0xffffff],
             spec_window: WindowFn::Hamming,
             backup_dir: Some(PathBuf::from("/Backups here")),
+            shortcuts: vec![("marker".into(), "Ctrl+Alt+M, Shift+=".into()), ("play".into(), String::new())],
             temp_dir: Some(PathBuf::from("/Volumes/Scratch/Temp")),
             marker_name: "Cue".into(),
             pan_law: PanLaw::EqualPower,

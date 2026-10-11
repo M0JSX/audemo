@@ -141,6 +141,7 @@ impl App {
 
         let ss = self.spec_settings();
         let wheel_base = self.wheel_base();
+        let (snap_markers, snap_zero) = (self.prefs.snap_markers, self.prefs.snap_zero);
         let doc = &mut self.docs[di];
         let len = doc.len();
         let n_ch = doc.n_ch().max(1);
@@ -427,20 +428,88 @@ impl App {
         }
 
         // ------------------------------------------------ markers, cursor, playhead
+        // Range markers: a band in the ruler and dashed lines at both ends.
+        // Flags can be dragged; clicking a range's band selects its audio.
+        let mut marker_drag: Option<(usize, bool, usize)> = None;
+        let mut marker_select: Option<(usize, usize)> = None;
+        let mut marker_done = false;
         for (mi, m) in doc.markers.iter().enumerate() {
             let x = v.x(m.pos as f64);
-            if x < lanes.left() || x > lanes.right() {
+            let x2 = v.x(m.end() as f64);
+            if x2 < lanes.left() || x > lanes.right() {
                 continue;
             }
-            let pts = [pos2(x, lanes.top()), pos2(x, lanes.bottom())];
-            painter.extend(Shape::dashed_line(&pts, Stroke::new(1.0_f32, MARKER()), 4.0, 3.0));
-            let flag = Rect::from_min_size(pos2(x, ruler.bottom() - 11.0), vec2(9.0, 10.0));
-            painter.add(Shape::convex_polygon(vec![flag.left_top(), flag.right_top(), pos2(flag.right(), flag.bottom() - 3.0), flag.left_bottom()], MARKER(), Stroke::NONE));
-            let fr = ui.interact(flag.expand(2.0), ui.id().with(("marker", doc.id, mi)), Sense::click());
-            if fr.clicked() {
-                self.actions.push(Action::SetCursor(m.pos));
+            let band = Rect::from_x_y_ranges(x.max(lanes.left())..=x2.min(lanes.right()), (ruler.bottom() - 11.0)..=ruler.bottom());
+            if m.is_range() {
+                painter.rect_filled(band, 0.0, MARKER().gamma_multiply(0.35));
+                painter.rect_filled(Rect::from_x_y_ranges(band.x_range(), lanes.y_range()), 0.0, MARKER().gamma_multiply(0.05));
+                let br = ui.interact(band.shrink2(vec2(6.0, 0.0)), ui.id().with(("mrange", doc.id, mi)), Sense::click());
+                if br.clicked() {
+                    marker_select = Some((m.pos, m.end()));
+                }
+                br.on_hover_text(format!("{} ({})  {} – {}", m.name, m.kind.label(), format_time(m.pos as f64, doc.sample_rate), format_time(m.end() as f64, doc.sample_rate)));
             }
-            fr.on_hover_text(format!("{}  {}", m.name, format_time(m.pos as f64, doc.sample_rate)));
+            let ends: &[(f32, bool)] = if m.is_range() { &[(x, false), (x2, true)] } else { &[(x, false)] };
+            for &(ex, is_end) in ends {
+                if ex < lanes.left() || ex > lanes.right() {
+                    continue;
+                }
+                let pts = [pos2(ex, lanes.top()), pos2(ex, lanes.bottom())];
+                painter.extend(Shape::dashed_line(&pts, Stroke::new(1.0_f32, MARKER()), 4.0, 3.0));
+                let flag = if is_end { Rect::from_min_size(pos2(ex - 9.0, ruler.bottom() - 11.0), vec2(9.0, 10.0)) } else { Rect::from_min_size(pos2(ex, ruler.bottom() - 11.0), vec2(9.0, 10.0)) };
+                let poly = if is_end {
+                    vec![flag.left_top(), flag.right_top(), flag.right_bottom(), pos2(flag.left(), flag.bottom() - 3.0)]
+                } else {
+                    vec![flag.left_top(), flag.right_top(), pos2(flag.right(), flag.bottom() - 3.0), flag.left_bottom()]
+                };
+                let fill = if m.kind == crate::app::MarkerKind::Cue { MARKER() } else { ACCENT() };
+                painter.add(Shape::convex_polygon(poly, fill, Stroke::NONE));
+                let fr = ui.interact(flag.expand(2.0), ui.id().with(("marker", doc.id, mi, is_end)), Sense::click_and_drag());
+                if fr.clicked() {
+                    if m.is_range() {
+                        marker_select = Some((m.pos, m.end()));
+                    } else {
+                        self.actions.push(Action::SetCursor(m.pos));
+                    }
+                }
+                if fr.dragged() {
+                    if let Some(p) = fr.interact_pointer_pos() {
+                        marker_drag = Some((mi, is_end, v.s(p.x).round().clamp(0.0, len as f64) as usize));
+                    }
+                    ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+                }
+                if fr.drag_stopped() {
+                    marker_done = true;
+                }
+                if fr.hovered() {
+                    ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+                }
+                fr.on_hover_text(format!("{}  {}\nDrag to move", m.name, format_time(if is_end { m.end() } else { m.pos } as f64, doc.sample_rate)));
+            }
+        }
+        if let Some((mi, is_end, mut s)) = marker_drag {
+            if snap_zero {
+                s = crate::markers_ui::zero_crossing(&doc.audio, &doc.active_ch, s, 0, doc.sample_rate);
+            }
+            let m = &mut doc.markers[mi];
+            if !m.is_range() {
+                m.pos = s;
+            } else if is_end {
+                m.len = s.max(m.pos + 1) - m.pos;
+            } else {
+                let end = m.end();
+                m.pos = s.min(end - 1);
+                m.len = end - m.pos;
+            }
+            doc.dirty = true;
+        }
+        if marker_done {
+            doc.markers.sort_by_key(|m| m.pos);
+        }
+        if let Some((a, b)) = marker_select {
+            doc.sel = Some((a, b));
+            doc.cursor = a;
+            doc.spec_sel = None;
         }
         let cx = v.x(doc.cursor as f64);
         if cx >= lanes.left() && cx <= lanes.right() {
@@ -573,7 +642,10 @@ impl App {
             if tool == Tool::Hand || middle {
                 self.hand_anchor = Some((origin.x, doc.view_start, doc.view_end));
             } else {
-                let s0 = to_sample(origin.x);
+                let mut s0 = to_sample(origin.x);
+                if snap_zero {
+                    s0 = crate::markers_ui::zero_crossing(&doc.audio, &doc.active_ch, s0, 0, doc.sample_rate);
+                }
                 let anchor = if mods.shift {
                     match doc.sel_range() {
                         Some((a, b)) => {
@@ -614,7 +686,18 @@ impl App {
                         doc.view_end -= d;
                         doc.clamp_view();
                     }
-                    let s = to_sample(p.x);
+                    let mut s = to_sample(p.x);
+                    // Edit > Snapping: to markers within a few pixels, else to zero crossings.
+                    let near_marker = if snap_markers {
+                        doc.markers.iter().flat_map(|m| [m.pos, m.end()]).filter(|&ms| (v.x(ms as f64) - p.x).abs() < 6.0).min_by_key(|&ms| ms.abs_diff(s))
+                    } else {
+                        None
+                    };
+                    if let Some(ms) = near_marker {
+                        s = ms;
+                    } else if snap_zero {
+                        s = crate::markers_ui::zero_crossing(&doc.audio, &doc.active_ch, s, 0, doc.sample_rate);
+                    }
                     doc.sel = if s != anchor { Some((anchor.min(s), anchor.max(s))) } else { None };
                     doc.cursor = anchor.min(s);
                     // A time selection replaces any spectral selection.

@@ -65,16 +65,19 @@ impl App {
         let effects = self.effects.clone();
         let recent = self.prefs.recent.clone();
         let last = self.last_effect.as_ref().map(|(i, _)| effects[*i].name);
+        let km = self.keymap.clone();
+        let has_markers = self.doc().map(|d| !d.markers.is_empty()).unwrap_or(false);
+        let in_wave = self.mode == Mode::Waveform && self.doc().is_some();
         egui::TopBottomPanel::top("menu")
             .frame(egui::Frame::none().fill(BG_DEEP()).inner_margin(egui::Margin::symmetric(6.0, 3.0)))
             .show(ctx, |ui| {
                 egui::menu::bar(ui, |ui| {
                     ui.menu_button("File", |ui| {
                         ui.menu_button("New", |ui| {
-                            if item(ui, "Multitrack Session…", "Ctrl+N", true) { self.actions.push(Action::NewSession); }
-                            if item(ui, "Audio File…", "Ctrl+Shift+N", true) { self.actions.push(Action::New); }
+                            if item(ui, "Multitrack Session…", &km.label("new_session"), true) { self.actions.push(Action::NewSession); }
+                            if item(ui, "Audio File…", &km.label("new"), true) { self.actions.push(Action::New); }
                         });
-                        if item(ui, "Open…", "Ctrl+O", true) { self.actions.push(Action::Open); }
+                        if item(ui, "Open…", &km.label("open"), true) { self.actions.push(Action::Open); }
                         ui.menu_button("Open Append", |ui| {
                             if item(ui, "To Current…", "", has_doc) { self.actions.push(Action::OpenAppend); }
                         });
@@ -98,42 +101,49 @@ impl App {
                             }
                         });
                         ui.separator();
-                        if item(ui, "Close", "Ctrl+W", has_doc) { self.actions.push(Action::Close(usize::MAX)); }
+                        if item(ui, "Close", &km.label("close"), has_doc) { self.actions.push(Action::Close(usize::MAX)); }
                         if item(ui, "Close All", "", has_doc) { self.actions.push(Action::CloseAll); }
                         ui.separator();
-                        if item(ui, "Save", "Ctrl+S", has_doc) { self.actions.push(Action::Save); }
-                        if item(ui, "Save As…", "Ctrl+Shift+S", has_doc) { self.actions.push(Action::SaveAs); }
+                        if item(ui, "Save", &km.label("save"), has_doc) { self.actions.push(Action::Save); }
+                        if item(ui, "Save As…", &km.label("save_as"), has_doc) { self.actions.push(Action::SaveAs); }
                         if item(ui, "Save Selection As…", "", has_sel) { self.actions.push(Action::SaveSelectionAs); }
                         if item(ui, "Save All", "", has_doc) { self.actions.push(Action::SaveAll); }
                         ui.separator();
-                        if item(ui, "Exit", "Ctrl+Q", true) { self.actions.push(Action::Quit); }
+                        ui.menu_button("Import", |ui| {
+                            if item(ui, "Markers…", "", in_wave) { self.actions.push(Action::MarkerCmd(crate::markers_ui::MarkerCmd::ImportCsv)); }
+                        });
+                        ui.menu_button("Export", |ui| {
+                            if item(ui, "Markers…", "", in_wave && has_markers) { self.actions.push(Action::MarkerCmd(crate::markers_ui::MarkerCmd::ExportCsv)); }
+                        });
+                        ui.separator();
+                        if item(ui, "Exit", &km.label("quit"), true) { self.actions.push(Action::Quit); }
                     });
                     ui.menu_button("Edit", |ui| {
-                        if item(ui, "Undo", "Ctrl+Z", can_undo) { self.actions.push(Action::Undo); }
-                        if item(ui, "Redo", "Ctrl+Shift+Z", can_redo) { self.actions.push(Action::Redo); }
+                        if item(ui, "Undo", &km.label("undo"), can_undo) { self.actions.push(Action::Undo); }
+                        if item(ui, "Redo", &km.label("redo"), can_redo) { self.actions.push(Action::Redo); }
                         let repeat = match last {
                             Some(n) => format!("Repeat Previous Command ({n})"),
                             None => "Repeat Previous Command".to_string(),
                         };
-                        if item(ui, &repeat, "Shift+R", last.is_some() && has_doc) { self.actions.push(Action::RepeatLast); }
+                        if item(ui, &repeat, &km.label("repeat"), last.is_some() && has_doc) { self.actions.push(Action::RepeatLast); }
                         ui.separator();
-                        if item(ui, "Cut", "Ctrl+X", has_sel) { self.actions.push(Action::Cut); }
-                        if item(ui, "Copy", "Ctrl+C", has_sel) { self.actions.push(Action::Copy); }
-                        if item(ui, "Copy to New", "Alt+Shift+C", has_doc) { self.actions.push(Action::CopyToNew); }
-                        if item(ui, "Paste", "Ctrl+V", has_clip) { self.actions.push(Action::Paste); }
-                        if item(ui, "Paste to New", "Ctrl+Alt+V", has_clip) { self.actions.push(Action::PasteNew); }
-                        if item(ui, "Mix Paste…", "Ctrl+Shift+V", has_clip && has_doc) {
+                        if item(ui, "Cut", &km.label("cut"), has_sel) { self.actions.push(Action::Cut); }
+                        if item(ui, "Copy", &km.label("copy"), has_sel) { self.actions.push(Action::Copy); }
+                        if item(ui, "Copy to New", &km.label("copy_new"), has_doc) { self.actions.push(Action::CopyToNew); }
+                        if item(ui, "Paste", &km.label("paste"), has_clip) { self.actions.push(Action::Paste); }
+                        if item(ui, "Paste to New", &km.label("paste_new"), has_clip) { self.actions.push(Action::PasteNew); }
+                        if item(ui, "Mix Paste…", &km.label("mix_paste"), has_clip && has_doc) {
                             self.dialog = Some(Dialog::MixPaste { mode: 1, clip_db: 0.0, orig_db: 0.0 });
                         }
                         ui.separator();
-                        if item(ui, "Delete", "Del", has_sel) { self.actions.push(Action::Delete); }
-                        if item(ui, "Crop", "Ctrl+T", has_sel) { self.actions.push(Action::Crop); }
+                        if item(ui, "Delete", &km.label("delete"), has_sel) { self.actions.push(Action::Delete); }
+                        if item(ui, "Crop", &km.label("crop"), has_sel) { self.actions.push(Action::Crop); }
                         let has_spec = self.doc().map(|d| d.spec_sel.is_some()).unwrap_or(false);
-                        if item(ui, "Auto Heal Selection", "Ctrl+U", has_spec) { self.actions.push(Action::SpectralHeal(None)); }
+                        if item(ui, "Auto Heal Selection", &km.label("heal"), has_spec) { self.actions.push(Action::SpectralHeal(None)); }
                         ui.separator();
                         ui.menu_button("Select", |ui| {
-                            if item(ui, "Select All", "Ctrl+A", has_doc) { self.actions.push(Action::SelectAll); }
-                            if item(ui, "Deselect All", "Esc", has_sel) { self.actions.push(Action::Deselect); }
+                            if item(ui, "Select All", &km.label("select_all"), has_doc) { self.actions.push(Action::SelectAll); }
+                            if item(ui, "Deselect All", &km.label("deselect"), has_sel) { self.actions.push(Action::Deselect); }
                         });
                         ui.menu_button("Insert", |ui| {
                             for (label, id) in [("Silence…", "gen_silence"), ("Tones…", "gen_tone"), ("Noise…", "gen_noise")] {
@@ -143,7 +153,24 @@ impl App {
                             }
                         });
                         ui.menu_button("Marker", |ui| {
-                            if item(ui, "Add Marker", "M", has_doc) { self.actions.push(Action::AddMarker); }
+                            if item(ui, "Add Cue Marker", &km.label("marker"), has_doc) { self.actions.push(Action::AddMarker); }
+                            if item(ui, "Add CD Track Marker", &km.label("marker_cd"), has_doc) { self.actions.push(Action::AddMarkerKind(crate::app::MarkerKind::CdTrack)); }
+                            if item(ui, "Add Cartridge Timer Marker", &km.label("marker_cart"), has_doc) { self.actions.push(Action::AddMarkerKind(crate::app::MarkerKind::CartTimer)); }
+                            ui.separator();
+                            if item(ui, "Move Playhead to Previous Marker", &km.label("prev_marker"), has_markers) { self.actions.push(Action::PrevMarker); }
+                            if item(ui, "Move Playhead to Next Marker", &km.label("next_marker"), has_markers) { self.actions.push(Action::NextMarker); }
+                            ui.separator();
+                            if item(ui, "Show Markers Panel", "", true) { self.show_panel(Panel::Markers); }
+                            if item(ui, "Show Playlist Panel", "", true) { self.show_panel(Panel::Playlist); }
+                        });
+                        ui.menu_button("Zero Crossings", |ui| {
+                            for (z, id) in crate::markers_ui::ZeroMode::ALL.into_iter().zip(["zc_in", "zc_out", "zc_ll", "zc_lr", "zc_rl", "zc_rr"]) {
+                                if item(ui, z.label(), &km.label(id), in_wave) { self.actions.push(Action::ZeroCross(z)); }
+                            }
+                        });
+                        ui.menu_button("Snapping", |ui| {
+                            if ui.checkbox(&mut self.prefs.snap_markers, "Snap to Markers").changed() { self.prefs.save(); }
+                            if ui.checkbox(&mut self.prefs.snap_zero, "Snap to Zero Crossings").changed() { self.prefs.save(); }
                         });
                         if item(ui, "Convert Sample Type…", "", has_doc) {
                             if let Some((rate, channels)) = self.doc().map(|d| (d.sample_rate, d.n_ch())) {
@@ -151,6 +178,7 @@ impl App {
                             }
                         }
                         ui.separator();
+                        if item(ui, "Keyboard Shortcuts…", &km.label("shortcuts"), true) { self.dialog = Some(Dialog::Shortcuts(Box::default())); }
                         ui.menu_button("Preferences", |ui| {
                             for page in crate::prefs_ui::Page::ALL {
                                 if item(ui, &format!("{}…", page.name()), "", true) { self.actions.push(Action::PreferencesPage(page)); }
@@ -161,8 +189,8 @@ impl App {
                         let has_session = self.session().is_some();
                         let in_mt = has_session && self.mode == Mode::Multitrack;
                         let has_time_sel = self.session().and_then(|s| s.sel_range()).is_some();
-                        if item(ui, "Add Audio Track", "Alt+A", has_session) { self.actions.push(Action::MtAddTrack); }
-                        if item(ui, "Add Bus Track", "Alt+B", has_session) { self.actions.push(Action::MtAddBus); }
+                        if item(ui, "Add Audio Track", &km.label("mt_add_track"), has_session) { self.actions.push(Action::MtAddTrack); }
+                        if item(ui, "Add Bus Track", &km.label("mt_add_bus"), has_session) { self.actions.push(Action::MtAddBus); }
                         if item(ui, "Delete Selected Track", "", has_session) { self.actions.push(Action::MtDeleteTrack); }
                         ui.separator();
                         if item(ui, "Insert Files…", "", has_session) { self.actions.push(Action::MtInsertFiles); }
@@ -170,7 +198,7 @@ impl App {
                             let name = self.doc().map(|d| d.name.clone()).unwrap_or_default();
                             if item(ui, &format!("Insert \"{name}\" at Cursor"), "", has_session) { self.actions.push(Action::MtInsertDoc(id)); }
                         }
-                        if item(ui, "Split Clip at Playhead", "Ctrl+K", in_mt) { self.actions.push(Action::MtSplit); }
+                        if item(ui, "Split Clip at Playhead", &km.label("mt_split"), in_mt) { self.actions.push(Action::MtSplit); }
                         ui.separator();
                         ui.menu_button("Mixdown Session to New File", |ui| {
                             if item(ui, "Entire Session", "", has_session) { self.actions.push(Action::MtMixdown(false)); }
@@ -190,7 +218,7 @@ impl App {
                             }
                             ui.menu_button(cat.name(), |ui| {
                                 if cat == Category::Restoration {
-                                    if item(ui, "Capture Noise Print", "Shift+P", has_sel) { self.actions.push(Action::CaptureNoise); }
+                                    if item(ui, "Capture Noise Print", &km.label("capture_noise"), has_sel) { self.actions.push(Action::CaptureNoise); }
                                     ui.separator();
                                 }
                                 for (i, e) in effects.iter().enumerate().filter(|(_, e)| e.category == cat) {
@@ -209,19 +237,20 @@ impl App {
                         }
                     });
                     ui.menu_button("View", |ui| {
-                        if item(ui, "Waveform Editor", "9", true) { self.actions.push(Action::SetMode(Mode::Waveform)); }
-                        if item(ui, "Multitrack Editor", "0", true) { self.actions.push(Action::SetMode(Mode::Multitrack)); }
+                        if item(ui, "Waveform Editor", &km.label("mode_waveform"), true) { self.actions.push(Action::SetMode(Mode::Waveform)); }
+                        if item(ui, "Multitrack Editor", &km.label("mode_multitrack"), true) { self.actions.push(Action::SetMode(Mode::Multitrack)); }
                         ui.separator();
-                        if item(ui, "Zoom In (Time)", "=", has_doc) { self.actions.push(Action::ZoomIn); }
-                        if item(ui, "Zoom Out (Time)", "-", has_doc) { self.actions.push(Action::ZoomOut); }
-                        if item(ui, "Zoom Out Full (All Axes)", "\\", has_doc) { self.actions.push(Action::ZoomFull); }
+                        if item(ui, "Zoom In (Time)", &km.label("zoom_in"), has_doc) { self.actions.push(Action::ZoomIn); }
+                        if item(ui, "Zoom Out (Time)", &km.label("zoom_out"), has_doc) { self.actions.push(Action::ZoomOut); }
+                        if item(ui, "Zoom Out Full (All Axes)", &km.label("zoom_full"), has_doc) { self.actions.push(Action::ZoomFull); }
                         if item(ui, "Zoom to Selection", "", has_sel) { self.actions.push(Action::ZoomSel); }
                         if item(ui, "Zoom In (Amplitude)", "", has_doc) { self.actions.push(Action::AmpIn); }
                         if item(ui, "Zoom Out (Amplitude)", "", has_doc) { self.actions.push(Action::AmpOut); }
                         ui.separator();
-                        ui.checkbox(&mut self.show_spectral, format!("Show Spectral Frequency Display   {}", sc("Shift+D")));
+                        ui.checkbox(&mut self.show_spectral, format!("Show Spectral Frequency Display   {}", km.label("spectral")));
                         ui.checkbox(&mut self.follow, "Follow Playhead");
-                        if item(ui, "Play with Pre-roll and Post-roll", "Alt+Space", has_doc) { self.actions.push(Action::PlayWithRoll); }
+                        if item(ui, "Play with Pre-roll and Post-roll", &km.label("play_roll"), has_doc) { self.actions.push(Action::PlayWithRoll); }
+                        if item(ui, "Punch In (Record over Selection)", &km.label("punch"), has_doc) { self.actions.push(Action::PunchRecord); }
                     });
                     ui.menu_button("Window", |ui| {
                         ui.menu_button("Workspace", |ui| {
@@ -238,7 +267,7 @@ impl App {
                         ui.checkbox(&mut self.show_left, "Show Left Panels");
                     });
                     ui.menu_button("Help", |ui| {
-                        if item(ui, "Keyboard Shortcuts", "", true) { self.dialog = Some(Dialog::Shortcuts); }
+                        if item(ui, "Keyboard Shortcuts…", "", true) { self.dialog = Some(Dialog::Shortcuts(Box::default())); }
                         if item(ui, "About Audemo", "", true) { self.dialog = Some(Dialog::About); }
                     });
                 });
@@ -417,6 +446,7 @@ impl App {
                     match tab {
                         Panel::MediaBrowser => self.media_browser(ui),
                         Panel::Markers => self.markers_tab(ui),
+                        Panel::Playlist => self.playlist_panel(ui),
                         Panel::Properties => self.properties_panel(ui),
                         Panel::Diagnostics => self.diagnostics_panel(ui),
                         Panel::BatchProcess => self.batch_panel(ui),
@@ -526,46 +556,6 @@ impl App {
         }
         if let Some(id) = insert {
             self.actions.push(Action::MtInsertDoc(id));
-        }
-    }
-
-    fn markers_tab(&mut self, ui: &mut Ui) {
-        if ui.button("Add Marker  (M)").clicked() {
-            self.actions.push(Action::AddMarker);
-        }
-        ui.add_space(4.0);
-        let Some(di) = self.active else {
-            ui.label(RichText::new("Open a file to add markers.").color(TEXT_DIM()));
-            return;
-        };
-        let doc = &mut self.docs[di];
-        if doc.markers.is_empty() {
-            ui.label(RichText::new("No markers. Press M during playback or at the cursor.").color(TEXT_DIM()));
-            return;
-        }
-        let mut remove = None;
-        let sr = doc.sample_rate;
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            egui::Grid::new("markers").num_columns(3).striped(true).spacing([6.0, 4.0]).show(ui, |ui| {
-                for h in ["Name", "Start", ""] {
-                    ui.label(RichText::new(h).color(TEXT_DIM()).size(11.0));
-                }
-                ui.end_row();
-                for (i, m) in doc.markers.iter_mut().enumerate() {
-                    ui.add(egui::TextEdit::singleline(&mut m.name).desired_width(96.0));
-                    if ui.link(RichText::new(format_time(m.pos as f64, sr)).monospace()).clicked() {
-                        self.actions.push(Action::SetCursor(m.pos));
-                    }
-                    if ui.small_button("×").clicked() {
-                        remove = Some(i);
-                    }
-                    ui.end_row();
-                }
-            });
-        });
-        if let Some(i) = remove {
-            doc.markers.remove(i);
-            doc.dirty = true;
         }
     }
 

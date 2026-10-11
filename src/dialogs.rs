@@ -12,47 +12,6 @@ use crate::engine::PREVIEW_TAG;
 use crate::export::{Container, WavFormat, AAC_BITRATES, MP3_BITRATES};
 use crate::theme::*;
 
-const SHORTCUTS: &[(&str, &str)] = &[
-    ("Play / stop", "Space"),
-    ("Record (Stop or Space ends it)", "Shift+Space"),
-    ("Open / Save / Save As", "Ctrl+O / Ctrl+S / Ctrl+Shift+S"),
-    ("New multitrack session / new audio file", "Ctrl+N / Ctrl+Shift+N"),
-    ("Waveform / Multitrack editor", "9 / 0"),
-    ("Undo / Redo", "Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y)"),
-    ("Cut / Copy / Paste", "Ctrl+X / Ctrl+C / Ctrl+V"),
-    ("Copy to New / Paste to New", "Alt+Shift+C / Ctrl+Alt+V"),
-    ("Mix Paste", "Ctrl+Shift+V"),
-    ("Repeat previous command", "Shift+R"),
-    ("Delete selection", "Delete or Backspace"),
-    ("Crop to selection", "Ctrl+T"),
-    ("Select all / deselect", "Ctrl+A / Esc"),
-    ("Extend selection", "Shift+click or Shift+drag"),
-    ("Select visible range", "Double-click"),
-    ("Add marker", "M"),
-    ("Previous / next marker", "← / →"),
-    ("Start / end of file", "Home / End"),
-    ("Zoom in / out / full", "= / - / \\"),
-    ("Zoom time at the pointer", "Mouse wheel"),
-    ("Scroll", "Shift+wheel, middle-drag or Hand tool"),
-    ("Zoom amplitude", "Alt+wheel"),
-    ("Spectral display", "Shift+D"),
-    ("Tools: Time Selection / Hand", "T / H"),
-    ("Tools: Marquee / Lasso / Paintbrush / Spot Healing", "E / D / P / B"),
-    ("Auto Heal spectral selection", "Ctrl+U"),
-    ("Silence a spectral selection", "Delete"),
-    ("Capture noise print", "Shift+P"),
-    ("Toggle effect preview", "Space (with an effect open)"),
-    ("Multitrack: add audio track / bus track", "Alt+A / Alt+B"),
-    ("Multitrack: split clip at playhead", "Ctrl+K"),
-    ("Multitrack: move / trim / fade a clip", "Drag the clip / its edges / its yellow handles"),
-    ("Shape a fade (both editors)", "Drag the fade handle up/down; hold Ctrl for cosine"),
-    ("Multitrack: snap off while dragging", "Hold Alt"),
-    ("Multitrack: show automation", "A on the track header"),
-    ("Multitrack: add / move / delete automation point", "Double-click or drag the line / drag a point / double-click a point"),
-    ("Multitrack: crossfade two clips", "Overlap them on the same track"),
-    ("Multitrack: scroll tracks", "Wheel over the track headers, or Alt+wheel"),
-    ("Multitrack: open a clip's file", "Double-click the clip"),
-];
 
 fn centered(w: egui::Window<'_>) -> egui::Window<'_> {
     w.collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, vec2(0.0, -40.0))
@@ -331,20 +290,9 @@ impl App {
                     next = Some(Dialog::PluginManager);
                 }
             }
-            Dialog::Shortcuts => {
-                let mut open = true;
-                centered(egui::Window::new("Keyboard Shortcuts")).open(&mut open).show(ctx, |ui| {
-                    egui::Grid::new("keys").num_columns(2).striped(true).spacing([18.0, 4.0]).show(ui, |ui| {
-                        for (what, keys) in SHORTCUTS {
-                            ui.label(*what);
-                            let keys = if cfg!(target_os = "macos") { keys.replace("Ctrl+", "⌘") } else { keys.to_string() };
-                            ui.label(RichText::new(keys).monospace().color(WAVE_SEL()));
-                            ui.end_row();
-                        }
-                    });
-                });
-                if open {
-                    next = Some(Dialog::Shortcuts);
+            Dialog::Shortcuts(mut ed) => {
+                if self.shortcut_editor(ctx, &mut ed) {
+                    next = Some(Dialog::Shortcuts(ed));
                 }
             }
             Dialog::About => {

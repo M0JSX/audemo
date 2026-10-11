@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
-pub use meta::{Metadata, Tag, TAGS};
+pub use meta::{Marker, MarkerKind, Metadata, Tag, TAGS};
 pub use wav::WavFormat;
 
 static WRITE_ENCODER: AtomicBool = AtomicBool::new(true);
@@ -255,7 +255,7 @@ pub fn save(
     sample_rate: u32,
     s: &ExportSettings,
     meta: &Metadata,
-    markers: &[(usize, String)],
+    markers: &[Marker],
     progress: &Progress,
 ) -> Result<(), String> {
     if chs.is_empty() || chs[0].is_empty() {

@@ -210,13 +210,11 @@ impl App {
                 // Move markers back by the silence removed before them.
                 let mut regions: Vec<(usize, usize)> = items.iter().map(|f| (f.start, f.end())).collect();
                 regions.sort_unstable();
+                // Later regions first, so earlier positions stay valid.
                 let markers: Vec<Marker> = doc
                     .markers
                     .iter()
-                    .map(|m| {
-                        let removed: usize = regions.iter().map(|&(a, b)| if m.pos >= b { b - a } else if m.pos > a { m.pos - a } else { 0 }).sum();
-                        Marker { pos: m.pos - removed.min(m.pos), name: m.name.clone() }
-                    })
+                    .filter_map(|m| regions.iter().rev().try_fold(m.clone(), |m, &(a, b)| m.after_edit(a, b - a, 0)))
                     .collect();
                 doc.push_undo("Delete Silence");
                 doc.set_audio(audio);
@@ -231,7 +229,7 @@ impl App {
                 doc.push_undo("Mark Audio");
                 let base = doc.markers.len();
                 for (k, f) in items.iter().enumerate() {
-                    doc.markers.push(Marker { pos: f.start, name: format!("Audio {:02} ({})", base + k + 1, format_time(f.len as f64, doc.sample_rate)) });
+                    doc.markers.push(Marker::range(f.start, f.len, format!("Audio {:02}", base + k + 1)));
                 }
                 doc.markers.sort_by_key(|m| m.pos);
                 doc.dirty = true;
@@ -430,7 +428,7 @@ impl App {
                         let ratio = r as f64 / sr as f64;
                         audio = resample_channels(&audio, ratio);
                         for m in markers.iter_mut() {
-                            m.0 = (m.0 as f64 * ratio).round() as usize;
+                            *m = m.scaled(ratio);
                         }
                         sr = r;
                     }

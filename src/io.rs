@@ -21,7 +21,7 @@ pub struct Decoded {
     pub bits: Option<u32>,
     pub meta: crate::export::Metadata,
     /// Markers stored in the file (WAV cue points): (frame, name).
-    pub markers: Vec<(usize, String)>,
+    pub markers: Vec<crate::export::Marker>,
 }
 
 fn read_tags(rev: &MetadataRevision, meta: &mut crate::export::Metadata, total: &mut Option<String>) {
@@ -160,7 +160,10 @@ pub fn load(path: &Path) -> Result<Decoded, String> {
     let mut markers = Vec::new();
     if matches!(crate::export::Container::from_path(path), Some(crate::export::Container::Wav)) {
         let (m, info) = crate::export::meta::read_wav_extras(path);
-        markers = m.into_iter().filter(|(p, _)| *p <= len).collect();
+        markers = m.into_iter().filter(|m| m.pos <= len).map(|mut m| {
+            m.len = m.len.min(len - m.pos);
+            m
+        }).collect();
         for (t, v) in info.entries() {
             if meta.get(t).is_empty() {
                 meta.set(t, v);

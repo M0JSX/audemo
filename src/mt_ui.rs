@@ -71,6 +71,8 @@ pub struct MtRec {
     pub session_id: u64,
     pub track_id: u64,
     pub start: usize,
+    /// Punch In: keep only the take over this time selection.
+    pub punch: Option<(usize, usize)>,
 }
 
 #[derive(Default)]
@@ -614,7 +616,7 @@ impl App {
                     self.sessions[si].reset_fx();
                     self.engine.play_mix(state, start as f64, end as f64, false, session_id);
                 }
-                self.mt.rec = Some(MtRec { session_id, track_id, start });
+                self.mt.rec = Some(MtRec { session_id, track_id, start, punch: None });
                 let tname = self.sessions[si].tracks[ti].name.clone();
                 self.set_status(format!("Recording onto {tname} at {rate} Hz. Press Space or Stop to finish."));
             }
@@ -623,6 +625,61 @@ impl App {
                     title: "Can't record".into(),
                     text: format!("{e}\n\nCheck the input device in Edit > Preferences > Audio Hardware. On macOS, allow microphone access for Audemo in System Settings > Privacy & Security > Microphone."),
                 });
+            }
+        }
+    }
+
+    /// Punch In on the armed track over the time selection, with pre-roll
+    /// and post-roll; only the part over the selection is kept as a clip.
+    pub fn mt_punch_record(&mut self) {
+        if self.engine.is_recording() {
+            self.mt_stop_recording();
+            return;
+        }
+        let Some(si) = self.active_session else { return };
+        let Some((a, b)) = self.sessions[si].sel_range() else {
+            self.set_status("Make a time selection to record over, arm a track, then Punch In.");
+            return;
+        };
+        let s = &mut self.sessions[si];
+        if s.tracks.is_empty() {
+            s.add_track();
+        }
+        let ti = match s.tracks.iter().position(|t| t.arm && !t.is_bus()) {
+            Some(i) => i,
+            None => {
+                let i = s.audio_track_at_or_after(s.selected_track);
+                s.tracks[i].arm = true;
+                i
+            }
+        };
+        let sr = s.sample_rate;
+        let start = (a as f64 - self.prefs.preroll_s as f64 * sr as f64).max(0.0) as usize;
+        let end = b + (self.prefs.postroll_s as f64 * sr as f64) as usize;
+        let (track_id, session_id) = (s.tracks[ti].id, s.id);
+        let tname = s.tracks[ti].name.clone();
+        s.reset_fx();
+        let state = Arc::new(s.mix_state());
+        self.engine.stop();
+        match self.engine.start_recording(Some(sr)) {
+            Ok(_) => {
+                self.engine.play_mix(state, start as f64, end as f64, false, session_id);
+                self.mt.rec = Some(MtRec { session_id, track_id, start, punch: Some((a, b)) });
+                self.play_origin = a;
+                self.set_status(format!("Punch In on {tname}: pre-roll, then recording over the selection. Space stops."));
+            }
+            Err(e) => self.dialog = Some(Dialog::Message { title: "Can't record".into(), text: e }),
+        }
+    }
+
+    /// Stop a multitrack Punch In when its post-roll has played.
+    pub fn mt_punch_tick(&mut self) {
+        if let Some(r) = &self.mt.rec {
+            if r.punch.is_some() {
+                let st = self.engine.status();
+                if !st.playing || st.tag != r.session_id {
+                    self.mt_stop_recording();
+                }
             }
         }
     }
@@ -660,6 +717,25 @@ impl App {
                             c.start = 0;
                             c.offset += d;
                             c.len -= d;
+                        }
+                    }
+                    // Punch In: trim the take to the selection.
+                    if let Some((a, b)) = rec.punch {
+                        let mut gone = false;
+                        if let Some(c) = self.sessions[si].clip_mut(cid) {
+                            if c.start < a {
+                                let d = (a - c.start).min(c.len);
+                                c.offset += d;
+                                c.len -= d;
+                                c.start = a;
+                            }
+                            c.len = c.len.min(b.saturating_sub(c.start));
+                            gone = c.len == 0;
+                        }
+                        if gone {
+                            self.sessions[si].delete_clips(&[cid]);
+                            self.set_status("Punch In stopped before the selection: nothing was recorded.");
+                            return;
                         }
                     }
                 }

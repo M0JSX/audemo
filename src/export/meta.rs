@@ -282,16 +282,133 @@ pub fn mp4_items(meta: &Metadata, encoder: &str) -> Vec<u8> {
     out
 }
 
-/// Markers stored in a WAV file: `cue ` points named by `LIST`/`adtl`/`labl`.
-pub fn wav_markers(cues: &[(usize, String)]) -> Vec<u8> {
+/// What a marker is for (Audition's marker types).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum MarkerKind {
+    #[default]
+    Cue,
+    CdTrack,
+    CartTimer,
+    Subclip,
+}
+
+impl MarkerKind {
+    pub const ALL: [MarkerKind; 4] = [MarkerKind::Cue, MarkerKind::CdTrack, MarkerKind::CartTimer, MarkerKind::Subclip];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MarkerKind::Cue => "Cue",
+            MarkerKind::CdTrack => "CD Track",
+            MarkerKind::CartTimer => "Cart Timer",
+            MarkerKind::Subclip => "Subclip",
+        }
+    }
+
+    /// Purpose code in a WAV `ltxt` chunk.
+    fn code(self, range: bool) -> [u8; 4] {
+        match self {
+            MarkerKind::Cue if range => *b"rgn ",
+            MarkerKind::Cue => *b"mark",
+            MarkerKind::CdTrack => *b"cdtk",
+            MarkerKind::CartTimer => *b"cart",
+            MarkerKind::Subclip => *b"subc",
+        }
+    }
+
+    fn from_code(c: &[u8]) -> MarkerKind {
+        match c {
+            b"cdtk" => MarkerKind::CdTrack,
+            b"cart" => MarkerKind::CartTimer,
+            b"subc" => MarkerKind::Subclip,
+            _ => MarkerKind::Cue,
+        }
+    }
+
+    pub fn csv_name(self) -> &'static str {
+        match self {
+            MarkerKind::Cue => "Cue",
+            MarkerKind::CdTrack => "Track",
+            MarkerKind::CartTimer => "Cart",
+            MarkerKind::Subclip => "Subclip",
+        }
+    }
+}
+
+/// A point marker (`len` 0) or a range marker over [pos, pos + len).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Marker {
+    pub pos: usize,
+    pub len: usize,
+    pub name: String,
+    pub kind: MarkerKind,
+    pub description: String,
+}
+
+impl Marker {
+    pub fn point(pos: usize, name: impl Into<String>) -> Self {
+        Marker { pos, name: name.into(), ..Default::default() }
+    }
+
+    pub fn range(pos: usize, len: usize, name: impl Into<String>) -> Self {
+        Marker { pos, len, name: name.into(), ..Default::default() }
+    }
+
+    pub fn end(&self) -> usize {
+        self.pos + self.len
+    }
+
+    pub fn is_range(&self) -> bool {
+        self.len > 0
+    }
+
+    /// The marker after [at, at + removed) is replaced by `inserted`
+    /// samples, or None if the edit removed it.
+    pub fn after_edit(&self, at: usize, removed: usize, inserted: usize) -> Option<Marker> {
+        let map = |x: usize| {
+            if x <= at {
+                x
+            } else if x >= at + removed {
+                x - removed + inserted
+            } else {
+                at + (x - at).min(inserted)
+            }
+        };
+        if !self.is_range() {
+            if self.pos > at && self.pos < at + removed {
+                return None;
+            }
+            return Some(Marker { pos: map(self.pos), ..self.clone() });
+        }
+        let (s, e) = (map(self.pos), map(self.end()));
+        (e > s).then(|| Marker { pos: s, len: e - s, ..self.clone() })
+    }
+
+    /// The part inside [a, b], moved to start at 0 (copying a selection).
+    pub fn within(&self, a: usize, b: usize) -> Option<Marker> {
+        if !self.is_range() {
+            return (self.pos >= a && self.pos <= b).then(|| Marker { pos: self.pos - a, ..self.clone() });
+        }
+        let (s, e) = (self.pos.max(a), self.end().min(b));
+        (e > s).then(|| Marker { pos: s - a, len: e - s, ..self.clone() })
+    }
+
+    /// Positions scaled for a sample-rate change.
+    pub fn scaled(&self, ratio: f64) -> Marker {
+        Marker { pos: (self.pos as f64 * ratio) as usize, len: (self.len as f64 * ratio) as usize, ..self.clone() }
+    }
+}
+
+/// Markers stored in a WAV file: `cue ` points named by `LIST`/`adtl`/`labl`,
+/// with an `ltxt` entry giving the length of range markers and the type.
+pub fn wav_markers(cues: &[Marker]) -> Vec<u8> {
     if cues.is_empty() {
         return Vec::new();
     }
     let mut cue = Vec::new();
     cue.extend_from_slice(&(cues.len() as u32).to_le_bytes());
-    for (i, (pos, _)) in cues.iter().enumerate() {
+    for (i, m) in cues.iter().enumerate() {
         let id = i as u32 + 1;
-        let pos = (*pos).min(u32::MAX as usize) as u32;
+        let pos = m.pos.min(u32::MAX as usize) as u32;
         cue.extend_from_slice(&id.to_le_bytes());
         cue.extend_from_slice(&pos.to_le_bytes());
         cue.extend_from_slice(b"data");
@@ -300,15 +417,33 @@ pub fn wav_markers(cues: &[(usize, String)]) -> Vec<u8> {
         cue.extend_from_slice(&pos.to_le_bytes());
     }
     let mut adtl = b"adtl".to_vec();
-    for (i, (_, name)) in cues.iter().enumerate() {
-        let mut s = name.as_bytes().to_vec();
-        s.push(0);
-        adtl.extend_from_slice(b"labl");
-        adtl.extend_from_slice(&((4 + s.len()) as u32).to_le_bytes());
-        adtl.extend_from_slice(&(i as u32 + 1).to_le_bytes());
-        adtl.extend_from_slice(&s);
-        if s.len() % 2 == 1 {
+    let sub = |adtl: &mut Vec<u8>, tag: &[u8; 4], body: Vec<u8>| {
+        adtl.extend_from_slice(tag);
+        adtl.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        let odd = body.len() % 2 == 1;
+        adtl.extend_from_slice(&body);
+        if odd {
             adtl.push(0);
+        }
+    };
+    for (i, m) in cues.iter().enumerate() {
+        let id = (i as u32 + 1).to_le_bytes();
+        let text = |t: &str| {
+            let mut b = id.to_vec();
+            b.extend_from_slice(t.as_bytes());
+            b.push(0);
+            b
+        };
+        sub(&mut adtl, b"labl", text(&m.name));
+        if !m.description.is_empty() {
+            sub(&mut adtl, b"note", text(&m.description));
+        }
+        if m.is_range() || m.kind != MarkerKind::Cue {
+            let mut b = id.to_vec();
+            b.extend_from_slice(&(m.len.min(u32::MAX as usize) as u32).to_le_bytes());
+            b.extend_from_slice(&m.kind.code(m.is_range()));
+            b.extend_from_slice(&[0u8; 8]);
+            sub(&mut adtl, b"ltxt", b);
         }
     }
     let mut out = b"cue ".to_vec();
@@ -322,7 +457,7 @@ pub fn wav_markers(cues: &[(usize, String)]) -> Vec<u8> {
 
 /// Read markers and RIFF INFO fields from a WAV file's chunks. Reads only
 /// the chunk headers and the small chunks, never the audio.
-pub fn read_wav_extras(path: &std::path::Path) -> (Vec<(usize, String)>, Metadata) {
+pub fn read_wav_extras(path: &std::path::Path) -> (Vec<Marker>, Metadata) {
     use std::io::{Read, Seek, SeekFrom};
     let mut markers = Vec::new();
     let mut meta = Metadata::default();
@@ -334,6 +469,8 @@ pub fn read_wav_extras(path: &std::path::Path) -> (Vec<(usize, String)>, Metadat
     let file_len = f.metadata().map(|m| m.len()).unwrap_or(0);
     let mut cues: Vec<(u32, u32)> = Vec::new();
     let mut labels: Vec<(u32, String)> = Vec::new();
+    let mut notes: Vec<(u32, String)> = Vec::new();
+    let mut lengths: Vec<(u32, u32, [u8; 4])> = Vec::new();
     let mut pos = 12u64;
     while pos + 8 <= file_len {
         let mut h = [0u8; 8];
@@ -371,12 +508,17 @@ pub fn read_wav_extras(path: &std::path::Path) -> (Vec<(usize, String)>, Metadat
                         let d = d.split(|b| *b == 0).next().unwrap_or(&[]);
                         String::from_utf8(d.to_vec()).unwrap_or_else(|_| d.iter().map(|b| *b as char).collect())
                     };
-                    if kind == b"adtl" && (&sid == b"labl" || &sid == b"note") && data.len() >= 4 {
+                    if kind == b"adtl" && &sid == b"ltxt" && data.len() >= 12 {
                         let cid = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-                        if &sid == b"labl" || !labels.iter().any(|(c, _)| *c == cid) {
-                            labels.retain(|(c, _)| *c != cid);
-                            labels.push((cid, text(&data[4..])));
-                        }
+                        let len = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+                        lengths.push((cid, len, [data[8], data[9], data[10], data[11]]));
+                    } else if kind == b"adtl" && &sid == b"note" && data.len() >= 4 {
+                        let cid = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+                        notes.push((cid, text(&data[4..])));
+                    } else if kind == b"adtl" && &sid == b"labl" && data.len() >= 4 {
+                        let cid = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+                        labels.retain(|(c, _)| *c != cid);
+                        labels.push((cid, text(&data[4..])));
                     } else if kind == b"INFO" {
                         if let Some(t) = Tag::from_key(&String::from_utf8_lossy(&sid)) {
                             let v = text(data);
@@ -392,9 +534,16 @@ pub fn read_wav_extras(path: &std::path::Path) -> (Vec<(usize, String)>, Metadat
         pos += 8 + size + (size & 1);
     }
     for (id, at) in cues {
-        let name = labels.iter().find(|(c, _)| *c == id).map(|(_, n)| n.clone()).unwrap_or_default();
-        markers.push((at as usize, name));
+        let name = labels.iter().find(|(c, _)| *c == id).map(|(_, n)| n.clone());
+        let note = notes.iter().find(|(c, _)| *c == id).map(|(_, n)| n.clone()).unwrap_or_default();
+        // Files from other programs often name points with a note only.
+        let (name, description) = match name {
+            Some(n) => (n, note),
+            None => (note, String::new()),
+        };
+        let (len, kind) = lengths.iter().find(|(c, _, _)| *c == id).map(|(_, l, k)| (*l as usize, MarkerKind::from_code(k))).unwrap_or((0, MarkerKind::Cue));
+        markers.push(Marker { pos: at as usize, len, name, kind, description });
     }
-    markers.sort_by_key(|m| m.0);
+    markers.sort_by_key(|m| m.pos);
     (markers, meta)
 }
