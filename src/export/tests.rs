@@ -27,6 +27,23 @@ fn dir() -> std::path::PathBuf {
 
 #[test]
 #[cfg_attr(audemo_stub, ignore)]
+fn surround_wav_round_trips() {
+    let rate = 48000;
+    let chs: Vec<Vec<f32>> = (0..6).map(|c| (0..4800).map(|i| ((i * (c + 1)) as f32 * 0.001).sin() * 0.5).collect()).collect();
+    for fmt in [WavFormat::Pcm24, WavFormat::Float32] {
+        let s = ExportSettings { container: Container::Wav, wav: fmt, dither: false, include_meta: false, ..Default::default() };
+        let path = dir().join(format!("surround{}.wav", fmt as u8));
+        save(&path, &chs, rate, &s, &Metadata::default(), &[], &Progress::default()).unwrap();
+        let dec = crate::io::load(&path).unwrap();
+        assert_eq!(dec.channels.len(), 6, "{fmt:?}");
+        for c in 0..6 {
+            assert!((dec.channels[c][1000] - chs[c][1000]).abs() < 1e-5, "{fmt:?} channel {c}");
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(audemo_stub, ignore)]
 fn lossless_round_trips_are_exact() {
     let rate = 44100;
     let chs = signal(30_000, rate as f32);

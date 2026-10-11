@@ -10,7 +10,8 @@ const AAC_RATES: [u32; 12] = [8000, 11025, 12000, 16000, 22050, 24000, 32000, 44
 /// Pick a rate the codec supports and convert to it if needed. Returns
 /// the (possibly resampled) audio, the rate, and at most two channels.
 fn prepare(chs: &[Vec<f32>], rate: u32, allowed: &[u32]) -> (Vec<Vec<f32>>, u32) {
-    let chs: Vec<Vec<f32>> = chs.iter().take(2).cloned().collect();
+    // Surround is mixed down to stereo (these encoders are set up for 1–2 channels).
+    let chs: Vec<Vec<f32>> = if chs.len() > 2 { crate::dsp::resample::remap_channels(chs, 2) } else { chs.to_vec() };
     if allowed.contains(&rate) {
         return (chs, rate);
     }

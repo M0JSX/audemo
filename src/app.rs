@@ -328,6 +328,8 @@ impl Document {
         let ch = match self.n_ch() {
             1 => "Mono".to_string(),
             2 => "Stereo".to_string(),
+            6 => "5.1".to_string(),
+            8 => "7.1".to_string(),
             n => format!("{n} ch"),
         };
         format!("{} Hz • {} • {}", self.sample_rate, bits, ch)

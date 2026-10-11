@@ -134,8 +134,8 @@ pub fn remap_channels(chs: &[Vec<f32>], target: usize) -> Vec<Vec<f32>> {
     if have == target || have == 0 {
         return chs.to_vec();
     }
-    if target == 1 {
-        let len = chs[0].len();
+    let len = chs[0].len();
+    if target == 1 && have <= 2 {
         let k = 1.0 / have as f32;
         let mut m = vec![0.0f32; len];
         for c in chs {
@@ -145,7 +145,81 @@ pub fn remap_channels(chs: &[Vec<f32>], target: usize) -> Vec<Vec<f32>> {
         }
         return vec![m];
     }
-    (0..target).map(|i| chs[i.min(have - 1)].clone()).collect()
+    if have > 2 && target <= 2 {
+        // Surround to stereo (ITU-style: centre and surrounds at -3 dB, LFE dropped).
+        let mut l = vec![0.0f32; len];
+        let mut r = vec![0.0f32; len];
+        let mut v = vec![0.0f32; have];
+        for i in 0..len {
+            for (c, x) in v.iter_mut().enumerate() {
+                *x = chs[c][i];
+            }
+            let [a, b] = surround_downmix(&v);
+            l[i] = a;
+            r[i] = b;
+        }
+        if target == 1 {
+            return vec![l.iter().zip(&r).map(|(a, b)| 0.5 * (a + b)).collect()];
+        }
+        return vec![l, r];
+    }
+    if have <= 2 && target > 2 {
+        // Mono to the centre; stereo to the front left and right.
+        let mut out = vec![vec![0.0f32; len]; target];
+        if have == 1 {
+            out[2.min(target - 1)] = chs[0].clone();
+        } else {
+            out[0] = chs[0].clone();
+            out[1] = chs[1].clone();
+        }
+        return out;
+    }
+    if have == 8 && target == 6 {
+        // 7.1 to 5.1: the side channels fold into the rears.
+        let k = std::f32::consts::FRAC_1_SQRT_2;
+        let mut out: Vec<Vec<f32>> = chs[..6].to_vec();
+        for i in 0..len {
+            out[4][i] += k * chs[6][i];
+            out[5][i] += k * chs[7][i];
+        }
+        return out;
+    }
+    if have <= 2 {
+        // Mono to stereo: both sides.
+        return (0..target).map(|i| chs[i.min(have - 1)].clone()).collect();
+    }
+    (0..target).map(|i| chs.get(i).cloned().unwrap_or_else(|| vec![0.0; len])).collect()
+}
+
+/// Stereo from one frame of surround in WAV channel order (FL FR FC LFE
+/// BL BR SL SR …): centre and surrounds at -3 dB, LFE left out.
+pub fn surround_downmix(v: &[f32]) -> [f32; 2] {
+    const K: f32 = std::f32::consts::FRAC_1_SQRT_2;
+    match v.len() {
+        0 => [0.0, 0.0],
+        1 => [v[0], v[0]],
+        2 => [v[0], v[1]],
+        3 => [v[0] + K * v[2], v[1] + K * v[2]],
+        4 => [v[0] + K * v[2], v[1] + K * v[3]],
+        5 => [v[0] + K * v[2] + K * v[3], v[1] + K * v[2] + K * v[4]],
+        6 => [v[0] + K * v[2] + K * v[4], v[1] + K * v[2] + K * v[5]],
+        7 => [v[0] + K * v[2] + 0.5 * v[4] + K * v[5], v[1] + K * v[2] + 0.5 * v[4] + K * v[6]],
+        _ => [v[0] + K * v[2] + K * v[4] + K * v[6], v[1] + K * v[2] + K * v[5] + K * v[7]],
+    }
+}
+
+/// Channel names in WAV order for a channel count.
+pub fn channel_names(n: usize) -> &'static [&'static str] {
+    match n {
+        1 => &["M"],
+        2 => &["L", "R"],
+        3 => &["L", "R", "C"],
+        4 => &["L", "R", "Ls", "Rs"],
+        5 => &["L", "R", "C", "Ls", "Rs"],
+        6 => &["L", "R", "C", "LFE", "Ls", "Rs"],
+        7 => &["L", "R", "C", "LFE", "Cs", "Ls", "Rs"],
+        _ => &["L", "R", "C", "LFE", "Lb", "Rb", "Ls", "Rs"],
+    }
 }
 
 #[cfg(test)]
@@ -176,6 +250,18 @@ mod tests {
                 (acc / ws) as f32
             })
             .collect()
+    }
+
+    #[test]
+    fn surround_remaps() {
+        let six: Vec<Vec<f32>> = (0..6).map(|c| vec![c as f32 + 1.0; 4]).collect();
+        let st = remap_channels(&six, 2);
+        let k = std::f32::consts::FRAC_1_SQRT_2;
+        assert!((st[0][0] - (1.0 + 3.0 * k + 5.0 * k)).abs() < 1e-5);
+        assert!((st[1][0] - (2.0 + 3.0 * k + 6.0 * k)).abs() < 1e-5);
+        let up = remap_channels(&[vec![0.5; 3], vec![0.25; 3]], 6);
+        assert_eq!((up.len(), up[0][0], up[1][0], up[2][0], up[5][0]), (6, 0.5, 0.25, 0.0, 0.0));
+        assert_eq!(remap_channels(&[vec![0.5; 3]], 6)[2][0], 0.5, "mono goes to the centre");
     }
 
     #[test]

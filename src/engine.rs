@@ -1019,9 +1019,12 @@ where
                                 win = (start, start + MIX_BLOCK);
                             }
                         }
-                        // Audemo's left and right, then onto the mapped device channels.
-                        let mut lr = [0.0f32; 2];
-                        for (c, out) in lr.iter_mut().enumerate() {
+                        // Each source channel (up to 7.1), then Audemo's left and right
+                        // (surround mixed down) onto the mapped device channels, or
+                        // surround straight to a device with enough channels.
+                        let n_read = if stream.is_none() && st.mix.is_some() { 2 } else { n_src.clamp(1, 8) };
+                        let mut vals = [0.0f32; 8];
+                        for (c, out) in vals.iter_mut().enumerate().take(n_read) {
                             let (a, b) = match &stream {
                                 Some(sb) => {
                                     let a = sb.sample(c, i0);
@@ -1041,12 +1044,21 @@ where
                                     (a, ch.get(i0 + 1).copied().unwrap_or(a))
                                 }
                             };
-                            let v = (a + (b - a) * fr) * st.volume;
-                            pk[c] = pk[c].max(v.abs());
-                            *out = v;
+                            *out = (a + (b - a) * fr) * st.volume;
                         }
+                        let lr = match n_read {
+                            1 => [vals[0], vals[0]],
+                            2 => [vals[0], vals[1]],
+                            n => crate::dsp::resample::surround_downmix(&vals[..n]),
+                        };
+                        pk[0] = pk[0].max(lr[0].abs());
+                        pk[1] = pk[1].max(lr[1].abs());
                         frame.iter_mut().for_each(|s| *s = silence);
-                        if channels == 1 {
+                        if n_read > 2 && channels >= n_read {
+                            for (c, v) in vals.iter().enumerate().take(n_read) {
+                                frame[c] = T::from_sample(v.clamp(-1.0, 1.0));
+                            }
+                        } else if channels == 1 {
                             frame[0] = T::from_sample((0.5 * (lr[0] + lr[1])).clamp(-1.0, 1.0));
                         } else {
                             let (ml, mr) = (st.out_map[0].min(channels - 1), st.out_map[1].min(channels - 1));

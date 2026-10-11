@@ -303,13 +303,9 @@ impl App {
             }
             draw_amp_ruler(&painter, r, lanes.right(), doc.amp_zoom);
             // Channel toggle.
-            let label = match (n_ch, c) {
-                (1, _) => "M",
-                (_, 0) => "L",
-                (_, 1) => "R",
-                _ => "·",
-            };
-            let tr = Rect::from_min_size(pos2(body.right() - 17.0, r.center().y - 9.0), vec2(15.0, 18.0));
+            let label = crate::dsp::resample::channel_names(n_ch).get(c).copied().unwrap_or("·");
+            let w = if label.len() > 1 { 24.0 } else { 15.0 };
+            let tr = Rect::from_min_size(pos2(body.right() - w - 2.0, r.center().y - 9.0), vec2(w, 18.0));
             let tresp = ui.interact(tr, ui.id().with(("chan", doc.id, c)), Sense::click());
             painter.rect_filled(tr, 2.0, if active { Color32::from_rgb(0x5a, 0x5a, 0x5a) } else { Color32::from_rgb(0x2c, 0x2c, 0x2c) });
             painter.rect_stroke(tr, 2.0, Stroke::new(1.0_f32, BORDER()));

@@ -63,7 +63,9 @@ pub fn write<W: Write + Seek>(
     let bps = fmt.bytes();
     let data_len = len as u64 * n_ch as u64 * bps as u64;
     let float = fmt == WavFormat::Float32;
-    let fmt_len: u32 = if float { 18 } else { 16 };
+    // More than two channels: WAVE_FORMAT_EXTENSIBLE with the speaker layout.
+    let ext = n_ch > 2;
+    let fmt_len: u32 = if ext { 40 } else if float { 18 } else { 16 };
     let fact_len: u64 = if float { 12 } else { 0 };
     let total = 4 + (8 + fmt_len as u64) + fact_len + info.len() as u64 + 8 + data_len + (data_len & 1) + markers.len() as u64;
     if total > u32::MAX as u64 {
@@ -74,14 +76,33 @@ pub fn write<W: Write + Seek>(
     h.extend_from_slice(&(total as u32).to_le_bytes());
     h.extend_from_slice(b"WAVEfmt ");
     h.extend_from_slice(&fmt_len.to_le_bytes());
-    h.extend_from_slice(&(if float { 3u16 } else { 1u16 }).to_le_bytes());
+    h.extend_from_slice(&(if ext { 0xFFFEu16 } else if float { 3u16 } else { 1u16 }).to_le_bytes());
     h.extend_from_slice(&(n_ch as u16).to_le_bytes());
     h.extend_from_slice(&sample_rate.to_le_bytes());
     h.extend_from_slice(&(sample_rate * (n_ch * bps) as u32).to_le_bytes());
     h.extend_from_slice(&((n_ch * bps) as u16).to_le_bytes());
     h.extend_from_slice(&((bps * 8) as u16).to_le_bytes());
+    if ext {
+        let mask: u32 = match n_ch {
+            3 => 0x7,
+            4 => 0x33,
+            5 => 0x37,
+            6 => 0x3F,
+            7 => 0x13F,
+            8 => 0x63F,
+            _ => 0,
+        };
+        h.extend_from_slice(&22u16.to_le_bytes());
+        h.extend_from_slice(&((bps * 8) as u16).to_le_bytes());
+        h.extend_from_slice(&mask.to_le_bytes());
+        // KSDATAFORMAT_SUBTYPE_PCM / _IEEE_FLOAT
+        h.extend_from_slice(&(if float { 3u32 } else { 1u32 }).to_le_bytes());
+        h.extend_from_slice(&[0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71]);
+    }
     if float {
-        h.extend_from_slice(&0u16.to_le_bytes());
+        if !ext {
+            h.extend_from_slice(&0u16.to_le_bytes());
+        }
         h.extend_from_slice(b"fact");
         h.extend_from_slice(&4u32.to_le_bytes());
         h.extend_from_slice(&(len.min(u32::MAX as usize) as u32).to_le_bytes());

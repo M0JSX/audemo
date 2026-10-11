@@ -559,7 +559,7 @@ impl App {
                         ui.label(if d.dirty { "*" } else { "" });
                         ui.label(format_time(d.len() as f64, d.sample_rate));
                         ui.label(format!("{} Hz", d.sample_rate));
-                        ui.label(if d.n_ch() == 1 { "Mono" } else { "Stereo" });
+                        ui.label(match d.n_ch() { 1 => "Mono".to_string(), 2 => "Stereo".to_string(), 6 => "5.1".to_string(), 8 => "7.1".to_string(), n => format!("{n} ch") });
                         ui.label(d.source_bits.map(|b| format!("{b}")).unwrap_or_else(|| "32 (float)".into()));
                         ui.label(d.path.as_ref().and_then(|p| p.extension()).map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default());
                         ui.end_row();

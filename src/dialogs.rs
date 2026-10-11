@@ -44,9 +44,11 @@ impl App {
                         ui.label(RichText::new("Hz").color(TEXT_DIM()));
                         ui.end_row();
                         ui.label("Channels:");
-                        egui::ComboBox::from_id_source("nf_ch").width(120.0).selected_text(if channels == 1 { "Mono" } else { "Stereo" }).show_ui(ui, |ui| {
+                        egui::ComboBox::from_id_source("nf_ch").width(120.0).selected_text(match channels { 1 => "Mono", 6 => "5.1", 8 => "7.1", _ => "Stereo" }).show_ui(ui, |ui| {
                             ui.selectable_value(&mut channels, 1, "Mono");
                             ui.selectable_value(&mut channels, 2, "Stereo");
+                            ui.selectable_value(&mut channels, 6, "5.1");
+                            ui.selectable_value(&mut channels, 8, "7.1");
                         });
                         ui.end_row();
                         ui.label("Bit Depth:");
@@ -266,10 +268,12 @@ impl App {
                         ui.horizontal(|ui| {
                             ui.radio_value(&mut channels, 1, "Mono");
                             ui.radio_value(&mut channels, 2, "Stereo");
+                            ui.radio_value(&mut channels, 6, "5.1");
+                            ui.radio_value(&mut channels, 8, "7.1");
                         });
                         ui.end_row();
                     });
-                    ui.label(RichText::new("High-quality windowed-sinc resampling. Mono downmix averages both channels.").color(TEXT_DIM()).size(11.0));
+                    ui.label(RichText::new("High-quality windowed-sinc resampling. Mono downmix averages the channels; surround mixes down to stereo with the centre and surrounds at -3 dB; stereo goes to the front left and right of 5.1 or 7.1.").color(TEXT_DIM()).size(11.0));
                     ui.add_space(6.0);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.button("Cancel").clicked() {

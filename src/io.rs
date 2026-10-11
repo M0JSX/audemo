@@ -12,7 +12,7 @@ use symphonia::core::probe::Hint;
 
 pub const OPEN_EXTENSIONS: &[&str] = &[
     "wav", "wave", "aif", "aiff", "aifc", "flac", "mp3", "ogg", "oga", "m4a", "mp4", "aac", "alac",
-    "caf", "mkv", "webm",
+    "caf", "mkv", "webm", "mka", "mov", "m4v", "3gp",
 ];
 
 pub struct Decoded {
@@ -77,17 +77,21 @@ pub fn load(path: &Path) -> Result<Decoded, String> {
     if let Some(rev) = format.metadata().current() {
         read_tags(rev, &mut meta, &mut track_total);
     }
-    let track = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        .ok_or("The file has no audio track.")?;
-    let track_id = track.id;
-    let mut sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
-    let bits = track.codec_params.bits_per_sample;
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| format!("Unsupported codec: {e}"))?;
+    // The first track that can be decoded as audio (video files list their
+    // video track too, which is skipped).
+    let mut found = None;
+    let mut last_err = String::from("The file has no audio track.");
+    for t in format.tracks().iter().filter(|t| t.codec_params.codec != CODEC_TYPE_NULL) {
+        match symphonia::default::get_codecs().make(&t.codec_params, &DecoderOptions::default()) {
+            Ok(d) => {
+                found = Some((t.id, t.codec_params.sample_rate, t.codec_params.bits_per_sample, d));
+                break;
+            }
+            Err(e) => last_err = format!("Unsupported codec: {e}"),
+        }
+    }
+    let (track_id, rate, bits, mut decoder) = found.ok_or(last_err)?;
+    let mut sample_rate = rate.unwrap_or(44100);
 
     let mut channels: Vec<Vec<f32>> = Vec::new();
     loop {
