@@ -1,5 +1,5 @@
 //! Multitrack sessions: tracks of clips that point into source audio, the
-//! mix of them, undo, and the `.audemo` session file format.
+//! mix of them, undo, and the `.ases` session file format.
 //!
 //! Clips never own audio. Each refers to a [`Source`] by id; a source is
 //! usually linked to an open file (document), so editing that file in the
@@ -19,11 +19,14 @@ use crate::dsp::peaks::PeakCache;
 use crate::dsp::util::db_to_lin;
 use crate::engine::Buffer;
 
-pub const SESSION_EXT: &str = "audemo";
+pub const SESSION_EXT: &str = "ases";
+/// The native extension before 1.6 (still opened).
+pub const OLD_SESSION_EXT: &str = "audemo";
 
-/// An Audemo (.audemo) or Audition (.sesx) multitrack session.
+/// An Audemo (.ases, or .audemo from before 1.6) or Audition (.sesx)
+/// multitrack session.
 pub fn is_session_file(p: &Path) -> bool {
-    p.extension().map(|e| e.eq_ignore_ascii_case(SESSION_EXT)).unwrap_or(false) || crate::sesx::is_sesx(p)
+    p.extension().map(|e| e.eq_ignore_ascii_case(SESSION_EXT) || e.eq_ignore_ascii_case(OLD_SESSION_EXT)).unwrap_or(false) || crate::sesx::is_sesx(p)
 }
 
 /// Track colours, cycled as tracks are added.

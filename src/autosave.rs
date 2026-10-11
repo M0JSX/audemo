@@ -209,15 +209,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("audemo-autosave-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         for d in ["2026-01-01 000000", "2026-01-02 000000", "2026-01-03 000000"] {
-            std::fs::write(dir.join(format!("Song backup {d}.audemo")), "x").unwrap();
+            std::fs::write(dir.join(format!("Song backup {d}.ases")), "x").unwrap();
         }
         std::fs::create_dir_all(dir.join("Song backup 2026-01-01 000000 Files")).unwrap();
-        std::fs::write(dir.join("Other backup 2026-01-01 000000.audemo"), "x").unwrap();
+        std::fs::write(dir.join("Other backup 2026-01-01 000000.ases"), "x").unwrap();
         prune(&dir, "Song backup ", 2);
-        assert!(!dir.join("Song backup 2026-01-01 000000.audemo").exists());
+        assert!(!dir.join("Song backup 2026-01-01 000000.ases").exists());
         assert!(!dir.join("Song backup 2026-01-01 000000 Files").exists());
-        assert!(dir.join("Song backup 2026-01-03 000000.audemo").exists());
-        assert!(dir.join("Other backup 2026-01-01 000000.audemo").exists());
+        assert!(dir.join("Song backup 2026-01-03 000000.ases").exists());
+        assert!(dir.join("Other backup 2026-01-01 000000.ases").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

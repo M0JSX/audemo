@@ -2255,6 +2255,7 @@ impl App {
             Action::Open => {
                 let mut exts: Vec<&str> = io::OPEN_EXTENSIONS.to_vec();
                 exts.push(crate::session::SESSION_EXT);
+                exts.push(crate::session::OLD_SESSION_EXT);
                 exts.push(crate::sesx::EXT);
                 let picked = rfd::FileDialog::new()
                     .add_filter("Audio files and sessions", &exts)

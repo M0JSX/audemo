@@ -521,10 +521,10 @@ impl App {
             (Some(p), false) => p.clone(),
             _ => {
                 // Audition's .sesx by default (Audemo's own data rides along
-                // inside it); .audemo is still offered.
+                // inside it); Audemo's own .ases is still offered.
                 let mut dlg = rfd::FileDialog::new()
                     .add_filter("Audition session (.sesx)", &[crate::sesx::EXT])
-                    .add_filter("Audemo session (.audemo)", &[SESSION_EXT])
+                    .add_filter("Audemo session (.ases)", &[SESSION_EXT])
                     .set_file_name(format!("{}.{}", safe_file_name(&s.name), crate::sesx::EXT));
                 if let Some(dir) = s.path.as_ref().and_then(|p| p.parent()) {
                     dlg = dlg.set_directory(dir);
