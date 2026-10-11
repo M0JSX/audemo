@@ -401,6 +401,49 @@ impl App {
                     next = Some(Dialog::About);
                 }
             }
+            Dialog::Update(r) => {
+                let mut open = true;
+                centered(egui::Window::new("Update Available").open(&mut open)).show(ctx, |ui| {
+                    ui.set_max_width(480.0);
+                    ui.label(RichText::new(format!("Audemo {} is available", r.version)).size(17.0).strong().color(Color32::WHITE));
+                    ui.label(RichText::new(format!("You have version {}.", env!("CARGO_PKG_VERSION"))).color(TEXT_DIM()));
+                    if !r.notes.trim().is_empty() {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("What's new").strong());
+                        egui::Frame::none().fill(BG_LIST()).inner_margin(egui::Margin::same(6.0)).show(ui, |ui| {
+                            egui::ScrollArea::vertical().max_height(220.0).auto_shrink([false, true]).show(ui, |ui| {
+                                ui.label(RichText::new(r.notes.trim()).size(12.0));
+                            });
+                        });
+                    }
+                    ui.add_space(6.0);
+                    ui.checkbox(&mut self.prefs.check_updates, "Check for updates at startup");
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.add(egui::Button::new(RichText::new("Download…").color(Color32::WHITE)).fill(ACCENT())).on_hover_text("Open the release page to download the installer").clicked() {
+                            if let Err(e) = crate::update::open_url(&r.page) {
+                                self.set_status(e);
+                            }
+                            keep = false;
+                        }
+                        if ui.button("Skip This Version").on_hover_text("Don't mention this version at startup again").clicked() {
+                            self.prefs.skip_version = r.version.clone();
+                            keep = false;
+                        }
+                        if ui.button("Later").clicked() {
+                            keep = false;
+                        }
+                    });
+                });
+                if !open {
+                    keep = false;
+                }
+                if !keep {
+                    self.prefs.save();
+                } else {
+                    next = Some(Dialog::Update(r));
+                }
+            }
             Dialog::Message { title, text } => {
                 let mut open = true;
                 centered(egui::Window::new(title.clone()).open(&mut open)).show(ctx, |ui| {

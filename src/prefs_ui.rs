@@ -330,6 +330,9 @@ impl App {
                     row(ui, "", |ui| {
                         ui.checkbox(&mut p.show_tooltips, "Show Tool Tips");
                     });
+                    row(ui, "", |ui| {
+                        ui.checkbox(&mut p.check_updates, "Check for updates at startup");
+                    });
                 });
                 section(ui, "Time Selection and Playhead");
                 group(ui, |ui| {

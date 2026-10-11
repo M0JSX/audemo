@@ -502,6 +502,8 @@ pub enum Dialog {
     Tempo { bpm: f64, beats_per_bar: u32, metronome_db: f32 },
     PluginManager,
     About,
+    /// A newer release is available.
+    Update(crate::update::Release),
     Message { title: String, text: String },
     ConfirmClose { doc: usize },
     ConfirmQuit,
@@ -747,6 +749,8 @@ pub struct App {
     pub cd: crate::cd::CdLayout,
     /// A Mackie Control surface (Preferences > Control Surface).
     pub surface: Option<crate::control_surface::Surface>,
+    /// A check for updates in progress.
+    pub update_check: Option<crate::update::Check>,
 }
 
 /// The pitch display's track, worked out in the background.
@@ -848,6 +852,7 @@ impl App {
             pitch: Default::default(),
             cd: Default::default(),
             surface: None,
+            update_check: None,
         };
         let opened_files = !open.is_empty();
         if opened_files {
@@ -856,6 +861,9 @@ impl App {
         app.apply_runtime_prefs(&cc.egui_ctx);
         app.rebuild_keymap();
         app.apply_control_surface();
+        if app.prefs.check_updates {
+            app.check_for_updates(false);
+        }
         app.follow = app.prefs.follow;
         app.rack_entire = app.prefs.rack_entire;
         if crate::plugin::needs_first_scan() || app.prefs.scan_at_startup {
@@ -1146,6 +1154,7 @@ impl App {
         self.poll_tools();
         self.poll_marker_export();
         self.poll_control_surface();
+        self.poll_update_check();
     }
 
     /// Keep the target file's live length and view in step with the input.

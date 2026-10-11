@@ -28,6 +28,7 @@ mod session;
 mod shortcuts;
 mod theme;
 mod tools_ui;
+mod update;
 mod workspace;
 
 use std::path::PathBuf;

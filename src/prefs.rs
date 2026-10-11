@@ -184,6 +184,10 @@ prefs! {
     // General
     startup: Startup = Startup::Nothing,
     show_tooltips: bool = true,
+    /// Look for a newer release when Audemo starts.
+    check_updates: bool = true,
+    /// A release the user chose to skip (not offered again at startup).
+    skip_version: String = String::new(),
     /// Zoom in/out step, percent.
     zoom_factor: f32 = 50.0,
     /// Mouse-wheel zoom strength, percent.

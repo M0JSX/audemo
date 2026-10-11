@@ -298,6 +298,10 @@ impl App {
                     });
                     ui.menu_button("Help", |ui| {
                         if item(ui, "Keyboard Shortcuts…", "", true) { self.dialog = Some(Dialog::Shortcuts(Box::default())); }
+                        ui.separator();
+                        if item(ui, "Check for Updates…", "", self.update_check.is_none()) { self.check_for_updates(true); }
+                        if item(ui, "Audemo on GitHub", "", true) { let _ = crate::update::open_url(crate::update::RELEASES_PAGE); }
+                        ui.separator();
                         if item(ui, "About Audemo", "", true) { self.dialog = Some(Dialog::About); }
                     });
                 });
@@ -542,16 +546,21 @@ impl App {
                             draw_icon(ui.painter(), r.shrink(1.0), Icon::Waveform, if active { HOT() } else { WAVE() });
                             let name = RichText::new(&d.name).color(if active { HOT() } else { TEXT() });
                             let id = d.id;
-                            let resp = ui.dnd_drag_source(egui::Id::new(("file_drag", id)), crate::mt_ui::DocDrag(id), |ui| {
-                                ui.selectable_label(active, if active { name.strong() } else { name })
-                            });
-                            if resp.inner.clicked() {
+                            // One widget that both clicks (select) and drags (onto a
+                            // multitrack track). A separate drag layer on top would
+                            // take the clicks.
+                            let resp = ui.selectable_label(active, if active { name.strong() } else { name }).interact(Sense::click_and_drag());
+                            resp.dnd_set_drag_payload(crate::mt_ui::DocDrag(id));
+                            if resp.dragged() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                            }
+                            if resp.clicked() {
                                 select = Some(i);
                             }
-                            if resp.inner.double_clicked() {
+                            if resp.double_clicked() {
                                 switch = Some(i);
                             }
-                            resp.inner.context_menu(|ui| {
+                            resp.context_menu(|ui| {
                                 if ui.button("Insert into Multitrack at Cursor").clicked() {
                                     insert = Some(id);
                                     ui.close_menu();

@@ -70,6 +70,7 @@ impl NativeMenu {
 
         let app_menu = Submenu::new("Audemo", true);
         let _ = app_menu.append(&item("about", "About Audemo", None));
+        let _ = app_menu.append(&item("check_updates", "Check for Updates…", None));
         let _ = app_menu.append(&sep());
         let _ = app_menu.append(&item("prefs", "Settings…", ka(app, "prefs")));
         let _ = app_menu.append(&sep());
@@ -275,6 +276,9 @@ impl NativeMenu {
 
         let help = Submenu::new("Help", true);
         let _ = help.append(&item("shortcuts", "Keyboard Shortcuts", None));
+        let _ = help.append(&sep());
+        let _ = help.append(&item("check_updates", "Check for Updates…", None));
+        let _ = help.append(&item("github", "Audemo on GitHub", None));
 
         for sub in [&app_menu, &file, &edit, &multitrack, &effects, &favorites, &view, &window, &help] {
             menu.append(sub).ok()?;
@@ -340,6 +344,14 @@ impl App {
         let action = match id {
             "about" => {
                 self.dialog = Some(Dialog::About);
+                return;
+            }
+            "check_updates" => {
+                self.check_for_updates(true);
+                return;
+            }
+            "github" => {
+                let _ = crate::update::open_url(crate::update::RELEASES_PAGE);
                 return;
             }
             "shortcuts" => {

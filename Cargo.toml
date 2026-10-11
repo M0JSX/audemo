@@ -1,6 +1,6 @@
 [package]
 name = "audemo"
-version = "1.5.0"
+version = "1.5.1"
 edition = "2021"
 rust-version = "1.80"
 description = "Audemo: a cross-platform waveform audio editor with a built-in effects suite"
@@ -27,6 +27,8 @@ fdk-aac = "0.8.0"
 rfd = "0.14.1"
 # MIDI for control surfaces (Mackie Control).
 midir = "0.10.0"
+# HTTPS for Check for Updates (rustls: no system TLS libraries needed).
+ureq = "2.10"
 
 # ASIO: builds the Steinberg ASIO SDK (CPAL_ASIO_DIR, or downloaded) and
 # needs LLVM/clang for its bindings.
