@@ -19,6 +19,7 @@ pub mod fft;
 pub mod loudness;
 pub mod params;
 pub mod pitch;
+pub mod remix;
 pub mod peaks;
 pub mod resample;
 pub mod spectral;

@@ -378,18 +378,20 @@ pub enum Panel {
     BatchProcess,
     Metadata,
     Playlist,
+    EssentialSound,
 }
 
 impl Panel {
     pub const TOP: [Panel; 2] = [Panel::Files, Panel::Favorites];
-    pub const MIDDLE: [Panel; 8] = [Panel::MediaBrowser, Panel::EffectsRack, Panel::Markers, Panel::Playlist, Panel::Properties, Panel::Metadata, Panel::Diagnostics, Panel::BatchProcess];
+    pub const MIDDLE: [Panel; 9] = [Panel::MediaBrowser, Panel::EffectsRack, Panel::EssentialSound, Panel::Markers, Panel::Playlist, Panel::Properties, Panel::Metadata, Panel::Diagnostics, Panel::BatchProcess];
     pub const BOTTOM: [Panel; 2] = [Panel::History, Panel::MatchLoudness];
     pub const METERS: [Panel; 3] = [Panel::Levels, Panel::FrequencyAnalysis, Panel::PhaseMeter];
     /// Every panel, in Window-menu order.
-    pub const ALL: [Panel; 15] = [
+    pub const ALL: [Panel; 16] = [
         Panel::BatchProcess,
         Panel::Diagnostics,
         Panel::EffectsRack,
+        Panel::EssentialSound,
         Panel::Favorites,
         Panel::Files,
         Panel::FrequencyAnalysis,
@@ -420,6 +422,7 @@ impl Panel {
             Panel::BatchProcess => "Batch Process",
             Panel::Metadata => "Metadata",
             Panel::Playlist => "Playlist",
+            Panel::EssentialSound => "Essential Sound",
         }
     }
 }
@@ -515,7 +518,7 @@ pub enum JobKind {
     /// Multitrack Bounce: a new file, placed on a new track at `at`.
     MtBounce { session_id: u64, at: usize, name: String },
     /// Rendered clip stretches: each clip's channels, one clip after another.
-    MtStretch { session_id: u64, clips: Vec<(u64, usize)>, percent: f32 },
+    MtStretch { session_id: u64, clips: Vec<(u64, usize)>, percent: f32, remixed: bool },
 }
 
 /// A file being written in the background.
@@ -1454,8 +1457,8 @@ impl App {
                 Ok(out) => self.mt_finish_bounce(session_id, at, name, out),
                 Err(e) => self.dialog = Some(Dialog::Message { title: job.label.clone(), text: e }),
             },
-            JobKind::MtStretch { session_id, clips, percent } => match res {
-                Ok(out) => self.mt_finish_stretch(session_id, clips, percent, out),
+            JobKind::MtStretch { session_id, clips, percent, remixed } => match res {
+                Ok(out) => self.mt_finish_stretch(session_id, clips, percent, remixed, out),
                 Err(e) => self.dialog = Some(Dialog::Message { title: job.label.clone(), text: e }),
             },
             JobKind::NewDoc { name, rate } => match res {

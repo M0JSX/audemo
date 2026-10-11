@@ -89,6 +89,8 @@ pub struct Clip {
     pub fx_on: bool,
     /// Stretch applied when the clip was rendered (100 = none), for display.
     pub stretch: f32,
+    /// Essential Sound type and settings.
+    pub es: Option<Box<crate::essential::Essential>>,
 }
 
 impl Clip {
@@ -891,6 +893,7 @@ impl Session {
             fx: Vec::new(),
             fx_on: true,
             stretch: 100.0,
+            es: None,
         });
         self.selected_clips.clear();
         self.selected_clips.insert(id);
@@ -1581,6 +1584,9 @@ pub fn to_text(s: &Session, paths: &BTreeMap<u64, PathBuf>, base: Option<&Path>)
                 c.fx_on as u8,
                 c.stretch
             ));
+            if let Some(es) = &c.es {
+                o.push_str(&format!("ess\t{}\n", es.to_text()));
+            }
             for f in &c.fx {
                 o.push_str(&fx_line("cfx", f));
             }
@@ -1676,6 +1682,7 @@ pub fn from_text(id: u64, text: &str, base: Option<&Path>, effects: &[EffectDef]
                     fx: Vec::new(),
                     fx_on: num(18).map(|v| v != 0.0).unwrap_or(true),
                     stretch: num(19).unwrap_or(100.0) as f32,
+                    es: None,
                 };
                 let mut c = c;
                 c.len = c.len.max(1);
@@ -1715,6 +1722,11 @@ pub fn from_text(id: u64, text: &str, base: Option<&Path>, effects: &[EffectDef]
                         p.1 = p.1.clamp(min.min(max), max.max(min));
                     }
                     t.lanes.push(AutoLane { target, env, min, max, step: num(6).map(|v| v != 0.0).unwrap_or(false), name: f.get(7).unwrap_or(&"").to_string() });
+                }
+            }
+            "ess" => {
+                if let Some(c) = s.tracks.last_mut().and_then(|t| t.clips.last_mut()) {
+                    c.es = crate::essential::Essential::from_text(f.get(1).unwrap_or(&"")).map(Box::new);
                 }
             }
             "masterfx" => s.master_fx_on = num(1).map(|v| v != 0.0).unwrap_or(true),

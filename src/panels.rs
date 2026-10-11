@@ -471,6 +471,7 @@ impl App {
                         Panel::MediaBrowser => self.media_browser(ui),
                         Panel::Markers => self.markers_tab(ui),
                         Panel::Playlist => self.playlist_panel(ui),
+                        Panel::EssentialSound => self.essential_panel(ui),
                         Panel::Properties => self.properties_panel(ui),
                         Panel::Diagnostics => self.diagnostics_panel(ui),
                         Panel::BatchProcess => self.batch_panel(ui),

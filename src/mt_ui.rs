@@ -89,6 +89,7 @@ pub enum ClipCmd {
     /// mode: 0 loudness (LUFS), 1 peak (dBFS), 2 RMS (dB)
     Match { mode: usize, target: f32 },
     Bounce(BounceKind),
+    ShowEssential,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,7 +126,7 @@ pub struct MtState {
     /// The Effects Rack panel shows this clip's rack.
     pub rack_clip: Option<u64>,
     /// Slot whose effect window has already recorded its undo step.
-    fx_undo_for: Option<u64>,
+    pub fx_undo_for: Option<u64>,
     /// Per-track meter levels in dB (L, R), decayed.
     pub meters: Vec<[f32; 2]>,
     meter_at: Option<std::time::Instant>,
@@ -883,7 +884,7 @@ impl App {
 
     fn mt_clip_cmd(&mut self, si: usize, cmd: ClipCmd) {
         let sel: Vec<u64> = self.sessions[si].selected_clips.iter().copied().collect();
-        let need_clips = !matches!(cmd, ClipCmd::Bounce(BounceKind::Track) | ClipCmd::Bounce(BounceKind::TimeSelection));
+        let need_clips = !matches!(cmd, ClipCmd::Bounce(BounceKind::Track) | ClipCmd::Bounce(BounceKind::TimeSelection) | ClipCmd::ShowEssential);
         if need_clips && sel.is_empty() {
             self.set_status("Select one or more clips first.");
             return;
@@ -969,6 +970,7 @@ impl App {
                 self.set_status(format!("Matched {} clip(s)", changes.len()));
             }
             ClipCmd::Bounce(kind) => self.mt_bounce(si, kind),
+            ClipCmd::ShowEssential => self.show_panel(crate::app::Panel::EssentialSound),
         }
     }
 
@@ -1055,7 +1057,7 @@ impl App {
         }
         let clips: Vec<(u64, usize)> = inputs.iter().map(|(id, a, _)| (*id, a.len())).collect();
         let session_id = s.id;
-        self.spawn_job("Stretch Clip".into(), JobKind::MtStretch { session_id, clips, percent }, move || {
+        self.spawn_job("Stretch Clip".into(), JobKind::MtStretch { session_id, clips, percent, remixed: false }, move || {
             let mut out = Vec::new();
             for (_, audio, f) in inputs {
                 let mut p = effects[idx].default_params();
@@ -1067,7 +1069,7 @@ impl App {
         });
     }
 
-    pub fn mt_finish_stretch(&mut self, session_id: u64, clips: Vec<(u64, usize)>, percent: f32, out: Vec<Vec<f32>>) {
+    pub fn mt_finish_stretch(&mut self, session_id: u64, clips: Vec<(u64, usize)>, percent: f32, remixed: bool, out: Vec<Vec<f32>>) {
         let Some(si) = self.sessions.iter().position(|s| s.id == session_id) else { return };
         let s = &mut self.sessions[si];
         s.push_undo("Stretch Clip");
@@ -1082,8 +1084,8 @@ impl App {
             let sid = s.new_id();
             let audio: Buffer = Arc::new(chans);
             let peaks = Arc::new(PeakCache::build(&audio));
-            let base = c.name.split(" (stretched").next().unwrap_or(&c.name).to_string();
-            let name = format!("{base} (stretched {percent:.0}%)");
+            let base = c.name.split(" (stretched").next().unwrap_or(&c.name).split(" (remix").next().unwrap_or(&c.name).to_string();
+            let name = if remixed { format!("{base} (remix {:.1} s)", len as f64 / s.sample_rate as f64) } else { format!("{base} (stretched {percent:.0}%)") };
             s.sources.insert(sid, Arc::new(Source { id: sid, name: name.clone(), doc_id: None, doc_version: 0, path: None, audio, peaks }));
             let ratio = len as f64 / c.len.max(1) as f64;
             if let Some(cm) = s.clip_mut(cid) {
@@ -1093,11 +1095,13 @@ impl App {
                 cm.looped = false;
                 cm.fade_in = (cm.fade_in as f64 * ratio) as usize;
                 cm.fade_out = ((cm.fade_out as f64 * ratio) as usize).min(len - cm.fade_in.min(len));
-                cm.stretch = percent;
+                if !remixed {
+                    cm.stretch = percent;
+                }
             }
         }
         s.touch();
-        self.set_status(format!("Stretched to {percent:.0}%"));
+        self.set_status(if remixed { "Remixed to the new length".to_string() } else { format!("Stretched to {percent:.0}%") });
     }
 
     fn mt_mixdown(&mut self, selection: bool) {
@@ -2790,6 +2794,10 @@ impl App {
                 }
                 if ui.button("Clip Effects…").clicked() {
                     menu_action = Some(Action::MtClip(ClipCmd::ShowFx));
+                    ui.close_menu();
+                }
+                if ui.button("Essential Sound…").clicked() {
+                    menu_action = Some(Action::MtClip(ClipCmd::ShowEssential));
                     ui.close_menu();
                 }
                 if ui.button("Stretch…").clicked() {

@@ -8,6 +8,7 @@ mod dialogs;
 mod dsp;
 mod editor;
 mod engine;
+mod essential;
 mod export;
 mod io;
 mod liverack;
