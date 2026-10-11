@@ -208,7 +208,10 @@ impl App {
             if let Some((a, b)) = doc.sel_range() {
                 painter.rect_filled(Rect::from_x_y_ranges(ox(a as f64)..=ox(b as f64).max(ox(a as f64) + 1.0), overview.y_range()), 0.0, Color32::from_white_alpha(28));
             }
-            let vr = Rect::from_x_y_ranges(ox(doc.view_start)..=ox(doc.view_end).max(ox(doc.view_start) + 3.0), overview.y_range());
+            // Clamped: an empty new file shows more time than it holds.
+            let (va, vb) = (ox(doc.view_start).clamp(overview.left(), overview.right()), ox(doc.view_end).clamp(overview.left(), overview.right()));
+            let va = va.min(overview.right() - 3.0);
+            let vr = Rect::from_x_y_ranges(va..=vb.max(va + 3.0), overview.y_range());
             painter.rect_filled(vr, 0.0, Color32::from_rgba_unmultiplied(242, 194, 48, 26));
             painter.rect_stroke(vr.shrink(0.5), 0.0, Stroke::new(1.0_f32, PLAYHEAD()));
             if st.playing && st.tag == doc.id {
