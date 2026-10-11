@@ -489,6 +489,10 @@ pub enum Dialog {
     MixPaste { mode: usize, clip_db: f32, orig_db: f32 },
     Convert { rate: u32, channels: usize },
     Shortcuts(Box<crate::shortcuts::ShortcutEditor>),
+    /// Clip > Stretch: new length as a percentage of the original.
+    ClipStretch { percent: f32 },
+    /// Clip > Match Clip Volume.
+    MatchClipVolume { mode: usize, target: f32 },
     PluginManager,
     About,
     Message { title: String, text: String },
@@ -508,6 +512,10 @@ pub enum JobKind {
     NewDoc { name: String, rate: u32 },
     /// Open the result as several files of `per` channels each.
     NewDocs { names: Vec<String>, rate: u32, per: usize },
+    /// Multitrack Bounce: a new file, placed on a new track at `at`.
+    MtBounce { session_id: u64, at: usize, name: String },
+    /// Rendered clip stretches: each clip's channels, one clip after another.
+    MtStretch { session_id: u64, clips: Vec<(u64, usize)>, percent: f32 },
 }
 
 /// A file being written in the background.
@@ -621,6 +629,8 @@ pub enum Action {
     /// An open file dragged onto a track.
     MtInsertAt { session_id: u64, doc_id: u64, track: usize, at: usize },
     MtAddBus,
+    /// Clip and track commands (Multitrack menu, clip context menu).
+    MtClip(crate::mt_ui::ClipCmd),
     /// Heal a spectral region (None = the current spectral selection).
     SpectralHeal(Option<crate::dsp::spectral::SpecShape>),
 }
@@ -1438,6 +1448,14 @@ impl App {
                     self.mode = Mode::Waveform;
                     self.set_status(format!("{}: {} new files", job.label, names.len()));
                 }
+                Err(e) => self.dialog = Some(Dialog::Message { title: job.label.clone(), text: e }),
+            },
+            JobKind::MtBounce { session_id, at, name } => match res {
+                Ok(out) => self.mt_finish_bounce(session_id, at, name, out),
+                Err(e) => self.dialog = Some(Dialog::Message { title: job.label.clone(), text: e }),
+            },
+            JobKind::MtStretch { session_id, clips, percent } => match res {
+                Ok(out) => self.mt_finish_stretch(session_id, clips, percent, out),
                 Err(e) => self.dialog = Some(Dialog::Message { title: job.label.clone(), text: e }),
             },
             JobKind::NewDoc { name, rate } => match res {
@@ -2749,7 +2767,8 @@ impl App {
             | Action::MtEditSource(_)
             | Action::MtDropFiles(_)
             | Action::MtInsertAt { .. }
-            | Action::MtAddBus => {}
+            | Action::MtAddBus
+            | Action::MtClip(_) => {}
             Action::Audition(p) => {
                 self.browser_selected = Some(p.clone());
                 if self.engine.is_playing_tag(BROWSER_TAG) {

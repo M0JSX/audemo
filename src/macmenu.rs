@@ -173,6 +173,16 @@ impl NativeMenu {
         let _ = multitrack.append(&item("mt_insert", "Insert Files…", None));
         let _ = multitrack.append(&item("mt_insert_doc", "Insert Current File at Cursor", None));
         let _ = multitrack.append(&item("mt_split", "Split Clip at Playhead", ka(app, "mt_split")));
+        let clip = Submenu::new("Clip", true);
+        for (id, label) in [("mt_group", "Group Clips"), ("mt_ungroup", "Ungroup Clips"), ("mt_loop", "Loop"), ("mt_lock", "Lock in Time"), ("mt_clip_fx", "Clip Effects…"), ("mt_stretch", "Stretch…"), ("mt_match", "Match Clip Volume…")] {
+            let _ = clip.append(&item(id, label, ka(app, id)));
+        }
+        let _ = multitrack.append(&clip);
+        let bounce = Submenu::new("Bounce to New Track", true);
+        for (id, label) in [("mt_bounce", "Selected Track"), ("mt_bounce_sel", "Time Selection in Selected Track"), ("mt_bounce_clips", "Selected Clips")] {
+            let _ = bounce.append(&item(id, label, ka(app, id)));
+        }
+        let _ = multitrack.append(&bounce);
         let _ = multitrack.append(&sep());
         let mixdown = Submenu::new("Mixdown Session to New File", true);
         let _ = mixdown.append(&item("mt_mix_all", "Entire Session", None));

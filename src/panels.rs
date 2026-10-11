@@ -199,6 +199,26 @@ impl App {
                             if item(ui, &format!("Insert \"{name}\" at Cursor"), "", has_session) { self.actions.push(Action::MtInsertDoc(id)); }
                         }
                         if item(ui, "Split Clip at Playhead", &km.label("mt_split"), in_mt) { self.actions.push(Action::MtSplit); }
+                        ui.menu_button("Clip", |ui| {
+                            use crate::mt_ui::ClipCmd as C;
+                            for (label, id, cmd) in [
+                                ("Group Clips", "mt_group", C::Group),
+                                ("Ungroup Clips", "mt_ungroup", C::Ungroup),
+                                ("Loop", "mt_loop", C::ToggleLoop),
+                                ("Lock in Time", "mt_lock", C::ToggleLock),
+                                ("Clip Effects…", "mt_clip_fx", C::ShowFx),
+                                ("Stretch…", "mt_stretch", C::StretchDialog),
+                                ("Match Clip Volume…", "mt_match", C::MatchDialog),
+                            ] {
+                                if item(ui, label, &km.label(id), in_mt) { self.actions.push(Action::MtClip(cmd)); }
+                            }
+                        });
+                        ui.menu_button("Bounce to New Track", |ui| {
+                            use crate::mt_ui::{BounceKind as B, ClipCmd as C};
+                            if item(ui, "Selected Track", &km.label("mt_bounce"), in_mt) { self.actions.push(Action::MtClip(C::Bounce(B::Track))); }
+                            if item(ui, "Time Selection in Selected Track", &km.label("mt_bounce_sel"), in_mt && has_time_sel) { self.actions.push(Action::MtClip(C::Bounce(B::TimeSelection))); }
+                            if item(ui, "Selected Clips", &km.label("mt_bounce_clips"), in_mt) { self.actions.push(Action::MtClip(C::Bounce(B::Clips))); }
+                        });
                         ui.separator();
                         ui.menu_button("Mixdown Session to New File", |ui| {
                             if item(ui, "Entire Session", "", has_session) { self.actions.push(Action::MtMixdown(false)); }

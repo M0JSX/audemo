@@ -58,13 +58,44 @@ pub enum MtDrag {
     FadeOut { id: u64, y0: f32, curve0: f32 },
     Select(usize),
     /// An automation point: (track, pan envelope?, point index).
-    EnvPoint(usize, bool, usize),
+    EnvPoint(usize, EnvKey, usize),
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum EnvHit {
     Point(usize),
     Line,
+}
+
+/// Changes to a track's automation lanes (from its header menu).
+enum LaneOp {
+    View(usize),
+    Add(session::AutoTarget, f32, f32, bool, String),
+    Delete(usize),
+    Group(u8),
+}
+
+/// Clip and track commands.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ClipCmd {
+    Group,
+    Ungroup,
+    ToggleLoop,
+    ToggleLock,
+    ShowFx,
+    StretchDialog,
+    Stretch(f32),
+    MatchDialog,
+    /// mode: 0 loudness (LUFS), 1 peak (dBFS), 2 RMS (dB)
+    Match { mode: usize, target: f32 },
+    Bounce(BounceKind),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BounceKind {
+    Track,
+    TimeSelection,
+    Clips,
 }
 
 pub struct MtRec {
@@ -88,9 +119,11 @@ pub struct MtState {
     context_clip: Option<u64>,
     context_track: Option<usize>,
     /// Right-clicked automation: (track, pan?, point)
-    context_env: Option<(usize, bool, Option<usize>)>,
+    context_env: Option<(usize, EnvKey, Option<usize>)>,
     /// The Effects Rack panel shows the master rack instead of a track's.
     pub rack_master: bool,
+    /// The Effects Rack panel shows this clip's rack.
+    pub rack_clip: Option<u64>,
     /// Slot whose effect window has already recorded its undo step.
     fx_undo_for: Option<u64>,
     /// Per-track meter levels in dB (L, R), decayed.
@@ -103,41 +136,135 @@ fn env_area(lane: Rect) -> Rect {
     Rect::from_min_max(pos2(lane.left(), lane.top() + CLIP_BAR + 2.0), pos2(lane.right(), lane.bottom() - 3.0))
 }
 
-fn env_y(pan: bool, v: f32, area: Rect) -> f32 {
-    let frac = if pan { (v + 100.0) / 200.0 } else { 1.0 - (v - VOL_ENV_MIN) / (VOL_ENV_MAX - VOL_ENV_MIN) };
-    area.top() + frac.clamp(0.0, 1.0) * area.height()
-}
-
-fn env_value(pan: bool, y: f32, area: Rect) -> f32 {
-    let frac = ((y - area.top()) / area.height().max(1.0)).clamp(0.0, 1.0);
-    if pan {
-        (frac * 200.0 - 100.0).round()
-    } else {
-        let db = VOL_ENV_MAX - frac * (VOL_ENV_MAX - VOL_ENV_MIN);
-        (db * 10.0).round() / 10.0
-    }
-}
-
-fn env_of(t: &Track, pan: bool) -> &Envelope {
-    if pan {
-        &t.pan_env
-    } else {
-        &t.vol_env
-    }
-}
-
-fn env_of_mut(t: &mut Track, pan: bool) -> &mut Envelope {
-    if pan {
-        &mut t.pan_env
-    } else {
-        &mut t.vol_env
-    }
-}
-
 const VOL_ENV_COL: Color32 = Color32::from_rgb(0xf2, 0xc2, 0x30);
 const PAN_ENV_COL: Color32 = Color32::from_rgb(0x4d, 0xa3, 0xff);
 
-/// Vertical stereo peak meter (levels in dB).
+/// An automation line: track volume, pan, or one of its extra lanes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum EnvKey {
+    Vol,
+    Pan,
+    Lane(usize),
+}
+
+/// The lines shown over a track: volume and pan, or the lane chosen.
+fn env_keys(t: &Track) -> Vec<EnvKey> {
+    if t.lane_view > 0 && t.lane_view <= t.lanes.len() {
+        vec![EnvKey::Lane(t.lane_view - 1)]
+    } else {
+        vec![EnvKey::Pan, EnvKey::Vol]
+    }
+}
+
+/// (min, max, step) of a line's values.
+fn env_range(t: &Track, key: EnvKey) -> (f32, f32, bool) {
+    match key {
+        EnvKey::Vol => (VOL_ENV_MIN, VOL_ENV_MAX, false),
+        EnvKey::Pan => (-100.0, 100.0, false),
+        EnvKey::Lane(i) => t.lanes.get(i).map(|l| (l.min, l.max, l.step)).unwrap_or((0.0, 1.0, false)),
+    }
+}
+
+fn env_y(t: &Track, key: EnvKey, v: f32, area: Rect) -> f32 {
+    let frac = match key {
+        EnvKey::Pan => (v + 100.0) / 200.0,
+        _ => {
+            let (lo, hi, _) = env_range(t, key);
+            1.0 - (v - lo) / (hi - lo).max(1e-6)
+        }
+    };
+    area.top() + frac.clamp(0.0, 1.0) * area.height()
+}
+
+fn env_value(t: &Track, key: EnvKey, y: f32, area: Rect) -> f32 {
+    let frac = ((y - area.top()) / area.height().max(1.0)).clamp(0.0, 1.0);
+    match key {
+        EnvKey::Pan => (frac * 200.0 - 100.0).round(),
+        EnvKey::Vol => {
+            let db = VOL_ENV_MAX - frac * (VOL_ENV_MAX - VOL_ENV_MIN);
+            (db * 10.0).round() / 10.0
+        }
+        EnvKey::Lane(_) => {
+            let (lo, hi, step) = env_range(t, key);
+            let v = hi - frac * (hi - lo);
+            if step {
+                v.round()
+            } else {
+                v
+            }
+        }
+    }
+}
+
+fn env_of(t: &Track, key: EnvKey) -> &Envelope {
+    static EMPTY: Envelope = Envelope { points: Vec::new() };
+    match key {
+        EnvKey::Vol => &t.vol_env,
+        EnvKey::Pan => &t.pan_env,
+        EnvKey::Lane(i) => t.lanes.get(i).map(|l| &l.env).unwrap_or(&EMPTY),
+    }
+}
+
+fn env_of_mut(t: &mut Track, key: EnvKey) -> &mut Envelope {
+    match key {
+        EnvKey::Vol => &mut t.vol_env,
+        EnvKey::Pan => &mut t.pan_env,
+        EnvKey::Lane(i) => {
+            let i = i.min(t.lanes.len().saturating_sub(1));
+            &mut t.lanes[i].env
+        }
+    }
+}
+
+fn env_col(key: EnvKey) -> Color32 {
+    match key {
+        EnvKey::Vol => VOL_ENV_COL,
+        EnvKey::Pan => PAN_ENV_COL,
+        EnvKey::Lane(_) => Color32::from_rgb(0x6d, 0xe0, 0x8a),
+    }
+}
+
+/// The value used where a line has no points.
+fn env_constant(t: &Track, key: EnvKey) -> f32 {
+    match key {
+        EnvKey::Vol => t.volume_db,
+        EnvKey::Pan => t.pan,
+        EnvKey::Lane(i) => match t.lanes.get(i).map(|l| &l.target) {
+            Some(session::AutoTarget::Param { slot, key }) => t.fx.iter().find(|f| f.id == *slot).map(|f| f.params.f(key)).unwrap_or(0.0),
+            _ => 0.0,
+        },
+    }
+}
+
+fn env_name(t: &Track, key: EnvKey) -> String {
+    match key {
+        EnvKey::Vol => "Volume".into(),
+        EnvKey::Pan => "Pan".into(),
+        EnvKey::Lane(i) => t.lanes.get(i).map(|l| l.name.clone()).unwrap_or_default(),
+    }
+}
+
+fn env_label(t: &Track, key: EnvKey, val: f32) -> String {
+    match key {
+        EnvKey::Pan => {
+            if val.abs() < 0.5 {
+                "C".to_string()
+            } else if val < 0.0 {
+                format!("L {:.0}", -val)
+            } else {
+                format!("R {val:.0}")
+            }
+        }
+        EnvKey::Vol if val <= VOL_ENV_MIN => "-∞ dB".to_string(),
+        EnvKey::Vol => format!("{val:+.1} dB"),
+        EnvKey::Lane(i) => match t.lanes.get(i) {
+            Some(l) if l.target == session::AutoTarget::Mute => if val >= 0.5 { "Muted".into() } else { "On".into() },
+            Some(l) => format!("{}: {val:.2}", l.name),
+            None => String::new(),
+        },
+    }
+}
+
 fn draw_meter(p: &egui::Painter, r: Rect, db: [f32; 2]) {
     p.rect_filled(r, 1.0, Color32::from_rgb(0x0c, 0x0e, 0x12));
     let w = (r.width() - 1.0) / 2.0;
@@ -489,6 +616,14 @@ impl App {
             s.dirty = true;
         }
         let st = self.engine.status();
+        // Effect-parameter automation follows the playhead.
+        if st.playing {
+            if let Some(s) = self.sessions.iter().find(|s| s.id == st.tag) {
+                for t in s.tracks.iter().filter(|t| t.lanes.iter().any(|l| matches!(l.target, session::AutoTarget::Param { .. }) && !l.env.is_empty())) {
+                    t.apply_param_automation(st.pos.max(0.0) as usize);
+                }
+            }
+        }
         let session_ids: Vec<u64> = self.sessions.iter().map(|s| s.id).collect();
         let playing_session = st.playing && session_ids.contains(&st.tag);
         if self.mode != Mode::Multitrack {
@@ -746,6 +881,225 @@ impl App {
         }
     }
 
+    fn mt_clip_cmd(&mut self, si: usize, cmd: ClipCmd) {
+        let sel: Vec<u64> = self.sessions[si].selected_clips.iter().copied().collect();
+        let need_clips = !matches!(cmd, ClipCmd::Bounce(BounceKind::Track) | ClipCmd::Bounce(BounceKind::TimeSelection));
+        if need_clips && sel.is_empty() {
+            self.set_status("Select one or more clips first.");
+            return;
+        }
+        match cmd {
+            ClipCmd::Group => {
+                if !self.sessions[si].group_selected() {
+                    self.set_status("Select two or more clips to group them.");
+                }
+            }
+            ClipCmd::Ungroup => {
+                if !self.sessions[si].ungroup_selected() {
+                    self.set_status("The selected clips aren't grouped.");
+                }
+            }
+            ClipCmd::ToggleLoop | ClipCmd::ToggleLock => {
+                let s = &mut self.sessions[si];
+                let looping = matches!(cmd, ClipCmd::ToggleLoop);
+                let on = !sel.iter().filter_map(|id| s.clip(*id)).all(|c| if looping { c.looped } else { c.locked });
+                s.push_undo(if looping { "Loop Clip" } else { "Lock in Time" });
+                for id in &sel {
+                    let src_len = s.clip(*id).map(|c| s.source_len(c.source)).unwrap_or(0);
+                    if let Some(c) = s.clip_mut(*id) {
+                        if looping {
+                            c.looped = on;
+                            if !on {
+                                // Back to one pass of the source.
+                                c.len = c.len.min(src_len.saturating_sub(c.offset)).max(1);
+                                c.fade_out = c.fade_out.min(c.len);
+                                c.fade_in = c.fade_in.min(c.len - c.fade_out);
+                            }
+                        } else {
+                            c.locked = on;
+                        }
+                    }
+                }
+                s.touch();
+                if looping && on {
+                    self.set_status("Looping: drag the clip's right edge to repeat it.");
+                }
+            }
+            ClipCmd::ShowFx => {
+                self.mt.rack_clip = sel.first().copied();
+                self.actions.push(Action::Status("__show_rack".into()));
+            }
+            ClipCmd::StretchDialog => {
+                let pct = sel.first().and_then(|id| self.sessions[si].clip(*id)).map(|c| c.stretch).unwrap_or(100.0);
+                self.dialog = Some(Dialog::ClipStretch { percent: pct.clamp(25.0, 400.0) });
+            }
+            ClipCmd::Stretch(pct) => self.mt_stretch(si, &sel, pct),
+            ClipCmd::MatchDialog => self.dialog = Some(Dialog::MatchClipVolume { mode: 0, target: -23.0 }),
+            ClipCmd::Match { mode, target } => {
+                let s = &mut self.sessions[si];
+                let sr = s.sample_rate;
+                let mut changes = Vec::new();
+                for id in &sel {
+                    let Some(audio) = s.clip_audio(*id) else { continue };
+                    let gain = s.clip(*id).map(|c| c.gain_db).unwrap_or(0.0);
+                    let level = match mode {
+                        0 => crate::dsp::loudness::integrated_lufs(&audio, sr).map(|v| v as f32),
+                        1 => Some(crate::dsp::util::lin_to_db(crate::dsp::util::peak(&audio))),
+                        _ => {
+                            let n = audio.iter().map(|c| c.len()).sum::<usize>().max(1) as f64;
+                            let ms = audio.iter().flat_map(|c| c.iter()).map(|x| (*x as f64).powi(2)).sum::<f64>() / n;
+                            (ms > 0.0).then(|| (10.0 * ms.log10()) as f32)
+                        }
+                    };
+                    if let Some(l) = level.filter(|l| l.is_finite()) {
+                        changes.push((*id, (gain + target - l).clamp(-48.0, 24.0)));
+                    }
+                }
+                if changes.is_empty() {
+                    self.set_status("The selected clips are silent or too short to measure.");
+                    return;
+                }
+                s.push_undo("Match Clip Volume");
+                for (id, g) in &changes {
+                    if let Some(c) = s.clip_mut(*id) {
+                        c.gain_db = *g;
+                    }
+                }
+                s.touch();
+                self.set_status(format!("Matched {} clip(s)", changes.len()));
+            }
+            ClipCmd::Bounce(kind) => self.mt_bounce(si, kind),
+        }
+    }
+
+    /// Bounce to New Track: the selected track (all of it, its part in the
+    /// time selection, or just the selected clips) rendered with its effects
+    /// and fader into a new file on a new track.
+    fn mt_bounce(&mut self, si: usize, kind: BounceKind) {
+        let s = &self.sessions[si];
+        let sel = s.selected_clips.clone();
+        let ti = match kind {
+            BounceKind::Clips => sel.iter().filter_map(|id| s.find_clip(*id)).map(|(t, _)| t).min(),
+            _ => Some(s.selected_track.min(s.tracks.len().saturating_sub(1))),
+        };
+        let Some(ti) = ti.filter(|t| *t < s.tracks.len() && !s.tracks[*t].is_bus()) else {
+            self.set_status("Select an audio track (or clips) to bounce.");
+            return;
+        };
+        let only = if kind == BounceKind::Clips { Some(sel.iter().copied().filter(|id| s.find_clip(*id).map(|(t, _)| t == ti).unwrap_or(false)).collect()) } else { None };
+        let state = s.solo_track_state(ti, only.as_ref());
+        let clips = &state.tracks[0].clips;
+        let (mut a, mut b) = (clips.iter().map(|c| c.start).min().unwrap_or(0), clips.iter().map(|c| c.end()).max().unwrap_or(0));
+        if kind == BounceKind::TimeSelection {
+            match s.sel_range() {
+                Some((x, y)) => {
+                    a = x;
+                    b = y;
+                }
+                None => {
+                    self.set_status("Make a time selection first.");
+                    return;
+                }
+            }
+        }
+        if b <= a {
+            self.set_status("Nothing to bounce: the track is empty there.");
+            return;
+        }
+        // Effect tails ring on for up to two seconds past the last clip.
+        let has_fx = state.tracks[0].fx_on && !state.tracks[0].fx.is_empty();
+        let tail = if has_fx && kind != BounceKind::TimeSelection { s.sample_rate as usize * 2 } else { 0 };
+        let name = format!("{} Bounce", s.tracks[ti].name);
+        let session_id = s.id;
+        self.spawn_job("Bounce to New Track".into(), JobKind::MtBounce { session_id, at: a, name }, move || Ok(mix_range(&state, a, b + tail)));
+    }
+
+    pub fn mt_finish_bounce(&mut self, session_id: u64, at: usize, name: String, audio: Vec<Vec<f32>>) {
+        let Some(si) = self.sessions.iter().position(|s| s.id == session_id) else { return };
+        let rate = self.sessions[si].sample_rate;
+        let id = self.new_id();
+        let n = self.docs.iter().filter(|d| d.name.starts_with(&name)).count();
+        let doc_name = if n == 0 { name.clone() } else { format!("{name} {}", n + 1) };
+        let mut doc = Document::new(id, doc_name.clone(), None, audio, rate, None, "Bounce");
+        doc.dirty = true;
+        self.docs.push(doc);
+        if self.active.is_none() {
+            self.active = Some(self.docs.len() - 1);
+        }
+        let s = &mut self.sessions[si];
+        let ti = s.add_track();
+        s.tracks[ti].name = doc_name.clone();
+        s.selected_track = ti;
+        self.mt_insert_doc(session_id, ti, at, id);
+        self.set_status(format!("Bounced to the new track {doc_name}"));
+    }
+
+    /// Stretch clips (rendered, keeping pitch) to `percent` of their length.
+    fn mt_stretch(&mut self, si: usize, sel: &[u64], percent: f32) {
+        let effects = self.effects.clone();
+        let Some(idx) = effects.iter().position(|e| e.id == "stretch_pitch") else { return };
+        let s = &self.sessions[si];
+        let sr = s.sample_rate;
+        // (clip, its audio, stretch relative to it: `percent` is of the
+        // original length, so 100 % undoes an earlier stretch's timing).
+        let mut inputs: Vec<(u64, Vec<Vec<f32>>, f32)> = Vec::new();
+        for id in sel {
+            let Some(c) = s.clip(*id) else { continue };
+            let Some(src) = s.sources.get(&c.source) else { continue };
+            let n = src.audio.len().clamp(1, 2);
+            let audio: Vec<Vec<f32>> = (0..n).map(|ch| (0..c.len).map(|i| c.source_index(i, src.audio[ch].len()).map(|k| src.audio[ch][k]).unwrap_or(0.0)).collect()).collect();
+            inputs.push((*id, audio, percent / c.stretch.max(1.0) * 100.0));
+        }
+        if inputs.is_empty() {
+            return;
+        }
+        let clips: Vec<(u64, usize)> = inputs.iter().map(|(id, a, _)| (*id, a.len())).collect();
+        let session_id = s.id;
+        self.spawn_job("Stretch Clip".into(), JobKind::MtStretch { session_id, clips, percent }, move || {
+            let mut out = Vec::new();
+            for (_, audio, f) in inputs {
+                let mut p = effects[idx].default_params();
+                p.set("stretch", crate::dsp::params::Value::F(f.clamp(25.0, 400.0)));
+                let ctx = crate::dsp::effects::Ctx { sample_rate: sr, channels: audio.len(), noise_print: None, sound_model: None };
+                out.extend(effects[idx].run(&audio, &ctx, &p)?);
+            }
+            Ok(out)
+        });
+    }
+
+    pub fn mt_finish_stretch(&mut self, session_id: u64, clips: Vec<(u64, usize)>, percent: f32, out: Vec<Vec<f32>>) {
+        let Some(si) = self.sessions.iter().position(|s| s.id == session_id) else { return };
+        let s = &mut self.sessions[si];
+        s.push_undo("Stretch Clip");
+        let mut it = out.into_iter();
+        for (cid, n) in clips {
+            let chans: Vec<Vec<f32>> = it.by_ref().take(n).collect();
+            let Some(c) = s.clip(cid).cloned() else { continue };
+            let len = chans.first().map(|x| x.len()).unwrap_or(0);
+            if len == 0 {
+                continue;
+            }
+            let sid = s.new_id();
+            let audio: Buffer = Arc::new(chans);
+            let peaks = Arc::new(PeakCache::build(&audio));
+            let base = c.name.split(" (stretched").next().unwrap_or(&c.name).to_string();
+            let name = format!("{base} (stretched {percent:.0}%)");
+            s.sources.insert(sid, Arc::new(Source { id: sid, name: name.clone(), doc_id: None, doc_version: 0, path: None, audio, peaks }));
+            let ratio = len as f64 / c.len.max(1) as f64;
+            if let Some(cm) = s.clip_mut(cid) {
+                cm.source = sid;
+                cm.offset = 0;
+                cm.len = len;
+                cm.looped = false;
+                cm.fade_in = (cm.fade_in as f64 * ratio) as usize;
+                cm.fade_out = ((cm.fade_out as f64 * ratio) as usize).min(len - cm.fade_in.min(len));
+                cm.stretch = percent;
+            }
+        }
+        s.touch();
+        self.set_status(format!("Stretched to {percent:.0}%"));
+    }
+
     fn mt_mixdown(&mut self, selection: bool) {
         let Some(s) = self.session() else { return };
         let (a, b) = match (selection, s.sel_range()) {
@@ -861,7 +1215,7 @@ impl App {
         if matches!(a, Action::MtSplit) && self.mode != Mode::Multitrack {
             return None;
         }
-        let session_cmd = matches!(a, Action::MtAddTrack | Action::MtAddBus | Action::MtDeleteTrack | Action::MtSplit | Action::MtMixdown(_));
+        let session_cmd = matches!(a, Action::MtAddTrack | Action::MtAddBus | Action::MtDeleteTrack | Action::MtSplit | Action::MtMixdown(_) | Action::MtClip(_));
         if session_cmd && self.session().is_none() {
             self.set_status("Create or open a multitrack session first (File > New > Multitrack Session).");
             return None;
@@ -908,6 +1262,7 @@ impl App {
                 }
             }
             Action::MtMixdown(sel) => self.mt_mixdown(sel),
+            Action::MtClip(cmd) => self.mt_clip_cmd(si, cmd),
             Action::PlayToggle | Action::Stop if recording_here => self.mt_stop_recording(),
             Action::PlayToggle => self.mt_play_toggle(),
             Action::Pause => {
@@ -981,9 +1336,12 @@ impl App {
                 s.selected_clips.clear();
                 let (t0, at) = (s.selected_track, s.cursor);
                 let mut end = at;
-                for (dt, mut c) in items {
+                let sr = s.sample_rate;
+                for (dt, c) in items {
+                    let mut c = c.with_own_fx(sr);
                     let t = s.audio_track_at_or_after((t0 + dt).min(s.tracks.len().saturating_sub(1)));
                     c.id = s.new_id();
+                    c.group = 0;
                     c.start += at;
                     end = end.max(c.end());
                     s.selected_clips.insert(c.id);
@@ -1114,22 +1472,20 @@ impl App {
     /// Live parameter change from an effect window editing a rack slot
     /// (found by its stable id, so moving or removing slots can't misdirect
     /// it). The first change made in a window is one undo step.
-    pub fn mt_set_fx_params(&mut self, session_id: u64, track: Option<u64>, slot_id: u64, p: crate::dsp::params::Params) {
+    pub fn mt_set_fx_params(&mut self, session_id: u64, owner: Option<u64>, slot_id: u64, p: crate::dsp::params::Params) {
         let Some(s) = self.sessions.iter_mut().find(|s| s.id == session_id) else { return };
-        let found = match track {
-            Some(tid) => s.tracks.iter().position(|t| t.id == tid).and_then(|ti| s.tracks[ti].fx.iter().position(|f| f.id == slot_id).map(|k| (Some(ti), k))),
-            None => s.master_fx.iter().position(|f| f.id == slot_id).map(|k| (None, k)),
-        };
-        let Some((ti, k)) = found else { return };
+        if !s.rack(owner).map(|(fx, _, _)| fx.iter().any(|f| f.id == slot_id)).unwrap_or(false) {
+            return;
+        }
         if self.mt.fx_undo_for != Some(slot_id) {
             s.push_undo("Effect Settings");
             self.mt.fx_undo_for = Some(slot_id);
         }
-        let slot = match ti {
-            Some(ti) => &mut s.tracks[ti].fx[k],
-            None => &mut s.master_fx[k],
-        };
-        slot.set_params(p);
+        if let Some((fx, _)) = s.rack_mut(owner) {
+            if let Some(slot) = fx.iter_mut().find(|f| f.id == slot_id) {
+                slot.set_params(p);
+            }
+        }
         s.touch();
     }
 
@@ -1140,11 +1496,16 @@ impl App {
         let effects = self.effects.clone();
         let mut pick_master: Option<bool> = None;
         let mut pick_track: Option<usize> = None;
+        let mut pick_clip: Option<u64> = None;
+        // A clip's rack, when chosen (Clip Effects… or the list below).
+        let rack_clip = self.mt.rack_clip.filter(|id| self.sessions[si].clip(*id).is_some());
+        let one_clip = (self.sessions[si].selected_clips.len() == 1).then(|| self.sessions[si].selected_clips.iter().next().copied()).flatten();
         {
             let s = &self.sessions[si];
-            let title = match owner {
-                Some(ti) => format!("{}{}", s.tracks[ti].name, if s.tracks[ti].is_bus() { " (bus)" } else { "" }),
-                None => "Master".to_string(),
+            let title = match (rack_clip, owner) {
+                (Some(cid), _) => s.clip(cid).map(|c| format!("Clip: {}", c.name)).unwrap_or_default(),
+                (None, Some(ti)) => format!("{}{}", s.tracks[ti].name, if s.tracks[ti].is_bus() { " (bus)" } else { "" }),
+                (None, None) => "Master".to_string(),
             };
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Rack:").color(TEXT_DIM()));
@@ -1156,29 +1517,39 @@ impl App {
                         }
                     }
                     ui.separator();
-                    if ui.selectable_label(owner.is_none(), "Master").clicked() {
+                    if ui.selectable_label(owner.is_none() && rack_clip.is_none(), "Master").clicked() {
                         pick_master = Some(true);
+                    }
+                    if let Some(cid) = one_clip.or(rack_clip) {
+                        ui.separator();
+                        let name = s.clip(cid).map(|c| c.name.clone()).unwrap_or_default();
+                        if ui.selectable_label(rack_clip == Some(cid), format!("Clip: {name}")).clicked() {
+                            pick_clip = Some(cid);
+                        }
                     }
                 });
             });
         }
         if let Some(i) = pick_track {
             self.mt.rack_master = false;
+            self.mt.rack_clip = None;
             self.sessions[si].selected_track = i;
         }
         if pick_master.is_some() {
             self.mt.rack_master = true;
+            self.mt.rack_clip = None;
+        }
+        if pick_clip.is_some() {
+            self.mt.rack_clip = pick_clip;
         }
         let Some((si, owner)) = self.rack_owner() else { return };
+        let rack_clip = self.mt.rack_clip.filter(|id| self.sessions[si].clip(*id).is_some());
         let session_id = self.sessions[si].id;
         let sr = self.sessions[si].sample_rate;
-        let owner_id = owner.map(|ti| self.sessions[si].tracks[ti].id);
+        let owner_id = rack_clip.or_else(|| owner.map(|ti| self.sessions[si].tracks[ti].id));
         let (slots, rack_on): (Vec<(Option<usize>, &'static str, bool)>, bool) = {
             let s = &self.sessions[si];
-            let (fx, on) = match owner {
-                Some(ti) => (&s.tracks[ti].fx, s.tracks[ti].fx_on),
-                None => (&s.master_fx, s.master_fx_on),
-            };
+            let Some((fx, on, _)) = s.rack(owner_id) else { return };
             (fx.iter().map(|f| (if f.is_missing() { None } else { effects.iter().position(|e| e.id == f.effect) }, f.effect, f.on)).collect(), on)
         };
         enum Op {
@@ -1276,7 +1647,8 @@ impl App {
         });
         ui.add_space(3.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Effects run live, before the fader. Only real-time effects are listed.").color(TEXT_DIM()).size(10.5));
+            let note = if rack_clip.is_some() { "Clip effects run before the track's rack, only while the clip plays." } else { "Effects run live, before the fader. Only real-time effects are listed." };
+            ui.label(RichText::new(note).color(TEXT_DIM()).size(10.5));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let tip = if rack_on { "Rack power: on" } else { "Rack power: off (bypassed)" };
                 if icon_button_sized(ui, Icon::Power, rack_on, tip, vec2(22.0, 22.0), true).clicked() {
@@ -1298,13 +1670,7 @@ impl App {
         }
         let mut edit_slot: Option<usize> = None;
         {
-            let (fx, on) = match owner {
-                Some(ti) => {
-                    let t = &mut s.tracks[ti];
-                    (&mut t.fx, &mut t.fx_on)
-                }
-                None => (&mut s.master_fx, &mut s.master_fx_on),
-            };
+            let Some((fx, on)) = s.rack_mut(owner_id) else { return };
             match op {
                 Op::Toggle(i) => fx[i].on = !fx[i].on,
                 Op::Remove(i) => {
@@ -1326,10 +1692,7 @@ impl App {
         }
         s.touch();
         if let Some(i) = edit_slot {
-            let slot = match owner {
-                Some(ti) => s.tracks[ti].fx.get(i).cloned(),
-                None => s.master_fx.get(i).cloned(),
-            };
+            let slot = s.rack(owner_id).and_then(|(fx, _, _)| fx.get(i).cloned());
             if let Some((slot, idx)) = slot.filter(|s| !s.is_missing()).and_then(|s| effects.iter().position(|e| e.id == s.effect).map(|i| (s, i))) {
                 let slot_id = slot.id;
                 self.mt.fx_undo_for = None;
@@ -1578,23 +1941,31 @@ impl App {
             // Automation lines.
             if t.show_env {
                 let area = env_area(lane);
-                for pan in [true, false] {
-                    let env = env_of(t, pan);
-                    let col = if pan { PAN_ENV_COL } else { VOL_ENV_COL };
-                    let constant = if pan { t.pan } else { t.volume_db };
+                for key in env_keys(t) {
+                    let env = env_of(t, key);
+                    let col = env_col(key);
+                    let constant = env_constant(t, key);
                     if env.is_empty() {
-                        let y = env_y(pan, constant, area);
+                        let y = env_y(t, key, constant, area);
                         clip_painter.line_segment([pos2(lane.left(), y), pos2(lane.right(), y)], Stroke::new(1.0_f32, col.linear_multiply(0.6)));
                         continue;
                     }
-                    let mut pts = vec![pos2(lane.left(), env_y(pan, env.points[0].1, area))];
+                    let step = env_range(t, key).2;
+                    let mut pts = vec![pos2(lane.left(), env_y(t, key, env.points[0].1, area))];
                     for (p, val) in &env.points {
-                        pts.push(pos2(v.x(*p as f64), env_y(pan, *val, area)));
+                        let x = v.x(*p as f64);
+                        // Switching lanes (mute, choices) hold until the next point.
+                        if step {
+                            if let Some(last) = pts.last().copied() {
+                                pts.push(pos2(x, last.y));
+                            }
+                        }
+                        pts.push(pos2(x, env_y(t, key, *val, area)));
                     }
-                    pts.push(pos2(lane.right(), env_y(pan, env.points.last().unwrap().1, area)));
+                    pts.push(pos2(lane.right(), env_y(t, key, env.points.last().unwrap().1, area)));
                     clip_painter.add(Shape::line(pts, Stroke::new(1.5_f32, col)));
                     for (p, val) in &env.points {
-                        let c = pos2(v.x(*p as f64), env_y(pan, *val, area));
+                        let c = pos2(v.x(*p as f64), env_y(t, key, *val, area));
                         if c.x >= lane.left() - 4.0 && c.x <= lane.right() + 4.0 {
                             clip_painter.rect_filled(Rect::from_center_size(c, vec2(7.0, 7.0)), 1.0, col);
                             clip_painter.rect_stroke(Rect::from_center_size(c, vec2(7.0, 7.0)), 1.0, Stroke::new(1.0_f32, Color32::BLACK));
@@ -1672,32 +2043,32 @@ impl App {
             Some((ti, best))
         };
         // Automation points and lines take priority over clips when shown.
-        let env_hit = |p: egui::Pos2, s: &Session| -> Option<(usize, bool, EnvHit)> {
+        let env_hit = |p: egui::Pos2, s: &Session| -> Option<(usize, EnvKey, EnvHit)> {
             let ti = track_at(p.y)?;
             let t = &s.tracks[ti];
             if !t.show_env {
                 return None;
             }
             let area = env_area(Rect::from_min_max(pos2(lanes_x, rows[ti].top()), rows[ti].max));
-            for pan in [false, true] {
-                for (i, (pp, val)) in env_of(t, pan).points.iter().enumerate() {
-                    let c = pos2(v.x(*pp as f64), env_y(pan, *val, area));
+            for key in env_keys(t) {
+                for (i, (pp, val)) in env_of(t, key).points.iter().enumerate() {
+                    let c = pos2(v.x(*pp as f64), env_y(t, key, *val, area));
                     if (c.x - p.x).abs() <= 6.0 && (c.y - p.y).abs() <= 6.0 {
-                        return Some((ti, pan, EnvHit::Point(i)));
+                        return Some((ti, key, EnvHit::Point(i)));
                     }
                 }
             }
             let over_clip = matches!(hit(p, s), Some((_, Some(_))));
-            for pan in [false, true] {
-                let env = env_of(t, pan);
+            for key in env_keys(t) {
+                let env = env_of(t, key);
                 // An empty envelope's flat line only catches clicks away from clips,
                 // so selecting a clip doesn't create automation by accident.
                 if env.is_empty() && over_clip {
                     continue;
                 }
-                let val = env.value_at(v.s(p.x).max(0.0) as usize).unwrap_or(if pan { t.pan } else { t.volume_db });
-                if (env_y(pan, val, area) - p.y).abs() <= 5.0 {
-                    return Some((ti, pan, EnvHit::Line));
+                let val = env.value_at(v.s(p.x).max(0.0) as usize).unwrap_or_else(|| env_constant(t, key));
+                if (env_y(t, key, val, area) - p.y).abs() <= 5.0 {
+                    return Some((ti, key, EnvHit::Line));
                 }
             }
             None
@@ -1739,18 +2110,18 @@ impl App {
             if let Some(p) = origin {
                 let pos = v.s(p.x).max(0.0);
                 let env = env_hit(p, s);
-                if let Some((ti, pan, h)) = env {
+                if let Some((ti, key, h)) = env {
                     s.selected_track = ti;
-                    s.push_undo(if pan { "Pan Automation" } else { "Volume Automation" });
+                    s.push_undo("Automation");
                     let idx = match h {
                         EnvHit::Point(i) => i,
                         EnvHit::Line => {
-                            let val = env_value(pan, p.y, env_area_of(ti));
-                            env_of_mut(&mut s.tracks[ti], pan).insert(pos as usize, val)
+                            let val = env_value(&s.tracks[ti], key, p.y, env_area_of(ti));
+                            env_of_mut(&mut s.tracks[ti], key).insert(pos as usize, val)
                         }
                     };
                     s.touch();
-                    self.mt.drag = Some(MtDrag::EnvPoint(ti, pan, idx));
+                    self.mt.drag = Some(MtDrag::EnvPoint(ti, key, idx));
                 }
                 match if env.is_some() { None } else { hit(p, s) } {
                     Some((ti, Some((id, zone)))) => {
@@ -1760,6 +2131,10 @@ impl App {
                                 s.selected_clips.clear();
                             }
                             s.selected_clips.insert(id);
+                        }
+                        // Grouped clips move together.
+                        if zone == Zone::Body {
+                            s.expand_groups();
                         }
                         let label = match zone {
                             Zone::Body => "Move Clip",
@@ -1820,7 +2195,14 @@ impl App {
                         let min_track = (items.iter().map(|i| i.2).min().unwrap_or(0) as i64).min(n_tracks - 1);
                         let max_track = (items.iter().map(|i| i.2).max().unwrap_or(0) as i64).clamp(min_track, n_tracks - 1);
                         let tdelta = (track_at(p.y).map(|t| t as i64).unwrap_or(*track0 as i64) - *track0 as i64).clamp(-min_track, n_tracks - 1 - max_track);
-                        let moves: Vec<(u64, usize, usize)> = items.iter().map(|(id, st0, t0)| (*id, (*st0 as f64 + delta).max(0.0) as usize, (*t0 as i64 + tdelta) as usize)).collect();
+                        // Clips locked in time keep their position (they can change track).
+                        let moves: Vec<(u64, usize, usize)> = items
+                            .iter()
+                            .map(|(id, st0, t0)| {
+                                let locked = s.clip(*id).map(|c| c.locked).unwrap_or(false);
+                                (*id, if locked { *st0 } else { (*st0 as f64 + delta).max(0.0) as usize }, (*t0 as i64 + tdelta) as usize)
+                            })
+                            .collect();
                         for (id, st0, t) in moves {
                             s.move_clip(id, st0, t);
                         }
@@ -1869,21 +2251,15 @@ impl App {
                             painter.text(p + vec2(14.0, -14.0), Align2::LEFT_BOTTOM, label, FontId::monospace(11.0), Color32::from_rgb(0xf2, 0xc2, 0x30));
                         }
                     }
-                    MtDrag::EnvPoint(ti, pan, idx) => {
-                        let (ti, pan, idx) = (*ti, *pan, *idx);
+                    MtDrag::EnvPoint(ti, key, idx) => {
+                        let (ti, key, idx) = (*ti, *key, *idx);
                         if ti < s.tracks.len() {
                             let area = env_area_of(ti);
-                            let val = env_value(pan, p.y, area);
-                            env_of_mut(&mut s.tracks[ti], pan).move_point(idx, pos as usize, val);
+                            let val = env_value(&s.tracks[ti], key, p.y, area);
+                            env_of_mut(&mut s.tracks[ti], key).move_point(idx, pos as usize, val);
                             s.touch();
-                            let label = if pan {
-                                if val.abs() < 0.5 { "C".to_string() } else if val < 0.0 { format!("L {:.0}", -val) } else { format!("R {val:.0}") }
-                            } else if val <= VOL_ENV_MIN {
-                                "-∞ dB".to_string()
-                            } else {
-                                format!("{val:+.1} dB")
-                            };
-                            painter.text(p + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, label, FontId::monospace(11.0), if pan { PAN_ENV_COL } else { VOL_ENV_COL });
+                            let label = env_label(&s.tracks[ti], key, val);
+                            painter.text(p + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, label, FontId::monospace(11.0), env_col(key));
                         }
                     }
                     MtDrag::Select(anchor) => {
@@ -1911,13 +2287,18 @@ impl App {
                 match if env.is_some() { None } else { hit(p, s) } {
                     Some((ti, Some((id, _)))) => {
                         s.selected_track = ti;
+                        let group = s.group_of(id);
                         if mods.command || mods.shift {
-                            if !s.selected_clips.remove(&id) {
-                                s.selected_clips.insert(id);
+                            if s.selected_clips.contains(&id) {
+                                for g in &group {
+                                    s.selected_clips.remove(g);
+                                }
+                            } else {
+                                s.selected_clips.extend(group);
                             }
                         } else {
                             s.selected_clips.clear();
-                            s.selected_clips.insert(id);
+                            s.selected_clips.extend(group);
                         }
                     }
                     Some((ti, None)) => {
@@ -1935,14 +2316,14 @@ impl App {
         if resp.double_clicked() {
             let p = resp.interact_pointer_pos();
             let env = p.and_then(|p| env_hit(p, s));
-            if let Some((ti, pan, EnvHit::Point(i))) = env {
+            if let Some((ti, key, EnvHit::Point(i))) = env {
                 s.push_undo("Delete Automation Point");
-                env_of_mut(&mut s.tracks[ti], pan).points.remove(i);
+                env_of_mut(&mut s.tracks[ti], key).points.remove(i);
                 s.touch();
-            } else if let (Some((ti, pan, EnvHit::Line)), Some(p)) = (env, p) {
-                s.push_undo(if pan { "Pan Automation" } else { "Volume Automation" });
-                let val = env_value(pan, p.y, env_area_of(ti));
-                env_of_mut(&mut s.tracks[ti], pan).insert(v.s(p.x).max(0.0) as usize, val);
+            } else if let (Some((ti, key, EnvHit::Line)), Some(p)) = (env, p) {
+                s.push_undo("Automation");
+                let val = env_value(&s.tracks[ti], key, p.y, env_area_of(ti));
+                env_of_mut(&mut s.tracks[ti], key).insert(v.s(p.x).max(0.0) as usize, val);
                 s.touch();
             } else if env.is_none() {
                 if let Some((_, Some((id, _)))) = resp.interact_pointer_pos().and_then(|p| hit(p, s)) {
@@ -1952,7 +2333,7 @@ impl App {
         }
         if resp.secondary_clicked() {
             let env = resp.interact_pointer_pos().and_then(|p| env_hit(p, s));
-            self.mt.context_env = env.map(|(ti, pan, h)| (ti, pan, if let EnvHit::Point(i) = h { Some(i) } else { None }));
+            self.mt.context_env = env.map(|(ti, key, h)| (ti, key, if let EnvHit::Point(i) = h { Some(i) } else { None }));
             let h = if env.is_some() { None } else { resp.interact_pointer_pos().and_then(|p| hit(p, s)) };
             self.mt.context_clip = h.and_then(|h| h.1.map(|c| c.0));
             self.mt.context_track = h.map(|h| h.0);
@@ -2041,6 +2422,10 @@ impl App {
         let buses: Vec<(u64, String)> = s.tracks.iter().filter(|t| t.is_bus()).map(|t| (t.id, t.name.clone())).collect();
         let mut route: Vec<(usize, Option<u64>)> = Vec::new();
         let mut show_rack: Option<usize> = None;
+        let mut lane_op: Option<(usize, LaneOp)> = None;
+        // (track, (arm, volume) before this frame's header edits)
+        let mut group_follow: Vec<(usize, (bool, f32))> = Vec::new();
+        let effects = self.effects.clone();
         for ti in 0..n_tracks {
             let row = rows[ti];
             if row.bottom() < body.top() || row.top() > body.bottom() {
@@ -2055,7 +2440,63 @@ impl App {
             if hresp.clicked() {
                 s.selected_track = ti;
             }
+            let tr = &s.tracks[ti];
             hresp.context_menu(|ui| {
+                ui.menu_button("Automation", |ui| {
+                    if ui.selectable_label(tr.lane_view == 0, "Volume and Pan").clicked() {
+                        lane_op = Some((ti, LaneOp::View(0)));
+                        ui.close_menu();
+                    }
+                    for (i, l) in tr.lanes.iter().enumerate() {
+                        if ui.selectable_label(tr.lane_view == i + 1, &l.name).clicked() {
+                            lane_op = Some((ti, LaneOp::View(i + 1)));
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                    if !tr.lanes.iter().any(|l| l.target == session::AutoTarget::Mute) && ui.button("Add Mute Lane").clicked() {
+                        lane_op = Some((ti, LaneOp::Add(session::AutoTarget::Mute, 0.0, 1.0, true, "Mute".into())));
+                        ui.close_menu();
+                    }
+                    for slot in &tr.fx {
+                        let Some(def) = effects.iter().find(|e| e.id == slot.effect) else { continue };
+                        ui.menu_button(format!("Add {} Lane", def.name), |ui| {
+                            for pd in &def.params {
+                                let range = match &pd.kind {
+                                    crate::dsp::params::Kind::Float { min, max, .. } => Some((*min, *max, false)),
+                                    crate::dsp::params::Kind::Choice { options, .. } => Some((0.0, options.len().saturating_sub(1) as f32, true)),
+                                    crate::dsp::params::Kind::Toggle { .. } => Some((0.0, 1.0, true)),
+                                    _ => None,
+                                };
+                                let Some((lo, hi, step)) = range else { continue };
+                                let exists = tr.lanes.iter().any(|l| l.target == session::AutoTarget::Param { slot: slot.id, key: pd.key });
+                                if ui.add_enabled(!exists, egui::Button::new(pd.label)).clicked() {
+                                    lane_op = Some((ti, LaneOp::Add(session::AutoTarget::Param { slot: slot.id, key: pd.key }, lo, hi, step, format!("{}: {}", def.name, pd.label))));
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                    }
+                    if tr.lane_view > 0 {
+                        ui.separator();
+                        if ui.button("Delete This Lane").clicked() {
+                            lane_op = Some((ti, LaneOp::Delete(tr.lane_view - 1)));
+                            ui.close_menu();
+                        }
+                    }
+                });
+                ui.menu_button("Track Group", |ui| {
+                    for g in 0..=8u8 {
+                        let label = if g == 0 { "None".to_string() } else { format!("Group {g}") };
+                        if ui.selectable_label(tr.group == g, label).clicked() {
+                            lane_op = Some((ti, LaneOp::Group(g)));
+                            ui.close_menu();
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("Tracks in a group share mute, solo, arm and volume changes");
+                ui.separator();
                 if ui.button("Add Audio Track").clicked() {
                     add_track = true;
                     ui.close_menu();
@@ -2072,6 +2513,7 @@ impl App {
             let mut child = ui.child_ui(inner, Layout::top_down(Align::Min), None);
             child.set_clip_rect(inner.intersect(header_clip));
             let t = &mut s.tracks[ti];
+            let before = (t.arm, t.volume_db);
             child.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
                 let r = ui.add(egui::TextEdit::singleline(&mut t.name).desired_width(88.0).font(FontId::proportional(12.0)));
@@ -2083,7 +2525,7 @@ impl App {
                     ("M", t.mute, "Mute", Color32::from_rgb(0x4d, 0xa3, 0xff)),
                     ("S", t.solo, "Solo", Color32::from_rgb(0xe8, 0xc4, 0x3a)),
                     ("R", t.arm, "Arm for Record", RECORD()),
-                    ("A", t.show_env, "Show volume (yellow) and pan (blue) automation", VOL_ENV_COL),
+                    ("A", t.show_env, "Show automation: volume (yellow) and pan (blue). Right-click the track header for mute and effect lanes.", VOL_ENV_COL),
                 ] {
                     if is_bus && (label == "S" || label == "R") {
                         continue;
@@ -2161,6 +2603,9 @@ impl App {
                     }
                 });
             }
+            if t.group != 0 && (t.arm != before.0 || t.volume_db != before.1) {
+                group_follow.push((ti, before));
+            }
             // Drag the bottom edge to resize the track.
             let edge = Rect::from_min_max(pos2(row.left(), row.bottom() - 3.0), pos2(lanes_x, row.bottom() + 2.0));
             let er = ui.interact(edge, ui.id().with(("mt_resize", s.id, ti)), Sense::drag()).on_hover_cursor(CursorIcon::ResizeVertical);
@@ -2172,11 +2617,35 @@ impl App {
         // Mute/solo are undoable; level and name changes just mark the session.
         for (ti, mute) in toggles {
             s.push_undo(if mute { "Mute Track" } else { "Solo Track" });
-            let t = &mut s.tracks[ti];
-            if mute {
-                t.mute = !t.mute;
-            } else {
-                t.solo = !t.solo;
+            let on = if mute { !s.tracks[ti].mute } else { !s.tracks[ti].solo };
+            let g = s.tracks[ti].group;
+            for (k, t) in s.tracks.iter_mut().enumerate() {
+                if k == ti || (g != 0 && t.group == g) {
+                    if mute {
+                        t.mute = on;
+                    } else {
+                        t.solo = on;
+                    }
+                }
+            }
+            changed = true;
+        }
+        // Grouped tracks follow arm and volume changes.
+        for (ti, before) in group_follow {
+            let t = &s.tracks[ti];
+            let (g, arm, dv) = (t.group, t.arm, t.volume_db - before.1);
+            if g == 0 {
+                continue;
+            }
+            for (k, x) in s.tracks.iter_mut().enumerate() {
+                if k != ti && x.group == g {
+                    if arm != before.0 && !x.is_bus() {
+                        x.arm = arm;
+                    }
+                    if dv != 0.0 {
+                        x.volume_db = (x.volume_db + dv).clamp(-96.0, 12.0);
+                    }
+                }
             }
             changed = true;
         }
@@ -2185,6 +2654,37 @@ impl App {
         }
         if view_changed {
             s.dirty = true;
+        }
+        if let Some((ti, op)) = lane_op {
+            let t = &mut s.tracks[ti];
+            match op {
+                LaneOp::View(v) => {
+                    t.lane_view = v;
+                    t.show_env = true;
+                    s.dirty = true;
+                }
+                LaneOp::Add(target, min, max, step, name) => {
+                    s.push_undo("Add Automation Lane");
+                    let t = &mut s.tracks[ti];
+                    t.lanes.push(session::AutoLane { target, env: Envelope::default(), min, max, step, name });
+                    t.lane_view = t.lanes.len();
+                    t.show_env = true;
+                    s.touch();
+                }
+                LaneOp::Group(g) => {
+                    t.group = g;
+                    s.touch();
+                }
+                LaneOp::Delete(i) => {
+                    s.push_undo("Delete Automation Lane");
+                    let t = &mut s.tracks[ti];
+                    if i < t.lanes.len() {
+                        t.lanes.remove(i);
+                    }
+                    t.lane_view = 0;
+                    s.touch();
+                }
+            }
         }
         for (ti, out) in route {
             s.push_undo("Track Output");
@@ -2234,12 +2734,12 @@ impl App {
         let ctx_env = self.mt.context_env;
         let mut menu_action: Option<Action> = None;
         resp.context_menu(|ui| {
-            if let Some((ti, pan, point)) = ctx_env.filter(|e| e.0 < s.tracks.len()) {
-                let what = if pan { "Pan" } else { "Volume" };
+            if let Some((ti, key, point)) = ctx_env.filter(|e| e.0 < s.tracks.len()) {
+                let what = env_name(&s.tracks[ti], key);
                 if let Some(i) = point {
                     if ui.button("Delete Point").clicked() {
                         s.push_undo("Delete Automation Point");
-                        let e = env_of_mut(&mut s.tracks[ti], pan);
+                        let e = env_of_mut(&mut s.tracks[ti], key);
                         if i < e.points.len() {
                             e.points.remove(i);
                         }
@@ -2248,8 +2748,8 @@ impl App {
                     }
                 }
                 if ui.button(format!("Clear {what} Automation")).clicked() {
-                    s.push_undo(if pan { "Clear Pan Automation" } else { "Clear Volume Automation" });
-                    env_of_mut(&mut s.tracks[ti], pan).points.clear();
+                    s.push_undo("Clear Automation");
+                    env_of_mut(&mut s.tracks[ti], key).points.clear();
                     s.touch();
                     ui.close_menu();
                 }
@@ -2265,6 +2765,43 @@ impl App {
                 }
                 if ui.button("Delete                              Del").clicked() {
                     menu_action = Some(Action::Delete);
+                    ui.close_menu();
+                }
+                ui.separator();
+                let c0 = s.clip(id).cloned();
+                let n_sel = s.selected_clips.len();
+                if n_sel >= 2 && ui.button("Group Clips").clicked() {
+                    menu_action = Some(Action::MtClip(ClipCmd::Group));
+                    ui.close_menu();
+                }
+                if c0.as_ref().map(|c| c.group != 0).unwrap_or(false) && ui.button("Ungroup Clips").clicked() {
+                    menu_action = Some(Action::MtClip(ClipCmd::Ungroup));
+                    ui.close_menu();
+                }
+                let mut looped = c0.as_ref().map(|c| c.looped).unwrap_or(false);
+                if ui.checkbox(&mut looped, "Loop").on_hover_text("Repeat the source; drag the right edge to extend").changed() {
+                    menu_action = Some(Action::MtClip(ClipCmd::ToggleLoop));
+                    ui.close_menu();
+                }
+                let mut locked = c0.as_ref().map(|c| c.locked).unwrap_or(false);
+                if ui.checkbox(&mut locked, "Lock in Time").changed() {
+                    menu_action = Some(Action::MtClip(ClipCmd::ToggleLock));
+                    ui.close_menu();
+                }
+                if ui.button("Clip Effects…").clicked() {
+                    menu_action = Some(Action::MtClip(ClipCmd::ShowFx));
+                    ui.close_menu();
+                }
+                if ui.button("Stretch…").clicked() {
+                    menu_action = Some(Action::MtClip(ClipCmd::StretchDialog));
+                    ui.close_menu();
+                }
+                if ui.button("Match Clip Volume…").clicked() {
+                    menu_action = Some(Action::MtClip(ClipCmd::MatchDialog));
+                    ui.close_menu();
+                }
+                if ui.button("Bounce Selected Clips to New Track").clicked() {
+                    menu_action = Some(Action::MtClip(ClipCmd::Bounce(BounceKind::Clips)));
                     ui.close_menu();
                 }
                 if let Some(c) = s.clip_mut(id) {
@@ -2541,7 +3078,16 @@ fn draw_clip(p: &egui::Painter, r: Rect, c: &Clip, src: Option<&Source>, track_c
     p.rect_filled(bar, Rounding { nw: 3.0, ne: 3.0, sw: 0.0, se: 0.0 }, if selected { base.linear_multiply(0.85) } else { base.linear_multiply(0.5) });
     let text_x = r.left().max(lane.left()) + 4.0;
     if names && r.right() - text_x > 20.0 {
-        let label = if c.gain_db.abs() > 0.05 { format!("{}  ({:+.1} dB)", c.name, c.gain_db) } else { c.name.clone() };
+        let mut label = if c.gain_db.abs() > 0.05 { format!("{}  ({:+.1} dB)", c.name, c.gain_db) } else { c.name.clone() };
+        // Badges for the clip's properties.
+        for (on, badge) in [(c.group != 0, " ⛓"), (c.looped, " ⟲"), (c.locked, " 🔒"), (c.fx_on && !c.fx.is_empty(), " fx"), ((c.stretch - 100.0).abs() > 0.05, "")] {
+            if on {
+                label.push_str(badge);
+            }
+        }
+        if (c.stretch - 100.0).abs() > 0.05 {
+            label.push_str(&format!("  {:.0}%", c.stretch));
+        }
         p.with_clip_rect(bar.intersect(lane)).text(pos2(text_x, bar.center().y), Align2::LEFT_CENTER, label, FontId::proportional(10.5), if selected { Color32::BLACK } else { Color32::WHITE });
     }
     let wave = Rect::from_min_max(pos2(r.left(), bar.bottom()), r.max);
@@ -2561,8 +3107,14 @@ fn draw_clip(p: &egui::Painter, r: Rect, c: &Clip, src: Option<&Source>, track_c
                 let t0 = v.s(x) - c.start as f64;
                 let t1 = t0 + v.spp();
                 if t1 > 0.0 && t0 < c.len as f64 {
-                    let a = c.offset + t0.max(0.0) as usize;
-                    let b = (c.offset + (t1.ceil() as usize).min(c.len)).max(a + 1).min(src.len());
+                    let i0 = t0.max(0.0) as usize;
+                    let i1 = (t1.ceil() as usize).min(c.len);
+                    // Looped clips wrap around the source.
+                    let (a, b) = match (c.source_index(i0, src.len()), c.source_index(i1.saturating_sub(1), src.len())) {
+                        (Some(a), Some(b1)) if b1 >= a => (a, (b1 + 1).min(src.len())),
+                        (Some(a), _) => (a, if c.looped { src.len() } else { (c.offset + i1).max(a + 1).min(src.len()) }),
+                        _ => (src.len(), src.len()),
+                    };
                     if a < b {
                         let (lo, hi) = src.peaks.min_max(&src.audio, ch, a, b);
                         let g = gain * c.envelope(t0.max(0.0) as usize);

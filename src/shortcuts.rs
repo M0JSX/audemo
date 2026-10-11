@@ -6,6 +6,7 @@ use eframe::egui::{self, Key, Modifiers, RichText};
 
 use crate::app::{Action, App, MarkerKind, Mode, Tool};
 use crate::markers_ui::ZeroMode;
+use crate::mt_ui::{BounceKind, ClipCmd};
 use crate::theme::*;
 
 /// A key with modifiers. `ctrl` is Ctrl on Windows and Linux, ⌘ on macOS.
@@ -206,6 +207,16 @@ pub const COMMANDS: &[Command] = &[
     c("mt_add_track", "Add Audio Track", "Multitrack", &["Alt+A"]),
     c("mt_add_bus", "Add Bus Track", "Multitrack", &["Alt+B"]),
     c("mt_split", "Split Clip at Playhead", "Multitrack", &["Ctrl+K"]),
+    c("mt_group", "Group Clips", "Multitrack", &["Ctrl+G"]),
+    c("mt_ungroup", "Ungroup Clips", "Multitrack", &["Ctrl+Shift+G"]),
+    c("mt_loop", "Loop Clip", "Multitrack", &[]),
+    c("mt_lock", "Lock in Time", "Multitrack", &[]),
+    c("mt_clip_fx", "Clip Effects", "Multitrack", &[]),
+    c("mt_stretch", "Stretch Clip", "Multitrack", &[]),
+    c("mt_match", "Match Clip Volume", "Multitrack", &[]),
+    c("mt_bounce", "Bounce Track to New Track", "Multitrack", &[]),
+    c("mt_bounce_sel", "Bounce Time Selection to New Track", "Multitrack", &[]),
+    c("mt_bounce_clips", "Bounce Selected Clips to New Track", "Multitrack", &[]),
 ];
 
 /// The action a command runs.
@@ -272,6 +283,16 @@ pub fn action(id: &str) -> Option<Action> {
         "mt_add_track" => Action::MtAddTrack,
         "mt_add_bus" => Action::MtAddBus,
         "mt_split" => Action::MtSplit,
+        "mt_group" => Action::MtClip(ClipCmd::Group),
+        "mt_ungroup" => Action::MtClip(ClipCmd::Ungroup),
+        "mt_loop" => Action::MtClip(ClipCmd::ToggleLoop),
+        "mt_lock" => Action::MtClip(ClipCmd::ToggleLock),
+        "mt_clip_fx" => Action::MtClip(ClipCmd::ShowFx),
+        "mt_stretch" => Action::MtClip(ClipCmd::StretchDialog),
+        "mt_match" => Action::MtClip(ClipCmd::MatchDialog),
+        "mt_bounce" => Action::MtClip(ClipCmd::Bounce(BounceKind::Track)),
+        "mt_bounce_sel" => Action::MtClip(ClipCmd::Bounce(BounceKind::TimeSelection)),
+        "mt_bounce_clips" => Action::MtClip(ClipCmd::Bounce(BounceKind::Clips)),
         _ => return None,
     })
 }

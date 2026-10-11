@@ -78,11 +78,40 @@ pub struct Clip {
     pub fade_in_cos: bool,
     pub fade_out_cos: bool,
     pub mute: bool,
+    /// Clips with the same non-zero group select and move together.
+    pub group: u64,
+    /// Repeat the source when the clip is longer than it.
+    pub looped: bool,
+    /// Lock in Time: can't be moved along the timeline.
+    pub locked: bool,
+    /// Clip effects rack (runs before the track's).
+    pub fx: Vec<FxSlot>,
+    pub fx_on: bool,
+    /// Stretch applied when the clip was rendered (100 = none), for display.
+    pub stretch: f32,
 }
 
 impl Clip {
     pub fn end(&self) -> usize {
         self.start + self.len
+    }
+
+    /// Source sample for `i` samples into the clip (None past the source's end).
+    pub fn source_index(&self, i: usize, src_len: usize) -> Option<usize> {
+        let idx = self.offset + i;
+        if idx < src_len {
+            Some(idx)
+        } else if self.looped && src_len > 0 {
+            Some(idx % src_len)
+        } else {
+            None
+        }
+    }
+
+    /// The same clip with its own effect instances (after a split or paste).
+    pub fn with_own_fx(mut self, sample_rate: u32) -> Clip {
+        self.fx = self.fx.iter().map(|s| s.fresh(sample_rate)).collect();
+        self
     }
 
     /// Fade/gain multiplier at `i` samples into the clip.
@@ -136,6 +165,16 @@ impl Envelope {
         Some(y0 + (y1 - y0) * t)
     }
 
+    /// The value of the last point at or before `pos` (no ramps: switches).
+    pub fn hold_at(&self, pos: usize) -> Option<f32> {
+        let p = &self.points;
+        if p.is_empty() {
+            return None;
+        }
+        let i = p.partition_point(|q| q.0 <= pos);
+        Some(p[i.saturating_sub(1)].1)
+    }
+
     /// Add a point; returns its index.
     pub fn insert(&mut self, pos: usize, v: f32) -> usize {
         let i = self.points.partition_point(|q| q.0 < pos);
@@ -153,11 +192,11 @@ impl Envelope {
         self.points[i] = (pos.clamp(lo, hi), v);
     }
 
-    fn to_text(&self) -> String {
+    pub fn to_text(&self) -> String {
         self.points.iter().map(|(p, v)| format!("{p}:{v}")).collect::<Vec<_>>().join(",")
     }
 
-    fn parse(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         let mut points: Vec<(usize, f32)> = s
             .split(',')
             .filter_map(|kv| {
@@ -287,6 +326,8 @@ pub struct FxSlot {
     /// its settings so saving the session doesn't lose them. Shared with the
     /// slot's undo copies, like `rt`.
     pub missing: Arc<std::sync::atomic::AtomicBool>,
+    /// Audio track whose clips drive this compressor or gate (sidechain).
+    pub sidechain: Option<u64>,
 }
 
 impl FxSlot {
@@ -294,14 +335,14 @@ impl FxSlot {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let e = rt::make(effect, &params, sample_rate)?;
         let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Some(FxSlot { id, effect, params, on: true, rt: Arc::new(Mutex::new(e)), missing: Arc::new(false.into()) })
+        Some(FxSlot { id, effect, params, on: true, rt: Arc::new(Mutex::new(e)), missing: Arc::new(false.into()), sidechain: None })
     }
 
     /// A slot for a plug-in that can't be loaded right now.
     pub fn placeholder(effect: &'static str, params: Params) -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1 << 40);
         let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        FxSlot { id, effect, params, on: true, rt: Arc::new(Mutex::new(Box::new(rt::Passthrough))), missing: Arc::new(true.into()) }
+        FxSlot { id, effect, params, on: true, rt: Arc::new(Mutex::new(Box::new(rt::Passthrough))), missing: Arc::new(true.into()), sidechain: None }
     }
 
     pub fn is_missing(&self) -> bool {
@@ -347,7 +388,7 @@ impl FxSlot {
     }
 
     /// The same effect and settings with its own, fresh state (for mixdown).
-    fn fresh(&self, sample_rate: u32) -> FxSlot {
+    pub fn fresh(&self, sample_rate: u32) -> FxSlot {
         let mut s = self.clone();
         // A missing plug-in passes audio through in mixdowns too.
         if self.is_missing() {
@@ -362,7 +403,7 @@ impl FxSlot {
 
 impl PartialEq for FxSlot {
     fn eq(&self, o: &Self) -> bool {
-        self.effect == o.effect && self.params == o.params && self.on == o.on
+        self.effect == o.effect && self.params == o.params && self.on == o.on && self.sidechain == o.sidechain
     }
 }
 
@@ -378,6 +419,37 @@ pub enum TrackKind {
     Audio,
     /// No clips: mixes the tracks routed or sent to it.
     Bus,
+}
+
+/// What an extra automation lane controls.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AutoTarget {
+    /// Track mute (on above half way).
+    Mute,
+    /// A parameter of an effect in the track's rack (slot id, parameter key).
+    Param { slot: u64, key: &'static str },
+}
+
+/// An automation lane besides volume and pan.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AutoLane {
+    pub target: AutoTarget,
+    pub env: Envelope,
+    /// Value range, and whether values switch rather than ramp.
+    pub min: f32,
+    pub max: f32,
+    pub step: bool,
+    pub name: String,
+}
+
+impl AutoLane {
+    pub fn value_at(&self, pos: usize) -> Option<f32> {
+        if self.step {
+            self.env.hold_at(pos)
+        } else {
+            self.env.value_at(pos)
+        }
+    }
 }
 
 /// A send from a track to a bus.
@@ -416,6 +488,12 @@ pub struct Track {
     pub fx: Vec<FxSlot>,
     /// Rack power.
     pub fx_on: bool,
+    /// Mute and effect-parameter automation.
+    pub lanes: Vec<AutoLane>,
+    /// The automation shown: 0 = volume and pan, k = lane k - 1.
+    pub lane_view: usize,
+    /// Tracks in the same group (1–8) share mute, solo, arm and volume changes.
+    pub group: u8,
 }
 
 impl Track {
@@ -439,6 +517,38 @@ impl Track {
             sends: Vec::new(),
             fx: Vec::new(),
             fx_on: true,
+            lanes: Vec::new(),
+            lane_view: 0,
+            group: 0,
+        }
+    }
+
+    /// Muted by automation at `pos`.
+    pub fn auto_muted(&self, pos: usize) -> bool {
+        self.lanes.iter().any(|l| l.target == AutoTarget::Mute && l.value_at(pos).map(|v| v >= 0.5).unwrap_or(false))
+    }
+
+    pub fn has_mute_lane(&self) -> bool {
+        self.lanes.iter().any(|l| l.target == AutoTarget::Mute && !l.env.is_empty())
+    }
+
+    /// Push automated effect parameters at `pos` to the effect instances
+    /// (their stored settings are left alone).
+    pub fn apply_param_automation(&self, pos: usize) {
+        for lane in &self.lanes {
+            let AutoTarget::Param { slot, key } = &lane.target else { continue };
+            let Some(v) = lane.value_at(pos) else { continue };
+            let Some(s) = self.fx.iter().find(|f| f.id == *slot) else { continue };
+            let mut p = s.params.clone();
+            let val = match p.values.iter().find(|(k, _)| k == key).map(|(_, v)| v) {
+                Some(crate::dsp::params::Value::C(_)) => crate::dsp::params::Value::C(v.round().max(0.0) as usize),
+                Some(crate::dsp::params::Value::B(_)) => crate::dsp::params::Value::B(v >= 0.5),
+                _ => crate::dsp::params::Value::F(v),
+            };
+            p.set(key, val);
+            if let Ok(mut e) = s.rt.lock() {
+                e.set_params(&p);
+            }
         }
     }
 
@@ -488,6 +598,9 @@ impl MixState {
         let mut m = self.clone();
         for t in m.tracks.iter_mut() {
             t.fx = t.fx.iter().map(|s| s.fresh(sr)).collect();
+            for c in t.clips.iter_mut() {
+                c.fx = c.fx.iter().map(|s| s.fresh(sr)).collect();
+            }
         }
         m.master_fx = m.master_fx.iter().map(|s| s.fresh(sr)).collect();
         m
@@ -720,7 +833,8 @@ impl Session {
 
     /// Clear every effect's state (before playback starts).
     pub fn reset_fx(&self) {
-        for slot in self.tracks.iter().flat_map(|t| t.fx.iter()).chain(self.master_fx.iter()) {
+        let clip_fx = self.tracks.iter().flat_map(|t| t.clips.iter()).flat_map(|c| c.fx.iter());
+        for slot in self.tracks.iter().flat_map(|t| t.fx.iter()).chain(self.master_fx.iter()).chain(clip_fx) {
             slot.reset();
         }
     }
@@ -771,11 +885,131 @@ impl Session {
             fade_in_cos: false,
             fade_out_cos: false,
             mute: false,
+            group: 0,
+            looped: false,
+            locked: false,
+            fx: Vec::new(),
+            fx_on: true,
+            stretch: 100.0,
         });
         self.selected_clips.clear();
         self.selected_clips.insert(id);
         self.touch();
         Some(id)
+    }
+
+    /// An effects rack by owner: None = master, else a track's or a clip's
+    /// id. Returns (slots, rack power, owner name).
+    pub fn rack(&self, owner: Option<u64>) -> Option<(&Vec<FxSlot>, bool, String)> {
+        match owner {
+            None => Some((&self.master_fx, self.master_fx_on, "Master".into())),
+            Some(id) => {
+                if let Some(t) = self.tracks.iter().find(|t| t.id == id) {
+                    return Some((&t.fx, t.fx_on, t.name.clone()));
+                }
+                self.clip(id).map(|c| (&c.fx, c.fx_on, format!("Clip \"{}\"", c.name)))
+            }
+        }
+    }
+
+    pub fn rack_mut(&mut self, owner: Option<u64>) -> Option<(&mut Vec<FxSlot>, &mut bool)> {
+        match owner {
+            None => Some((&mut self.master_fx, &mut self.master_fx_on)),
+            Some(id) => {
+                if let Some(ti) = self.tracks.iter().position(|t| t.id == id) {
+                    let t = &mut self.tracks[ti];
+                    return Some((&mut t.fx, &mut t.fx_on));
+                }
+                self.clip_mut(id).map(|c| (&mut c.fx, &mut c.fx_on))
+            }
+        }
+    }
+
+    /// Add every clip grouped with a selected clip to the selection.
+    pub fn expand_groups(&mut self) {
+        let groups: HashSet<u64> = self.tracks.iter().flat_map(|t| t.clips.iter()).filter(|c| c.group != 0 && self.selected_clips.contains(&c.id)).map(|c| c.group).collect();
+        if groups.is_empty() {
+            return;
+        }
+        for c in self.tracks.iter().flat_map(|t| t.clips.iter()) {
+            if groups.contains(&c.group) {
+                self.selected_clips.insert(c.id);
+            }
+        }
+    }
+
+    /// The clip and the rest of its group.
+    pub fn group_of(&self, id: u64) -> Vec<u64> {
+        match self.clip(id).map(|c| c.group).filter(|g| *g != 0) {
+            Some(g) => self.tracks.iter().flat_map(|t| t.clips.iter()).filter(|c| c.group == g).map(|c| c.id).collect(),
+            None => vec![id],
+        }
+    }
+
+    /// Clip > Group Clips: true if a group was made.
+    pub fn group_selected(&mut self) -> bool {
+        if self.selected_clips.len() < 2 {
+            return false;
+        }
+        self.push_undo("Group Clips");
+        let g = self.new_id();
+        let sel = self.selected_clips.clone();
+        for c in self.tracks.iter_mut().flat_map(|t| t.clips.iter_mut()) {
+            if sel.contains(&c.id) {
+                c.group = g;
+            }
+        }
+        self.touch();
+        true
+    }
+
+    pub fn ungroup_selected(&mut self) -> bool {
+        let sel = self.selected_clips.clone();
+        if !self.tracks.iter().flat_map(|t| t.clips.iter()).any(|c| sel.contains(&c.id) && c.group != 0) {
+            return false;
+        }
+        self.push_undo("Ungroup Clips");
+        for c in self.tracks.iter_mut().flat_map(|t| t.clips.iter_mut()) {
+            if sel.contains(&c.id) {
+                c.group = 0;
+            }
+        }
+        self.touch();
+        true
+    }
+
+    /// The audio a clip plays (gain and fades applied, effects not).
+    pub fn clip_audio(&self, id: u64) -> Option<Vec<Vec<f32>>> {
+        let c = self.clip(id)?;
+        let src = self.sources.get(&c.source)?;
+        let n = src.audio.len().clamp(1, 2);
+        let g = db_to_lin(c.gain_db);
+        Some(
+            (0..n)
+                .map(|ch| {
+                    let s = &src.audio[ch];
+                    (0..c.len).map(|i| c.source_index(i, s.len()).map(|k| s[k] * g * c.envelope(i)).unwrap_or(0.0)).collect()
+                })
+                .collect(),
+        )
+    }
+
+    /// A copy of the mix holding only track `ti` (its rack and fader
+    /// included), routed straight to an untouched master: for Bounce.
+    pub fn solo_track_state(&self, ti: usize, only_clips: Option<&HashSet<u64>>) -> MixState {
+        let mut m = self.mix_state();
+        let mut t = m.tracks[ti].clone();
+        t.mute = false;
+        t.solo = false;
+        t.output = None;
+        t.sends.clear();
+        if let Some(ids) = only_clips {
+            t.clips.retain(|c| ids.contains(&c.id));
+        }
+        m.tracks = vec![t];
+        m.master_db = 0.0;
+        m.master_fx.clear();
+        m
     }
 
     pub fn find_clip(&self, id: u64) -> Option<(usize, usize)> {
@@ -835,7 +1069,8 @@ impl Session {
     pub fn trim_end(&mut self, id: u64, new_end: usize) {
         let Some(c) = self.clip(id).cloned() else { return };
         let src_len = self.source_len(c.source);
-        let max_end = c.start + src_len.saturating_sub(c.offset);
+        // A looped clip can be extended to repeat its source (up to 100 times).
+        let max_end = if c.looped { c.start + src_len * 100 } else { c.start + src_len.saturating_sub(c.offset) };
         let new_end = new_end.clamp(c.start + 1, max_end.max(c.start + 1));
         let clip = self.clip_mut(id).unwrap();
         clip.len = new_end - clip.start;
@@ -867,7 +1102,7 @@ impl Session {
             let nid = self.new_id();
             let c = &mut self.tracks[t].clips[ci];
             let left = pos - c.start;
-            let mut right = c.clone();
+            let mut right = c.clone().with_own_fx(self.sample_rate);
             right.id = nid;
             right.start = pos;
             right.offset = c.offset + left;
@@ -967,7 +1202,11 @@ pub fn mix_range(m: &MixState, a: usize, b: usize) -> Vec<Vec<f32>> {
     let mut scratch = MixScratch::default();
     let mut c = a;
     while c < b {
-        let e = (c + 8192).min(b);
+        // Effect automation is applied block by block (about 10 ms).
+        let e = (c + 512).min(b);
+        for t in &fresh.tracks {
+            t.apply_param_automation(c);
+        }
         mix_into(&fresh, c, e, &mut tmp, &mut [], &mut scratch);
         out[0].extend_from_slice(&tmp[0]);
         out[1].extend_from_slice(&tmp[1]);
@@ -981,6 +1220,10 @@ pub fn mix_range(m: &MixState, a: usize, b: usize) -> Vec<Vec<f32>> {
 #[derive(Default)]
 pub struct MixScratch {
     bufs: Vec<[Vec<f32>; 2]>,
+    /// A clip rendered through its own effects rack.
+    clip: [Vec<f32>; 2],
+    /// Sidechain keys: (source track id, its clip mix).
+    keys: Vec<(u64, [Vec<f32>; 2])>,
 }
 
 impl MixScratch {
@@ -990,7 +1233,10 @@ impl MixScratch {
         if self.bufs.len() < want {
             self.bufs.resize_with(want, || [Vec::new(), Vec::new()]);
         }
-        for b in self.bufs.iter_mut() {
+        if self.keys.len() < 4 {
+            self.keys.resize_with(4, || (0, [Vec::new(), Vec::new()]));
+        }
+        for b in self.bufs.iter_mut().chain(std::iter::once(&mut self.clip)).chain(self.keys.iter_mut().map(|k| &mut k.1)) {
             for c in b.iter_mut() {
                 if c.capacity() < n {
                     c.reserve(n - c.len());
@@ -1033,16 +1279,20 @@ impl MixScratch {
 
 /// Run a rack over a stereo block. A slot the UI is busy updating is
 /// skipped for this block rather than waited for.
-fn run_rack(fx: &[FxSlot], on: bool, l: &mut [f32], r: &mut [f32]) {
+fn run_rack(fx: &[FxSlot], on: bool, l: &mut [f32], r: &mut [f32], keys: Option<&[(u64, [Vec<f32>; 2])]>) {
     if !on {
         return;
     }
     for slot in fx.iter().filter(|s| s.on) {
+        let key = slot.sidechain.and_then(|id| keys.and_then(|k| k.iter().find(|(kid, _)| *kid == id)));
         // The UI only holds a slot's lock for a few microseconds while it
         // updates settings, so spin briefly rather than skip the effect.
         for _ in 0..20_000 {
             if let Ok(mut e) = slot.rt.try_lock() {
-                e.process(l, r);
+                match key {
+                    Some((_, [kl, kr])) if kl.len() == l.len() => e.process_keyed(l, r, kl, kr),
+                    _ => e.process(l, r),
+                }
                 break;
             }
             std::hint::spin_loop();
@@ -1052,6 +1302,14 @@ fn run_rack(fx: &[FxSlot], on: bool, l: &mut [f32], r: &mut [f32]) {
 
 /// Apply a track's (or bus's) volume and pan, with automation.
 fn fader(t: &Track, a: usize, l: &mut [f32], r: &mut [f32]) {
+    if t.has_mute_lane() {
+        for k in 0..l.len() {
+            if t.auto_muted(a + k) {
+                l[k] = 0.0;
+                r[k] = 0.0;
+            }
+        }
+    }
     if t.vol_env.is_empty() && t.pan_env.is_empty() {
         let g = db_to_lin(t.volume_db);
         let (pl, pr) = t.pan_gains();
@@ -1089,17 +1347,21 @@ pub fn mix_into(m: &MixState, a: usize, b: usize, out: &mut [Vec<f32>], peaks: &
     scratch.prepare(m.tracks.len(), n);
     let any_solo = m.tracks.iter().any(|t| !t.is_bus() && t.solo);
     let bus_index = |id: u64| m.tracks.iter().position(|t| t.id == id && t.is_bus());
+    let is_key = |id: u64| m.tracks.iter().any(|t| t.fx.iter().any(|f| f.on && f.sidechain == Some(id)));
+    // First every audio track's clips (a sidechain may come from a later track).
     for (ti, t) in m.tracks.iter().enumerate() {
         if t.is_bus() {
             continue;
         }
         let silent = t.mute || (any_solo && !t.solo);
-        // A silent track with no effects has nothing to keep running.
-        if silent && (t.fx.is_empty() || !t.fx_on) {
+        // A silent track with no effects has nothing to keep running,
+        // unless it keys another track's compressor.
+        if silent && (t.fx.is_empty() || !t.fx_on) && !is_key(t.id) {
             continue;
         }
         {
             let [bl, br] = &mut scratch.bufs[ti];
+            let [cl, cr] = &mut scratch.clip;
             for c in &t.clips {
                 if c.mute || c.end() <= a || c.start >= b {
                     continue;
@@ -1108,19 +1370,67 @@ pub fn mix_into(m: &MixState, a: usize, b: usize, out: &mut [Vec<f32>], peaks: &
                 let sl = &src.audio[0];
                 let sr = &src.audio[src.audio.len().min(2) - 1];
                 let cg = db_to_lin(c.gain_db);
+                // A clip with effects is rendered on its own, through its rack.
+                let own = c.fx_on && c.fx.iter().any(|f| f.on);
+                if own {
+                    cl.clear();
+                    cl.resize(n, 0.0);
+                    cr.clear();
+                    cr.resize(n, 0.0);
+                }
+                let (dl, dr): (&mut [f32], &mut [f32]) = if own { (cl.as_mut_slice(), cr.as_mut_slice()) } else { (bl.as_mut_slice(), br.as_mut_slice()) };
                 for t_pos in c.start.max(a)..c.end().min(b) {
                     let i = t_pos - c.start;
-                    let idx = c.offset + i;
-                    if idx >= sl.len() {
-                        break;
-                    }
+                    let Some(idx) = c.source_index(i, sl.len()) else { break };
                     let g = cg * c.envelope(i);
                     let k = t_pos - a;
-                    bl[k] += sl[idx] * g;
-                    br[k] += sr[idx] * g;
+                    dl[k] += sl[idx] * g;
+                    dr[k] += sr[idx] * g;
+                }
+                if own {
+                    run_rack(&c.fx, true, cl, cr, None);
+                    for (o, v) in bl.iter_mut().zip(cl.iter()) {
+                        *o += v;
+                    }
+                    for (o, v) in br.iter_mut().zip(cr.iter()) {
+                        *o += v;
+                    }
                 }
             }
-            run_rack(&t.fx, t.fx_on, bl, br);
+        }
+    }
+    // Sidechain keys: the clip mix (before effects) of tracks named as a
+    // compressor's or gate's sidechain source.
+    let mut n_keys = 0;
+    for t in m.tracks.iter() {
+        for slot in t.fx.iter().filter(|f| f.on) {
+            if let Some(src) = slot.sidechain {
+                if let Some(si) = m.tracks.iter().position(|x| x.id == src && !x.is_bus()) {
+                    if scratch.keys.len() <= n_keys {
+                        scratch.keys.push((0, [Vec::new(), Vec::new()]));
+                    }
+                    let (id, [kl, kr]) = &mut scratch.keys[n_keys];
+                    *id = src;
+                    kl.clear();
+                    kl.extend_from_slice(&scratch.bufs[si][0]);
+                    kr.clear();
+                    kr.extend_from_slice(&scratch.bufs[si][1]);
+                    n_keys += 1;
+                }
+            }
+        }
+    }
+    for (ti, t) in m.tracks.iter().enumerate() {
+        if t.is_bus() {
+            continue;
+        }
+        let silent = t.mute || (any_solo && !t.solo);
+        if silent && (t.fx.is_empty() || !t.fx_on) {
+            continue;
+        }
+        {
+            let [bl, br] = &mut scratch.bufs[ti];
+            run_rack(&t.fx, t.fx_on, bl, br, Some(&scratch.keys[..n_keys]));
         }
         if silent {
             // Muted after its effects, as in Audition: tails continue, unheard.
@@ -1159,7 +1469,7 @@ pub fn mix_into(m: &MixState, a: usize, b: usize, out: &mut [Vec<f32>], peaks: &
             continue;
         }
         let [bl, br] = &mut scratch.bufs[bi];
-        run_rack(&t.fx, t.fx_on, bl, br);
+        run_rack(&t.fx, t.fx_on, bl, br, None);
         fader(t, a, bl, br);
         peak_into(peaks, bi, bl, br);
         for (o, v) in out[0].iter_mut().zip(bl.iter()) {
@@ -1170,7 +1480,7 @@ pub fn mix_into(m: &MixState, a: usize, b: usize, out: &mut [Vec<f32>], peaks: &
         }
     }
     if let [ol, or, ..] = out {
-        run_rack(&m.master_fx, m.master_fx_on, ol, or);
+        run_rack(&m.master_fx, m.master_fx_on, ol, or, None);
     }
     let master = db_to_lin(m.master_db);
     if master != 1.0 {
@@ -1197,7 +1507,7 @@ fn rel_path(p: &Path, base: Option<&Path>) -> String {
 pub fn to_text(s: &Session, paths: &BTreeMap<u64, PathBuf>, base: Option<&Path>) -> String {
     let mut o = String::from("AUDEMO-SESSION 1\n");
     o.push_str(&format!("name\t{}\nrate\t{}\nmaster\t{}\nmasterfx\t{}\n", clean(&s.name), s.sample_rate, s.master_db, s.master_fx_on as u8));
-    let fx_line = |key: &str, f: &FxSlot| format!("{key}\t{}\t{}\t{}\n", f.effect, f.on as u8, f.params.to_text());
+    let fx_line = |key: &str, f: &FxSlot| format!("{key}\t{}\t{}\t{}\t{}\n", f.effect, f.on as u8, f.params.to_text(), f.sidechain.unwrap_or(0));
     for f in &s.master_fx {
         o.push_str(&fx_line("mfx", f));
     }
@@ -1208,7 +1518,7 @@ pub fn to_text(s: &Session, paths: &BTreeMap<u64, PathBuf>, base: Option<&Path>)
     }
     for t in &s.tracks {
         o.push_str(&format!(
-            "track\t{}\t{}\t{}\t{}\t{}\t{}\t{},{},{}\t{}\t{}\t{}\t{}\t{}\n",
+            "track\t{}\t{}\t{}\t{}\t{}\t{}\t{},{},{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             t.id,
             clean(&t.name),
             t.volume_db,
@@ -1222,7 +1532,8 @@ pub fn to_text(s: &Session, paths: &BTreeMap<u64, PathBuf>, base: Option<&Path>)
             t.show_env as u8,
             t.is_bus() as u8,
             t.fx_on as u8,
-            t.output.unwrap_or(0)
+            t.output.unwrap_or(0),
+            t.group
         ));
         for f in &t.fx {
             o.push_str(&fx_line("fx", f));
@@ -1236,9 +1547,20 @@ pub fn to_text(s: &Session, paths: &BTreeMap<u64, PathBuf>, base: Option<&Path>)
         if !t.pan_env.is_empty() {
             o.push_str(&format!("penv\t{}\n", t.pan_env.to_text()));
         }
+        for l in &t.lanes {
+            // Effect slots are referred to by their place in the rack.
+            let (kind, slot, key) = match &l.target {
+                AutoTarget::Mute => ("mute", 0, ""),
+                AutoTarget::Param { slot, key } => ("param", t.fx.iter().position(|f| f.id == *slot).unwrap_or(usize::MAX), *key),
+            };
+            if slot == usize::MAX {
+                continue;
+            }
+            o.push_str(&format!("lane\t{kind}\t{slot}\t{key}\t{}\t{}\t{}\t{}\t{}\n", l.min, l.max, l.step as u8, clean(&l.name), l.env.to_text()));
+        }
         for c in &t.clips {
             o.push_str(&format!(
-                "clip\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                "clip\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 c.id,
                 c.source,
                 c.start,
@@ -1252,8 +1574,16 @@ pub fn to_text(s: &Session, paths: &BTreeMap<u64, PathBuf>, base: Option<&Path>)
                 c.fade_in_curve,
                 c.fade_out_curve,
                 c.fade_in_cos as u8,
-                c.fade_out_cos as u8
+                c.fade_out_cos as u8,
+                c.group,
+                c.looped as u8,
+                c.locked as u8,
+                c.fx_on as u8,
+                c.stretch
             ));
+            for f in &c.fx {
+                o.push_str(&fx_line("cfx", f));
+            }
         }
     }
     o
@@ -1319,6 +1649,7 @@ pub fn from_text(id: u64, text: &str, base: Option<&Path>, effects: &[EffectDef]
                 }
                 t.fx_on = num(11).map(|v| v != 0.0).unwrap_or(true);
                 t.output = num(12).ok().map(|v| v as u64).filter(|v| *v != 0);
+                t.group = num(13).map(|v| v.clamp(0.0, 8.0) as u8).unwrap_or(0);
                 max_id = max_id.max(tid);
                 s.tracks.push(t);
             }
@@ -1339,6 +1670,12 @@ pub fn from_text(id: u64, text: &str, base: Option<&Path>, effects: &[EffectDef]
                     fade_out_curve: num(12).unwrap_or(0.0).clamp(-1.0, 1.0) as f32,
                     fade_in_cos: num(13).map(|v| v != 0.0).unwrap_or(false),
                     fade_out_cos: num(14).map(|v| v != 0.0).unwrap_or(false),
+                    group: num(15).map(|v| v as u64).unwrap_or(0),
+                    looped: num(16).map(|v| v != 0.0).unwrap_or(false),
+                    locked: num(17).map(|v| v != 0.0).unwrap_or(false),
+                    fx: Vec::new(),
+                    fx_on: num(18).map(|v| v != 0.0).unwrap_or(true),
+                    stretch: num(19).unwrap_or(100.0) as f32,
                 };
                 let mut c = c;
                 c.len = c.len.max(1);
@@ -1359,8 +1696,29 @@ pub fn from_text(id: u64, text: &str, base: Option<&Path>, effects: &[EffectDef]
                     t.pan_env = e;
                 }
             }
+            "lane" => {
+                let t = s.tracks.last_mut().ok_or_else(|| bad(line))?;
+                let target = match f.get(1).copied() {
+                    Some("mute") => Some(AutoTarget::Mute),
+                    Some("param") => {
+                        let k = num(2)? as usize;
+                        let key = f.get(3).copied().unwrap_or("");
+                        // The parameter key must be one the effect knows (keys are 'static).
+                        t.fx.get(k).and_then(|slot| slot.params.values.iter().find(|(pk, _)| *pk == key).map(|(pk, _)| AutoTarget::Param { slot: slot.id, key: pk }))
+                    }
+                    _ => None,
+                };
+                if let Some(target) = target {
+                    let (min, max) = (num(4).unwrap_or(0.0) as f32, num(5).unwrap_or(1.0) as f32);
+                    let mut env = Envelope::parse(f.get(8).unwrap_or(&""));
+                    for p in env.points.iter_mut() {
+                        p.1 = p.1.clamp(min.min(max), max.max(min));
+                    }
+                    t.lanes.push(AutoLane { target, env, min, max, step: num(6).map(|v| v != 0.0).unwrap_or(false), name: f.get(7).unwrap_or(&"").to_string() });
+                }
+            }
             "masterfx" => s.master_fx_on = num(1).map(|v| v != 0.0).unwrap_or(true),
-            "fx" | "mfx" => {
+            "fx" | "mfx" | "cfx" => {
                 // Built-in effects this version doesn't know are skipped;
                 // plug-ins that can't load are kept as placeholders.
                 let sr = s.sample_rate;
@@ -1375,10 +1733,15 @@ pub fn from_text(id: u64, text: &str, base: Option<&Path>, effects: &[EffectDef]
                 }
                 if let Some(sl) = slot.as_mut() {
                     sl.on = on;
+                    sl.sidechain = f.get(4).and_then(|v| v.trim().parse::<u64>().ok()).filter(|v| *v != 0);
                 }
                 if let Some(slot) = slot {
                     if f[0] == "mfx" {
                         s.master_fx.push(slot);
+                    } else if f[0] == "cfx" {
+                        if let Some(c) = s.tracks.last_mut().and_then(|t| t.clips.last_mut()) {
+                            c.fx.push(slot);
+                        }
                     } else if let Some(t) = s.tracks.last_mut() {
                         t.fx.push(slot);
                     }
@@ -1696,5 +2059,77 @@ mod tests {
         let mut s2 = p.session;
         assert!(s2.new_id() > c);
         assert!(from_text(1, "nope", None, &[]).is_err());
+    }
+
+    #[test]
+    fn loops_groups_locks_and_lanes_round_trip() {
+        let reg = crate::dsp::effects::registry();
+        let (mut s, src) = session_with(vec![(0..50).map(|i| i as f32 / 50.0).collect()]);
+        let a = s.insert_clip(0, src, 0).unwrap();
+        let b = s.insert_clip(1, src, 100).unwrap();
+        {
+            let c = s.clip_mut(a).unwrap();
+            c.looped = true;
+            c.fade_in = 0;
+            c.fade_out = 0;
+        }
+        s.trim_end(a, 120);
+        assert_eq!(s.clip(a).unwrap().len, 120, "a looped clip extends past its source");
+        let m = mix_range(&s.mix_state(), 0, 120);
+        assert!((m[0][60] - m[0][10]).abs() < 1e-6, "the source repeats");
+        s.selected_clips = [a, b].into_iter().collect();
+        assert!(s.group_selected());
+        s.selected_clips = [a].into_iter().collect();
+        s.expand_groups();
+        assert!(s.selected_clips.contains(&b));
+        s.clip_mut(b).unwrap().locked = true;
+        let def = reg.iter().find(|e| e.id == "single_band_compressor").unwrap();
+        let mut slot = FxSlot::new(def.id, def.default_params(), 1000).unwrap();
+        slot.sidechain = Some(s.tracks[1].id);
+        let slot_id = slot.id;
+        s.tracks[0].fx.push(slot);
+        s.tracks[0].lanes.push(AutoLane { target: AutoTarget::Param { slot: slot_id, key: "threshold" }, env: Envelope { points: vec![(0, -30.0), (500, -10.0)] }, min: -60.0, max: 0.0, step: false, name: "Comp: Threshold".into() });
+        s.tracks[1].lanes.push(AutoLane { target: AutoTarget::Mute, env: Envelope { points: vec![(0, 0.0), (110, 1.0)] }, min: 0.0, max: 1.0, step: true, name: "Mute".into() });
+        s.tracks[1].group = 3;
+        let mut paths = BTreeMap::new();
+        paths.insert(src, PathBuf::from("/x/tone.wav"));
+        let p = from_text(9, &to_text(&s, &paths, None), None, &reg).unwrap();
+        let (t0, t1) = (&p.session.tracks[0], &p.session.tracks[1]);
+        assert!(t0.clips[0].looped && t0.clips[0].group != 0 && t1.clips[0].locked);
+        assert_eq!(t0.clips[0].group, t1.clips[0].group);
+        assert_eq!(t0.fx[0].sidechain, Some(t1.id));
+        assert_eq!(t0.lanes[0].target, AutoTarget::Param { slot: t0.fx[0].id, key: "threshold" });
+        assert_eq!(t0.lanes[0].env, s.tracks[0].lanes[0].env);
+        assert_eq!(t1.lanes[0].target, AutoTarget::Mute);
+        assert_eq!(t1.group, 3);
+        // The mute lane silences the second track's clip after 110.
+        // (A parsed session has no audio yet, so mix the original.)
+        // (Track 1's looped clip ends at 120.)
+        let m = mix_range(&s.mix_state(), 100, 150);
+        assert!(m[0][5] != 0.0 && m[0][25] == 0.0, "{} {}", m[0][5], m[0][25]);
+    }
+
+    #[test]
+    fn clip_effects_and_sidechain_change_the_mix() {
+        let reg = crate::dsp::effects::registry();
+        let (mut s, src) = session_with(vec![vec![0.5; 400]]);
+        let a = s.insert_clip(0, src, 0).unwrap();
+        let amp = reg.iter().find(|e| e.id == "amplify").unwrap();
+        let mut p = amp.default_params();
+        p.set("left", crate::dsp::params::Value::F(-6.0206));
+        p.set("right", crate::dsp::params::Value::F(-6.0206));
+        s.clip_mut(a).unwrap().fx.push(FxSlot::new(amp.id, p, 1000).unwrap());
+        let m = mix_range(&s.mix_state(), 0, 400);
+        assert!((m[0][200] - 0.25).abs() < 1e-3, "clip rack halves the level: {}", m[0][200]);
+        // A gate keyed by a silent track stays shut.
+        s.clip_mut(a).unwrap().fx.clear();
+        let gate = reg.iter().find(|e| e.id == "noise_gate").unwrap();
+        let mut slot = FxSlot::new(gate.id, gate.default_params(), 1000).unwrap();
+        slot.sidechain = Some(s.tracks[1].id);
+        s.tracks[0].fx.push(slot);
+        let keyed = mix_range(&s.mix_state(), 0, 400);
+        s.tracks[0].fx[0].sidechain = None;
+        let open = mix_range(&s.mix_state(), 0, 400);
+        assert!(keyed[0][300].abs() < open[0][300].abs() * 0.5, "keyed {} open {}", keyed[0][300], open[0][300]);
     }
 }

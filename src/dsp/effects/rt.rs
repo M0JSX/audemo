@@ -19,6 +19,16 @@ pub trait RtEffect: Send {
     fn reset(&mut self);
     /// Process one block of stereo audio in place.
     fn process(&mut self, l: &mut [f32], r: &mut [f32]);
+    /// Process with a sidechain: level detection follows `kl`/`kr` instead
+    /// of the input (compressors and gates; others ignore the key).
+    fn process_keyed(&mut self, l: &mut [f32], r: &mut [f32], _kl: &[f32], _kr: &[f32]) {
+        self.process(l, r);
+    }
+}
+
+/// Effects that can take a sidechain input.
+pub fn takes_sidechain(id: &str) -> bool {
+    matches!(id, "dynamics" | "single_band_compressor" | "tube_compressor" | "noise_gate")
 }
 
 /// Stands in for an effect that can't run (a plug-in that isn't available).
@@ -249,20 +259,33 @@ impl RtEffect for Compressor {
         self.env = [0.0; 2];
     }
     fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+        self.run(l, r, None);
+    }
+    fn process_keyed(&mut self, l: &mut [f32], r: &mut [f32], kl: &[f32], kr: &[f32]) {
+        self.run(l, r, Some((kl, kr)));
+    }
+}
+
+impl Compressor {
+    fn run(&mut self, l: &mut [f32], r: &mut [f32], key: Option<(&[f32], &[f32])>) {
         let (att, rel) = (self.att, self.rel);
         let step = |env: &mut f32, level: f32, thr, ratio, knee| {
             let gr = gain_computer(lin_to_db(level), thr, ratio, knee);
             *env = if gr < *env { att * *env + (1.0 - att) * gr } else { rel * *env + (1.0 - rel) * gr };
         };
         for n in 0..l.len() {
+            let (dl, dr) = match key {
+                Some((kl, kr)) => (kl[n].abs(), kr[n].abs()),
+                None => (l[n].abs(), r[n].abs()),
+            };
             if self.link {
-                step(&mut self.env[0], l[n].abs().max(r[n].abs()), self.thr, self.ratio, self.knee);
+                step(&mut self.env[0], dl.max(dr), self.thr, self.ratio, self.knee);
                 let g = db_to_lin(self.env[0]) * self.makeup;
                 l[n] *= g;
                 r[n] *= g;
             } else {
-                step(&mut self.env[0], l[n].abs(), self.thr, self.ratio, self.knee);
-                step(&mut self.env[1], r[n].abs(), self.thr, self.ratio, self.knee);
+                step(&mut self.env[0], dl, self.thr, self.ratio, self.knee);
+                step(&mut self.env[1], dr, self.thr, self.ratio, self.knee);
                 l[n] *= db_to_lin(self.env[0]) * self.makeup;
                 r[n] *= db_to_lin(self.env[1]) * self.makeup;
             }
@@ -418,8 +441,20 @@ impl RtEffect for Gate {
         self.hold_left = 0;
     }
     fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+        self.run(l, r, None);
+    }
+    fn process_keyed(&mut self, l: &mut [f32], r: &mut [f32], kl: &[f32], kr: &[f32]) {
+        self.run(l, r, Some((kl, kr)));
+    }
+}
+
+impl Gate {
+    fn run(&mut self, l: &mut [f32], r: &mut [f32], key: Option<(&[f32], &[f32])>) {
         for n in 0..l.len() {
-            let level = l[n].abs().max(r[n].abs());
+            let level = match key {
+                Some((kl, kr)) => kl[n].abs().max(kr[n].abs()),
+                None => l[n].abs().max(r[n].abs()),
+            };
             self.env = level.max(self.env * self.det_decay);
             let open = if self.env >= self.thr {
                 self.hold_left = self.hold;

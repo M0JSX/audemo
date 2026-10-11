@@ -295,6 +295,66 @@ impl App {
                     next = Some(Dialog::Shortcuts(ed));
                 }
             }
+            Dialog::ClipStretch { mut percent } => {
+                let mut open = true;
+                let mut go = false;
+                centered(egui::Window::new("Stretch Clip")).open(&mut open).show(ctx, |ui| {
+                    ui.label("New length, as a percentage of the clip's original length. Pitch is kept; the stretched audio is rendered as a new source.");
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Stretch");
+                        ui.add(egui::Slider::new(&mut percent, 25.0..=400.0).suffix(" %").fixed_decimals(1));
+                    });
+                    ui.horizontal(|ui| {
+                        for p in [50.0f32, 80.0, 90.0, 110.0, 125.0, 150.0, 200.0] {
+                            if ui.small_button(format!("{p:.0}%")).clicked() {
+                                percent = p;
+                            }
+                        }
+                    });
+                    ui.add_space(6.0);
+                    if ui.button("   Stretch   ").clicked() {
+                        go = true;
+                    }
+                });
+                if go {
+                    self.actions.push(Action::MtClip(crate::mt_ui::ClipCmd::Stretch(percent)));
+                } else if open {
+                    next = Some(Dialog::ClipStretch { percent });
+                }
+            }
+            Dialog::MatchClipVolume { mut mode, mut target } => {
+                let mut open = true;
+                let mut go = false;
+                centered(egui::Window::new("Match Clip Volume")).open(&mut open).show(ctx, |ui| {
+                    ui.label("Set each selected clip's gain so they all measure the same.");
+                    ui.add_space(6.0);
+                    egui::Grid::new("mcv").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                        ui.label("Match to");
+                        let names = ["Loudness (LUFS)", "Peak amplitude (dBFS)", "Total RMS (dB)"];
+                        egui::ComboBox::from_id_source("mcv_mode").width(200.0).selected_text(names[mode.min(2)]).show_ui(ui, |ui| {
+                            for (i, n) in names.iter().enumerate() {
+                                if ui.selectable_value(&mut mode, i, *n).changed() {
+                                    target = [-23.0, -1.0, -20.0][i];
+                                }
+                            }
+                        });
+                        ui.end_row();
+                        ui.label("Target");
+                        ui.add(egui::DragValue::new(&mut target).speed(0.1).range(-60.0..=0.0).fixed_decimals(1).suffix(if mode == 0 { " LUFS" } else { " dB" }));
+                        ui.end_row();
+                    });
+                    ui.add_space(6.0);
+                    if ui.button("   Match   ").clicked() {
+                        go = true;
+                    }
+                });
+                if go {
+                    self.actions.push(Action::MtClip(crate::mt_ui::ClipCmd::Match { mode, target }));
+                } else if open {
+                    next = Some(Dialog::MatchClipVolume { mode, target });
+                }
+            }
             Dialog::About => {
                 let mut open = true;
                 centered(egui::Window::new("About Audemo")).open(&mut open).show(ctx, |ui| {
@@ -510,10 +570,8 @@ impl App {
                 .sessions
                 .iter()
                 .find(|s| s.id == sid)
-                .map(|s| match tid {
-                    Some(t) => s.tracks.iter().find(|x| x.id == t).map(|x| (x.name.clone(), x.fx.iter().position(|f| f.id == slot_id))).unwrap_or_default(),
-                    None => ("Master".to_string(), s.master_fx.iter().position(|f| f.id == slot_id)),
-                })
+                .and_then(|s| s.rack(tid))
+                .map(|(fx, _, name)| (name, fx.iter().position(|f| f.id == slot_id)))
                 .unwrap_or_default();
             match pos {
                 Some(p) => format!("{owner} effects rack, slot {}", p + 1),
@@ -526,6 +584,15 @@ impl App {
         } else {
             format!("Applies to: {scope}")
         };
+        // A compressor or gate in a track's rack can be keyed by another track.
+        let sidechain: Option<(u64, Option<u64>, u64, Option<u64>, Vec<(u64, String)>)> = d.track_fx.filter(|_| crate::dsp::effects::rt::takes_sidechain(def.id)).and_then(|(sid, owner, slot_id)| {
+            let s = self.sessions.iter().find(|s| s.id == sid)?;
+            let tid = owner.filter(|id| s.tracks.iter().any(|t| t.id == *id))?;
+            let current = s.rack(Some(tid))?.0.iter().find(|f| f.id == slot_id)?.sidechain;
+            let others = s.tracks.iter().filter(|t| t.id != tid && !t.is_bus()).map(|t| (t.id, t.name.clone())).collect();
+            Some((sid, owner, slot_id, current, others))
+        });
+        let mut sidechain_pick: Option<Option<u64>> = None;
         let mut open = true;
         let mut apply = false;
         let mut close = false;
@@ -603,6 +670,25 @@ impl App {
                         param_grid(ui, def, &mut d.params, sr);
                     });
                 }
+                if let Some((_, _, _, current, others)) = &sidechain {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Sidechain input");
+                        let name = current.and_then(|id| others.iter().find(|o| o.0 == id)).map(|o| o.1.clone()).unwrap_or_else(|| "None (the track itself)".into());
+                        egui::ComboBox::from_id_source("sidechain").width(220.0).selected_text(name).show_ui(ui, |ui| {
+                            if ui.selectable_label(current.is_none(), "None (the track itself)").clicked() {
+                                sidechain_pick = Some(None);
+                            }
+                            for (id, n) in others {
+                                if ui.selectable_label(*current == Some(*id), n).clicked() {
+                                    sidechain_pick = Some(Some(*id));
+                                }
+                            }
+                        });
+                    })
+                    .response
+                    .on_hover_text("Detect the level from another track's clips, e.g. to duck music under a voice");
+                }
                 if let Some(e) = &d.error {
                     ui.add_space(4.0);
                     ui.label(RichText::new(e).color(WARN()));
@@ -655,6 +741,16 @@ impl App {
             if let Some(b) = buf {
                 let len = b.first().map(|c| c.len()).unwrap_or(0) as f64;
                 self.engine.replace_buffer(b, sr, 0.0, len);
+            }
+        }
+        if let (Some(pick), Some((sid, owner, slot_id, _, _))) = (sidechain_pick, &sidechain) {
+            // (The session is changed directly: the dialog is still borrowed.)
+            if let Some(s) = self.sessions.iter_mut().find(|s| s.id == *sid) {
+                s.push_undo("Sidechain");
+                if let Some(slot) = s.rack_mut(*owner).and_then(|(fx, _)| fx.iter_mut().find(|f| f.id == *slot_id)) {
+                    slot.sidechain = pick;
+                }
+                s.touch();
             }
         }
         if apply && d.track_fx.is_some() {
