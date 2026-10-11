@@ -13,8 +13,13 @@ use crate::export::{Container, WavFormat, AAC_BITRATES, MP3_BITRATES};
 use crate::theme::*;
 
 
-fn centered(w: egui::Window<'_>) -> egui::Window<'_> {
-    w.collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, vec2(0.0, -40.0))
+/// A dialog that opens centred and can then be dragged by its title bar.
+fn centered<'a>(ctx: &egui::Context, w: egui::Window<'a>) -> egui::Window<'a> {
+    w.collapsible(false)
+        .resizable(false)
+        .pivot(Align2::CENTER_CENTER)
+        .default_pos(ctx.screen_rect().center() - vec2(0.0, 40.0))
+        .constrain(true)
 }
 
 impl App {
@@ -29,7 +34,7 @@ impl App {
         match dialog {
             Dialog::NewFile { mut name, mut rate, mut channels, mut bits, mut seconds, then_record } => {
                 let mut open = true;
-                centered(egui::Window::new("New Audio File").open(&mut open)).show(ctx, |ui| {
+                centered(ctx, egui::Window::new("New Audio File").open(&mut open)).show(ctx, |ui| {
                     ui.set_min_width(340.0);
                     egui::Grid::new("newfile").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                         ui.label("File Name:");
@@ -92,7 +97,7 @@ impl App {
             }
             Dialog::Export { mut settings, path, selection } => {
                 let mut open_meta = false;
-                centered(egui::Window::new(if selection { "Save Selection As" } else { "Save As" })).show(ctx, |ui| {
+                centered(ctx, egui::Window::new(if selection { "Save Selection As" } else { "Save As" })).show(ctx, |ui| {
                     ui.set_min_width(420.0);
                     let (frames, ch, rate) = match self.doc() {
                         Some(d) => {
@@ -221,7 +226,7 @@ impl App {
             }
             Dialog::MixPaste { mut mode, mut clip_db, mut orig_db } => {
                 let mut open = true;
-                centered(egui::Window::new("Mix Paste").open(&mut open)).show(ctx, |ui| {
+                centered(ctx, egui::Window::new("Mix Paste").open(&mut open)).show(ctx, |ui| {
                     egui::Grid::new("mixpaste").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                         ui.label("Copied audio volume");
                         ui.add(egui::Slider::new(&mut clip_db, -40.0..=12.0).suffix(" dB").fixed_decimals(1));
@@ -255,7 +260,7 @@ impl App {
                 }
             }
             Dialog::Convert { mut rate, mut channels } => {
-                centered(egui::Window::new("Convert Sample Type")).show(ctx, |ui| {
+                centered(ctx, egui::Window::new("Convert Sample Type")).show(ctx, |ui| {
                     egui::Grid::new("convert").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                         ui.label("Sample rate");
                         egui::ComboBox::from_id_source("cv_rate").selected_text(format!("{rate} Hz")).show_ui(ui, |ui| {
@@ -302,7 +307,7 @@ impl App {
             Dialog::ClipStretch { mut percent } => {
                 let mut open = true;
                 let mut go = false;
-                centered(egui::Window::new("Stretch Clip")).open(&mut open).show(ctx, |ui| {
+                centered(ctx, egui::Window::new("Stretch Clip")).open(&mut open).show(ctx, |ui| {
                     ui.label("New length, as a percentage of the clip's original length. Pitch is kept; the stretched audio is rendered as a new source.");
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
@@ -330,7 +335,7 @@ impl App {
             Dialog::MatchClipVolume { mut mode, mut target } => {
                 let mut open = true;
                 let mut go = false;
-                centered(egui::Window::new("Match Clip Volume")).open(&mut open).show(ctx, |ui| {
+                centered(ctx, egui::Window::new("Match Clip Volume")).open(&mut open).show(ctx, |ui| {
                     ui.label("Set each selected clip's gain so they all measure the same.");
                     ui.add_space(6.0);
                     egui::Grid::new("mcv").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
@@ -362,7 +367,7 @@ impl App {
             Dialog::Tempo { mut bpm, mut beats_per_bar, mut metronome_db } => {
                 let mut open = true;
                 let mut go = false;
-                centered(egui::Window::new("Tempo and Metronome")).open(&mut open).show(ctx, |ui| {
+                centered(ctx, egui::Window::new("Tempo and Metronome")).open(&mut open).show(ctx, |ui| {
                     egui::Grid::new("tempo").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                         ui.label("Tempo");
                         ui.add(egui::DragValue::new(&mut bpm).speed(0.2).range(20.0..=400.0).fixed_decimals(2).suffix(" BPM"));
@@ -387,7 +392,7 @@ impl App {
             }
             Dialog::About => {
                 let mut open = true;
-                centered(egui::Window::new("About Audemo")).open(&mut open).show(ctx, |ui| {
+                centered(ctx, egui::Window::new("About Audemo")).open(&mut open).show(ctx, |ui| {
                     ui.label(RichText::new("Audemo").size(22.0).strong().color(Color32::WHITE));
                     ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
                     ui.add_space(6.0);
@@ -403,7 +408,7 @@ impl App {
             }
             Dialog::Update(r) => {
                 let mut open = true;
-                centered(egui::Window::new("Update Available").open(&mut open)).show(ctx, |ui| {
+                centered(ctx, egui::Window::new("Update Available").open(&mut open)).show(ctx, |ui| {
                     ui.set_max_width(480.0);
                     ui.label(RichText::new(format!("Audemo {} is available", r.version)).size(17.0).strong().color(Color32::WHITE));
                     ui.label(RichText::new(format!("You have version {}.", env!("CARGO_PKG_VERSION"))).color(TEXT_DIM()));
@@ -446,7 +451,7 @@ impl App {
             }
             Dialog::Message { title, text } => {
                 let mut open = true;
-                centered(egui::Window::new(title.clone()).open(&mut open)).show(ctx, |ui| {
+                centered(ctx, egui::Window::new(title.clone()).open(&mut open)).show(ctx, |ui| {
                     ui.set_max_width(420.0);
                     ui.label(&text);
                     ui.add_space(6.0);
@@ -462,7 +467,7 @@ impl App {
             }
             Dialog::ConfirmClose { doc } => {
                 let name = self.docs.get(doc).map(|d| d.name.clone()).unwrap_or_default();
-                centered(egui::Window::new("Save changes?")).show(ctx, |ui| {
+                centered(ctx, egui::Window::new("Save changes?")).show(ctx, |ui| {
                     ui.label(format!("Save changes to “{name}” before closing?"));
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
@@ -492,7 +497,7 @@ impl App {
                     .map(|s| format!("{} (session)", s.name))
                     .chain(self.docs.iter().filter(|d| d.dirty).map(|d| d.name.clone()))
                     .collect();
-                centered(egui::Window::new("Quit Audemo?")).show(ctx, |ui| {
+                centered(ctx, egui::Window::new("Quit Audemo?")).show(ctx, |ui| {
                     ui.label("These files have unsaved changes:");
                     for n in &unsaved {
                         ui.label(RichText::new(format!("•  {n}")).color(WARN()));
@@ -525,7 +530,7 @@ impl App {
             Dialog::NewSession { mut name, mut rate, mut tracks } => {
                 let mut open = true;
                 let mut create = false;
-                centered(egui::Window::new("New Multitrack Session").open(&mut open)).show(ctx, |ui| {
+                centered(ctx, egui::Window::new("New Multitrack Session").open(&mut open)).show(ctx, |ui| {
                     ui.set_min_width(340.0);
                     egui::Grid::new("newsession").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                         ui.label("Session Name:");
@@ -564,7 +569,7 @@ impl App {
             }
             Dialog::ConfirmCloseSession { session } => {
                 let name = self.sessions.get(session).map(|s| s.name.clone()).unwrap_or_default();
-                centered(egui::Window::new("Save changes?")).show(ctx, |ui| {
+                centered(ctx, egui::Window::new("Save changes?")).show(ctx, |ui| {
                     ui.label(format!("Save changes to the session \"{name}\" before closing?"));
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {

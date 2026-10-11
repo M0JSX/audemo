@@ -70,7 +70,9 @@ impl App {
             .collapsible(false)
             .resizable(true)
             .default_size([720.0, 520.0])
-            .anchor(Align2::CENTER_CENTER, egui::vec2(0.0, -20.0))
+            .pivot(Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center() - egui::vec2(0.0, 20.0))
+            .constrain(true)
             .open(&mut open)
             .show(ctx, |ui| {
                 if cfg!(target_os = "macos") {
