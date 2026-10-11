@@ -88,6 +88,8 @@ pub struct PrefsDialog {
     in_channels: usize,
     color_elem: usize,
     total_ram: Option<u64>,
+    /// MIDI (inputs, outputs) for the Control Surface page, read when shown.
+    midi_ports: Option<(Vec<String>, Vec<String>)>,
 }
 
 impl PrefsDialog {
@@ -106,6 +108,7 @@ impl PrefsDialog {
             in_channels: 2,
             color_elem: 0,
             total_ram: total_ram(),
+            midi_ports: None,
         };
         d.refresh_devices();
         d
@@ -595,17 +598,30 @@ impl App {
                 note(ui, "Backups never replace your files. Unsaved recordings and edits in a session are written beside its backup.");
             }
             Page::ControlSurface => {
+                if d.midi_ports.is_none() {
+                    d.midi_ports = Some(crate::control_surface::ports());
+                }
+                let (ins, outs) = d.midi_ports.clone().unwrap_or_default();
                 group(ui, |ui| {
                     row(ui, "Device Class", |ui| {
-                        egui::ComboBox::from_id_source("cs").width(200.0).selected_text("None").show_ui(ui, |ui| {
-                            let _ = ui.selectable_label(true, "None");
+                        let names = ["None", "Mackie Control (MCU)"];
+                        egui::ComboBox::from_id_source("cs").width(220.0).selected_text(names[(p.cs_kind as usize).min(1)]).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut p.cs_kind, 0, names[0]);
+                            ui.selectable_value(&mut p.cs_kind, 1, names[1]);
                         });
                     });
-                    row(ui, "", |ui| {
-                        ui.add_enabled(false, egui::Button::new("Configure..."));
-                    });
+                    if p.cs_kind == 1 {
+                        row(ui, "MIDI Input", |ui| device_combo(ui, "cs_in", &mut p.cs_input, &ins, "Choose…"));
+                        row(ui, "MIDI Output", |ui| device_combo(ui, "cs_out", &mut p.cs_output, &outs, "None (no feedback)"));
+                        row(ui, "", |ui| {
+                            if ui.button("Rescan MIDI Ports").clicked() {
+                                d.midi_ports = None;
+                            }
+                        });
+                    }
                 });
-                note(ui, "Audemo doesn't support hardware control surfaces (Mackie, EUCON, Avid) yet.");
+                let status = self.surface.as_ref().map(|s| format!("Connected: {}.", s.description)).unwrap_or_else(|| "Not connected.".into());
+                note(ui, &format!("{status} Faders 1–8 control a bank of multitrack tracks (Bank and Channel buttons move it), the ninth the master; V-Pots pan; Mute, Solo, Rec and Select work on the strips; the transport buttons, Cycle and Marker work too; the jog wheel moves the playhead. Choose the controller's Mackie Control (MCU) mode. EUCON and Avid surfaces aren't supported."));
             }
             Page::Data => {
                 group(ui, |ui| {
@@ -822,10 +838,10 @@ impl App {
             Page::Video => {
                 group(ui, |ui| {
                     row(ui, "Video Display", |ui| {
-                        ui.add_enabled(false, egui::Label::new("No video support"));
+                        ui.add_enabled(false, egui::Label::new("Audio only"));
                     });
                 });
-                note(ui, "Audemo is an audio editor; it doesn't open video files or show a Video panel.");
+                note(ui, "Video files (MP4, MOV, M4V, MKV, WebM) open as their audio track. Audemo doesn't decode or show the picture, so there is no Video panel.");
             }
         }
     }

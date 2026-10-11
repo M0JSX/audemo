@@ -5,6 +5,7 @@ mod analysis_ui;
 mod app;
 mod autosave;
 mod cd;
+mod control_surface;
 mod dialogs;
 mod dsp;
 mod editor;

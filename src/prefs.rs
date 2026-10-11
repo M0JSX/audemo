@@ -172,6 +172,10 @@ prefs! {
     sample_rate: u32 = 0,
     /// Reopen the output at each file's own sample rate when playing it.
     force_doc_rate: bool = false,
+    // Control surface: 0 none, 1 Mackie Control; its MIDI ports.
+    cs_kind: u32 = 0,
+    cs_input: Option<String> = None,
+    cs_output: Option<String> = None,
     // Audio channel mapping: device channels (0-based) for Audemo's L and R.
     out_map_l: u32 = 0,
     out_map_r: u32 = 1,

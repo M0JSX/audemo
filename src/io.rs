@@ -130,9 +130,9 @@ pub fn load(path: &Path) -> Result<Decoded, String> {
     if channels.is_empty() || channels[0].is_empty() {
         return Err("The file contains no audio samples.".into());
     }
-    // Keep at most stereo; the editor is a two-channel waveform editor.
-    if channels.len() > 2 {
-        channels.truncate(2);
+    // Up to eight channels (7.1) are kept.
+    if channels.len() > 8 {
+        channels.truncate(8);
     }
     let len = channels.iter().map(|c| c.len()).min().unwrap_or(0);
     for c in channels.iter_mut() {

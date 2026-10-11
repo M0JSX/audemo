@@ -25,6 +25,8 @@ mp3lame-encoder = "0.2.5"
 fdk-aac = "0.8.0"
 # Native open/save dialogs.
 rfd = "0.14.1"
+# MIDI for control surfaces (Mackie Control).
+midir = "0.10.0"
 
 # ASIO: builds the Steinberg ASIO SDK (CPAL_ASIO_DIR, or downloaded) and
 # needs LLVM/clang for its bindings.

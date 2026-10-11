@@ -745,6 +745,8 @@ pub struct App {
     pub pitch: PitchState,
     /// View > CD Layout.
     pub cd: crate::cd::CdLayout,
+    /// A Mackie Control surface (Preferences > Control Surface).
+    pub surface: Option<crate::control_surface::Surface>,
 }
 
 /// The pitch display's track, worked out in the background.
@@ -845,6 +847,7 @@ impl App {
             show_pitch: false,
             pitch: Default::default(),
             cd: Default::default(),
+            surface: None,
         };
         let opened_files = !open.is_empty();
         if opened_files {
@@ -852,6 +855,7 @@ impl App {
         }
         app.apply_runtime_prefs(&cc.egui_ctx);
         app.rebuild_keymap();
+        app.apply_control_surface();
         app.follow = app.prefs.follow;
         app.rack_entire = app.prefs.rack_entire;
         if crate::plugin::needs_first_scan() || app.prefs.scan_at_startup {
@@ -912,6 +916,9 @@ impl App {
         self.apply_runtime_prefs(ctx);
         if old.follow != self.prefs.follow {
             self.follow = self.prefs.follow;
+        }
+        if (old.cs_kind, &old.cs_input, &old.cs_output) != (self.prefs.cs_kind, &self.prefs.cs_input, &self.prefs.cs_output) {
+            self.apply_control_surface();
         }
         if old.rack_entire != self.prefs.rack_entire {
             self.rack_entire = self.prefs.rack_entire;
@@ -1138,6 +1145,7 @@ impl App {
         self.poll_analysis();
         self.poll_tools();
         self.poll_marker_export();
+        self.poll_control_surface();
     }
 
     /// Keep the target file's live length and view in step with the input.
@@ -2929,6 +2937,10 @@ pub fn apply_edit(
     let mut audio: Vec<Vec<f32>> = (*doc.audio).clone();
     for (c, ch) in audio.iter_mut().enumerate() {
         if same_len && !active.get(c).copied().unwrap_or(true) {
+            continue;
+        }
+        // A stereo result on a surround file leaves the other channels alone.
+        if same_len && c >= out.len() && out.len() > 1 {
             continue;
         }
         let src = &out[c.min(out.len().saturating_sub(1))];

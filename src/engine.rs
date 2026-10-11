@@ -653,6 +653,13 @@ impl Engine {
         Ok(())
     }
 
+    /// Monitor volume (linear), e.g. from a control surface's master fader.
+    pub fn set_volume(&self, v: f32) {
+        if let Ok(mut s) = self.shared.lock() {
+            s.volume = v.clamp(0.0, 4.0);
+        }
+    }
+
     pub fn play(&self, buffer: Buffer, rate: u32, start: f64, end: f64, looping: bool, tag: u64) {
         self.play_ex(buffer, None, rate, start, end, looping, tag);
     }
