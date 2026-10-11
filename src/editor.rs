@@ -111,6 +111,36 @@ impl App {
         SpecSettings { fft: self.prefs.spec_size as usize, window, range_db: self.prefs.spec_range_db, log: self.prefs.spec_log }
     }
 
+    /// The pitch track of a file for the pitch display, worked out in the
+    /// background (None until ready, or for files over ten minutes).
+    fn pitch_track(&mut self, di: usize) -> Option<std::sync::Arc<crate::dsp::pitch::PitchTrack>> {
+        let d = &self.docs[di];
+        let key = (d.id, d.version);
+        if let Some(rx) = &self.pitch.rx {
+            if let Ok((k, t)) = rx.try_recv() {
+                self.pitch.rx = None;
+                self.pitch.ready = Some((k, std::sync::Arc::new(t)));
+            }
+        }
+        if let Some((k, t)) = &self.pitch.ready {
+            if *k == key {
+                return Some(t.clone());
+            }
+        }
+        if self.pitch.rx.is_none() && d.len() <= d.sample_rate as usize * 600 {
+            let (audio, sr) = (d.audio.clone(), d.sample_rate);
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let k = 1.0 / audio.len().max(1) as f32;
+                let mono: Vec<f32> = (0..audio[0].len()).map(|i| audio.iter().map(|c| c[i]).sum::<f32>() * k).collect();
+                let _ = tx.send((key, crate::dsp::pitch::track(&mono, sr, 60.0, 1200.0, 0.2)));
+            });
+            self.pitch.rx = Some(rx);
+        }
+        // An older track is better than nothing while the new one is worked out.
+        self.pitch.ready.as_ref().filter(|(k, _)| k.0 == key.0).map(|(_, t)| t.clone())
+    }
+
     pub fn editor_ui(&mut self, ui: &mut Ui) {
         if self.mode == crate::app::Mode::Multitrack {
             self.multitrack_ui(ui);
@@ -142,6 +172,7 @@ impl App {
         let ss = self.spec_settings();
         let wheel_base = self.wheel_base();
         let (snap_markers, snap_zero) = (self.prefs.snap_markers, self.prefs.snap_zero);
+        let pitch_track = if self.show_pitch && show_spec { self.pitch_track(di) } else { None };
         let doc = &mut self.docs[di];
         let len = doc.len();
         let n_ch = doc.n_ch().max(1);
@@ -330,6 +361,40 @@ impl App {
                 }
                 if let Some(t) = &doc.spec[c] {
                     painter.image(t.tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                }
+                // View > Show Pitch Display: the detected pitch as a line.
+                if let Some(tr) = &pitch_track {
+                    let first = (v.start.max(0.0) as usize / tr.hop).saturating_sub(1);
+                    let last = ((v.end.max(0.0) as usize) / tr.hop + 2).min(tr.f0.len());
+                    let stroke = Stroke::new(2.0_f32, Color32::from_rgb(0x4f, 0xc3, 0xf7));
+                    let mut run: Vec<Pos2> = Vec::new();
+                    let flush = |run: &mut Vec<Pos2>| {
+                        if run.len() > 1 {
+                            painter.add(Shape::line(std::mem::take(run), stroke));
+                        } else {
+                            run.clear();
+                        }
+                    };
+                    for i in first..last {
+                        let f = tr.f0[i];
+                        if f <= 0.0 {
+                            flush(&mut run);
+                            continue;
+                        }
+                        let x = v.x((i * tr.hop) as f64);
+                        let y = r.bottom() - f_frac(f, nyq as f32) * r.height();
+                        run.push(pos2(x, y));
+                    }
+                    flush(&mut run);
+                    if let Some(h) = ui.input(|i| i.pointer.hover_pos()).filter(|p| r.contains(*p)) {
+                        let f = tr.at(v.s(h.x));
+                        if f > 0.0 {
+                            let m = crate::dsp::pitch::midi_of(f, 440.0);
+                            let note = crate::dsp::effects::drawn::NOTE_NAMES[((m.round() as i32 % 12 + 12) % 12) as usize];
+                            let cents = (m - m.round()) * 100.0;
+                            painter.text(pos2(r.right() - 6.0, r.top() + 4.0), Align2::RIGHT_TOP, format!("{f:.1} Hz  {note}{}  {cents:+.0} ¢", m.round() as i32 / 12 - 1), FontId::monospace(11.0), Color32::from_rgb(0x4f, 0xc3, 0xf7));
+                        }
+                    }
                 }
                 if let Some((a, b)) = sel {
                     let x0 = v.x(a as f64).max(r.left());

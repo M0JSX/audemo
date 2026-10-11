@@ -723,6 +723,17 @@ pub struct App {
     pub keymap: crate::shortcuts::Keymap,
     /// Bumped when the shortcuts change (the macOS menu shows them).
     pub keymap_gen: u64,
+    /// View > Show Pitch Display (over the spectral display).
+    pub show_pitch: bool,
+    pub pitch: PitchState,
+}
+
+/// The pitch display's track, worked out in the background.
+#[derive(Default)]
+pub struct PitchState {
+    /// ((document id, version), track)
+    pub ready: Option<((u64, u64), Arc<crate::dsp::pitch::PitchTrack>)>,
+    pub rx: Option<Receiver<((u64, u64), crate::dsp::pitch::PitchTrack)>>,
 }
 
 impl App {
@@ -812,6 +823,8 @@ impl App {
             marker_export: None,
             keymap: crate::shortcuts::Keymap::new(&[]),
             keymap_gen: 0,
+            show_pitch: false,
+            pitch: Default::default(),
         };
         let opened_files = !open.is_empty();
         if opened_files {
@@ -1204,6 +1217,11 @@ impl App {
             if let Action::Status(s) = &a {
                 if s == "__toggle_spectral" {
                     self.show_spectral = !self.show_spectral;
+                    continue;
+                }
+                if s == "__toggle_pitch" {
+                    self.show_pitch = !self.show_pitch;
+                    self.show_spectral |= self.show_pitch;
                     continue;
                 }
                 if s == "__mix_paste" {

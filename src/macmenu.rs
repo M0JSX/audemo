@@ -237,6 +237,7 @@ impl NativeMenu {
         let _ = view.append(&item("amp_out", "Zoom Out (Amplitude)", None));
         let _ = view.append(&sep());
         let _ = view.append(&item("spectral", "Show/Hide Spectral Frequency Display", None));
+        let _ = view.append(&item("pitch_display", "Show/Hide Pitch Display", ka(app, "pitch_display")));
         let _ = view.append(&item("follow", "Follow Playhead On/Off", None));
         let _ = view.append(&item("play_roll", "Play with Pre-roll and Post-roll", ka(app, "play_roll")));
         let _ = view.append(&item("punch", "Punch In (Record over Selection)", ka(app, "punch")));
@@ -350,6 +351,11 @@ impl App {
             }
             "spectral" => {
                 self.show_spectral = !self.show_spectral;
+                return;
+            }
+            "pitch_display" => {
+                self.show_pitch = !self.show_pitch;
+                self.show_spectral |= self.show_pitch;
                 return;
             }
             "follow" => {

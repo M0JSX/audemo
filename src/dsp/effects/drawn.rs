@@ -72,6 +72,47 @@ pub fn defs() -> Vec<EffectDef> {
             ("Rise One Octave", vec![("bend", Value::S("0:0,100:12".into()))]),
         ]),
         EffectDef::new(
+            "auto_pitch",
+            "Automatic Pitch Correction",
+            TimePitch,
+            "Pull a voice or solo instrument to the nearest note of a scale. Faster attack gives the hard, robotic effect; slower sounds natural.",
+            vec![
+                choice("scale", "Scale", &["Major", "Minor", "Chromatic"], 2),
+                choice("key", "Key", NOTE_NAMES, 0),
+                float("attack", "Attack", 1.0, 10.0, 5.0, "").decimals(1),
+                float("sensitivity", "Sensitivity", 1.0, 100.0, 50.0, "").decimals(0),
+                float("amount", "Correction", 0.0, 100.0, 100.0, "%"),
+                float("a4", "Calibration (A4)", 410.0, 470.0, 440.0, "Hz").decimals(1),
+                float("fmin", "Lowest pitch", 50.0, 500.0, 70.0, "Hz").log(),
+                float("fmax", "Highest pitch", 200.0, 2000.0, 1000.0, "Hz").log(),
+            ],
+            auto_pitch,
+        )
+        .presets(vec![
+            ("Natural Vocal", vec![("attack", Value::F(3.0))]),
+            ("Hard Tune", vec![("attack", Value::F(10.0))]),
+            ("C Major", vec![("scale", Value::C(0)), ("key", Value::C(0))]),
+            ("A Minor", vec![("scale", Value::C(1)), ("key", Value::C(9))]),
+        ]),
+        EffectDef::new(
+            "manual_pitch",
+            "Manual Pitch Correction",
+            TimePitch,
+            "Draw pitch changes over time without changing the length (voices and solo instruments). View > Show Pitch Display shows the pitch to correct.",
+            vec![
+                time_curve("bend", "Pitch change", (-12.0, 12.0, "semitones"), "0:0,100:0"),
+                toggle("spline", "Spline curves", true),
+                float("fmin", "Lowest pitch", 50.0, 500.0, 70.0, "Hz").log(),
+                float("fmax", "Highest pitch", 200.0, 2000.0, 1000.0, "Hz").log(),
+            ],
+            manual_pitch,
+        )
+        .presets(vec![
+            ("Up a Semitone", vec![("bend", Value::S("0:1,100:1".into()))]),
+            ("Down a Semitone", vec![("bend", Value::S("0:-1,100:-1".into()))]),
+            ("Lift the Ending", vec![("bend", Value::S("0:0,70:0,100:2".into()))]),
+        ]),
+        EffectDef::new(
             "fft_filter",
             "FFT Filter",
             Filter,
@@ -143,6 +184,66 @@ pub fn defs() -> Vec<EffectDef> {
         )
         .presets(vec![("Gentle", vec![("amount", Value::F(70.0))]), ("Thorough", vec![("passes", Value::F(60.0)), ("content", Value::F(24.0))])]),
     ]
+}
+
+pub const NOTE_NAMES: &[&str] = &["C", "C♯/D♭", "D", "D♯/E♭", "E", "F", "F♯/G♭", "G", "G♯/A♭", "A", "A♯/B♭", "B"];
+
+/// The reference for pitch tracking: the sum of the channels.
+fn mono_of(input: &[Vec<f32>]) -> Vec<f32> {
+    let len = len_of(input);
+    let k = 1.0 / input.len().max(1) as f32;
+    (0..len).map(|i| input.iter().map(|c| c[i]).sum::<f32>() * k).collect()
+}
+
+fn auto_pitch(input: &[Vec<f32>], ctx: &Ctx, p: &Params) -> Res {
+    use super::super::pitch::{midi_of, psola, track};
+    let sr = ctx.sample_rate;
+    // Sensitivity 1–100 → YIN threshold 0.05 (strict) … 0.45 (lenient).
+    let threshold = 0.05 + 0.4 * (p.f("sensitivity").clamp(1.0, 100.0) - 1.0) / 99.0;
+    let tr = track(&mono_of(input), sr, p.f("fmin"), p.f("fmax").max(p.f("fmin") + 50.0), threshold);
+    let a4 = p.f("a4").clamp(400.0, 480.0);
+    let key = p.c("key").min(11) as i32;
+    let steps: &[i32] = match p.c("scale") {
+        0 => &[0, 2, 4, 5, 7, 9, 11],
+        1 => &[0, 2, 3, 5, 7, 8, 10],
+        _ => &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+    };
+    let amount = (p.f("amount") / 100.0).clamp(0.0, 1.0);
+    // Attack 1 (slow, ~300 ms) … 10 (instant).
+    let attack = p.f("attack").clamp(1.0, 10.0);
+    let tau_s = if attack >= 9.95 { 0.0 } else { 0.3 * (0.005f32 / 0.3).powf((attack - 1.0) / 9.0) };
+    let frame_s = tr.hop as f32 / sr as f32;
+    let alpha = if tau_s <= 0.0 { 1.0 } else { 1.0 - (-frame_s / tau_s).exp() };
+    // Correction (semitones) per frame, smoothed.
+    let mut corr = vec![0.0f32; tr.f0.len()];
+    let mut cur = 0.0f32;
+    for (i, &f) in tr.f0.iter().enumerate() {
+        let target = if f > 0.0 {
+            let m = midi_of(f, a4);
+            let base = m.round() as i32;
+            // The nearest note of the scale.
+            let best = (base - 2..=base + 2).filter(|n| steps.contains(&(((n - key) % 12 + 12) % 12))).min_by(|a, b| (*a as f32 - m).abs().partial_cmp(&(*b as f32 - m).abs()).unwrap()).unwrap_or(base);
+            (best as f32 - m) * amount
+        } else {
+            0.0
+        };
+        cur += (target - cur) * alpha;
+        corr[i] = cur;
+    }
+    let hop = tr.hop;
+    Ok(psola(input, &tr, |t| {
+        let i = (t / hop).min(corr.len().saturating_sub(1));
+        2f32.powf(corr[i] / 12.0)
+    }))
+}
+
+fn manual_pitch(input: &[Vec<f32>], ctx: &Ctx, p: &Params) -> Res {
+    use super::super::pitch::{psola, track};
+    let tr = track(&mono_of(input), ctx.sample_rate, p.f("fmin"), p.f("fmax").max(p.f("fmin") + 50.0), 0.2);
+    let pts = p.curve("bend");
+    let spline = p.b("spline");
+    let len = len_of(input).max(2) as f32;
+    Ok(psola(input, &tr, |t| 2f32.powf(eval_curve(&pts, t as f32 / (len - 1.0) * 100.0, spline, false).clamp(-12.0, 12.0) / 12.0)))
 }
 
 /// Multiply each channel by `gain(u)`, u = 0..1 across the selection.
@@ -504,6 +605,22 @@ mod tests {
         let p = Params::with_preset(&defs().iter().find(|d| d.id == "pitch_bender").unwrap().params, &[("bend", Value::S("0:12,100:12".into()))]);
         let out = pitch_bender(&[vec![0.0; 10000]], &ctx(48000), &p).unwrap();
         assert!((out[0].len() as i64 - 5000).abs() <= 2, "{}", out[0].len());
+    }
+
+    #[test]
+    fn auto_pitch_pulls_to_the_note() {
+        use super::super::super::pitch::track;
+        let sr = 44100;
+        // 25 cents flat of A3 (220 Hz), with harmonics like a voice.
+        let f = 220.0 * 2f32.powf(-0.25 / 12.0);
+        let x: Vec<f32> = (0..sr as usize).map(|i| (1..=4).map(|h| (std::f32::consts::TAU * f * h as f32 * i as f32 / sr as f32).sin() / h as f32).sum::<f32>() * 0.3).collect();
+        let def = defs().into_iter().find(|d| d.id == "auto_pitch").unwrap();
+        let p = Params::with_preset(&def.params, &[("attack", Value::F(10.0))]);
+        let y = (def.process)(&[x], &ctx(sr), &p).unwrap();
+        let t = track(&y[0], sr, 60.0, 1000.0, 0.15);
+        let v: Vec<f32> = t.f0[30..80].iter().copied().filter(|f| *f > 0.0).collect();
+        let mean = v.iter().sum::<f32>() / v.len() as f32;
+        assert!((mean - 220.0).abs() < 1.5, "corrected to {mean}");
     }
 
     #[test]

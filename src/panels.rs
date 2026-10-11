@@ -249,6 +249,9 @@ impl App {
                         if item(ui, "Zoom Out (Amplitude)", "", has_doc) { self.actions.push(Action::AmpOut); }
                         ui.separator();
                         ui.checkbox(&mut self.show_spectral, format!("Show Spectral Frequency Display   {}", km.label("spectral")));
+                        if ui.checkbox(&mut self.show_pitch, format!("Show Pitch Display   {}", km.label("pitch_display"))).changed() && self.show_pitch {
+                            self.show_spectral = true;
+                        }
                         ui.checkbox(&mut self.follow, "Follow Playhead");
                         if item(ui, "Play with Pre-roll and Post-roll", &km.label("play_roll"), has_doc) { self.actions.push(Action::PlayWithRoll); }
                         if item(ui, "Punch In (Record over Selection)", &km.label("punch"), has_doc) { self.actions.push(Action::PunchRecord); }
