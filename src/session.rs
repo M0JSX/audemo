@@ -590,6 +590,8 @@ pub struct MixState {
     pub master_db: f32,
     pub master_fx: Vec<FxSlot>,
     pub master_fx_on: bool,
+    /// Metronome click: (beats per minute, beats per bar, gain). Never in mixdowns.
+    pub metronome: Option<(f64, u32, f32)>,
 }
 
 impl MixState {
@@ -632,6 +634,12 @@ pub struct Session {
     /// Bumped whenever the mix could sound different.
     pub version: u64,
     next_id: u64,
+    /// Tempo and metre (beat grid, metronome).
+    pub tempo: f64,
+    pub beats_per_bar: u32,
+    pub show_grid: bool,
+    pub metronome_on: bool,
+    pub metronome_db: f32,
 }
 
 impl Session {
@@ -658,6 +666,11 @@ impl Session {
             dirty: false,
             version: 1,
             next_id: 1,
+            tempo: 120.0,
+            beats_per_bar: 4,
+            show_grid: false,
+            metronome_on: false,
+            metronome_db: -6.0,
         };
         for _ in 0..n_tracks {
             s.add_track_silent();
@@ -1145,6 +1158,12 @@ impl Session {
                 }
             }
         }
+        // Beats, when the beat grid is shown.
+        if self.show_grid {
+            let beat = self.beat_len();
+            let n = (self.max_span() / beat) as usize;
+            v.extend((0..=n.min(20_000)).map(|k| (k as f64 * beat).round() as usize));
+        }
         if let Some((a, b)) = self.sel_range() {
             v.push(a);
             v.push(b);
@@ -1190,7 +1209,13 @@ impl Session {
             master_db: self.master_db,
             master_fx: self.master_fx.clone(),
             master_fx_on: self.master_fx_on,
+            metronome: self.metronome_on.then(|| (self.tempo, self.beats_per_bar.max(1), db_to_lin(self.metronome_db))),
         }
+    }
+
+    /// Length of one beat in samples.
+    pub fn beat_len(&self) -> f64 {
+        self.sample_rate as f64 * 60.0 / self.tempo.clamp(20.0, 400.0)
     }
 }
 
@@ -1199,7 +1224,8 @@ impl Session {
 /// Render frames [a, b) of the stereo mix offline (mixdown), with fresh
 /// effect state, in blocks.
 pub fn mix_range(m: &MixState, a: usize, b: usize) -> Vec<Vec<f32>> {
-    let fresh = m.with_fresh_fx();
+    let mut fresh = m.with_fresh_fx();
+    fresh.metronome = None;
     let mut out = vec![Vec::with_capacity(b.saturating_sub(a)), Vec::with_capacity(b.saturating_sub(a))];
     let mut tmp = vec![Vec::new(), Vec::new()];
     let mut scratch = MixScratch::default();
@@ -1489,6 +1515,25 @@ pub fn mix_into(m: &MixState, a: usize, b: usize, out: &mut [Vec<f32>], peaks: &
     if master != 1.0 {
         out.iter_mut().for_each(|c| c.iter_mut().for_each(|s| *s *= master));
     }
+    // Metronome: a short tone on each beat, higher on the first of the bar.
+    if let Some((bpm, per_bar, gain)) = m.metronome {
+        let sr = m.sample_rate as f64;
+        let beat = sr * 60.0 / bpm.clamp(20.0, 400.0);
+        let click = (sr * 0.03) as usize;
+        for k in 0..n {
+            let pos = (a + k) as f64;
+            let index = (pos / beat).floor();
+            let phase = pos - index * beat;
+            if phase < click as f64 {
+                let f = if (index as i64).rem_euclid(per_bar as i64) == 0 { 1760.0 } else { 1320.0 };
+                let t = phase / sr;
+                let v = ((t * f * std::f64::consts::TAU).sin() * (-t / 0.006).exp()) as f32 * gain * 0.5;
+                for ch in out.iter_mut() {
+                    ch[k] += v;
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------- file format
@@ -1510,6 +1555,7 @@ fn rel_path(p: &Path, base: Option<&Path>) -> String {
 pub fn to_text(s: &Session, paths: &BTreeMap<u64, PathBuf>, base: Option<&Path>) -> String {
     let mut o = String::from("AUDEMO-SESSION 1\n");
     o.push_str(&format!("name\t{}\nrate\t{}\nmaster\t{}\nmasterfx\t{}\n", clean(&s.name), s.sample_rate, s.master_db, s.master_fx_on as u8));
+    o.push_str(&format!("tempo\t{}\t{}\t{}\t{}\t{}\n", s.tempo, s.beats_per_bar, s.show_grid as u8, s.metronome_on as u8, s.metronome_db));
     let fx_line = |key: &str, f: &FxSlot| format!("{key}\t{}\t{}\t{}\t{}\n", f.effect, f.on as u8, f.params.to_text(), f.sidechain.unwrap_or(0));
     for f in &s.master_fx {
         o.push_str(&fx_line("mfx", f));
@@ -1619,6 +1665,13 @@ pub fn from_text(id: u64, text: &str, base: Option<&Path>, effects: &[EffectDef]
         match f[0] {
             "name" => s.name = f.get(1).unwrap_or(&"").to_string(),
             "rate" => s.sample_rate = num(1)? as u32,
+            "tempo" => {
+                s.tempo = num(1).unwrap_or(120.0).clamp(20.0, 400.0);
+                s.beats_per_bar = num(2).unwrap_or(4.0).clamp(1.0, 32.0) as u32;
+                s.show_grid = num(3).map(|v| v != 0.0).unwrap_or(false);
+                s.metronome_on = num(4).map(|v| v != 0.0).unwrap_or(false);
+                s.metronome_db = num(5).unwrap_or(-6.0).clamp(-40.0, 6.0) as f32;
+            }
             "master" => s.master_db = num(1)? as f32,
             "source" => {
                 let sid = num(1)? as u64;

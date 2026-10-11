@@ -178,6 +178,10 @@ impl NativeMenu {
             let _ = clip.append(&item(id, label, ka(app, id)));
         }
         let _ = multitrack.append(&clip);
+        let _ = multitrack.append(&item("mt_xml", "Export to Premiere Pro (FCP XML)…", None));
+        let _ = multitrack.append(&item("mt_tempo", "Tempo and Metronome…", None));
+        let _ = multitrack.append(&item("mt_grid", "Show/Hide Beat Grid", ka(app, "mt_grid")));
+        let _ = multitrack.append(&item("mt_metronome", "Metronome On/Off", ka(app, "mt_metronome")));
         let bounce = Submenu::new("Bounce to New Track", true);
         for (id, label) in [("mt_bounce", "Selected Track"), ("mt_bounce_sel", "Time Selection in Selected Track"), ("mt_bounce_clips", "Selected Clips")] {
             let _ = bounce.append(&item(id, label, ka(app, id)));
@@ -238,6 +242,8 @@ impl NativeMenu {
         let view = Submenu::new("View", true);
         let _ = view.append(&item("mode_wave", "Waveform Editor", None));
         let _ = view.append(&item("mode_mt", "Multitrack Editor", None));
+        let _ = view.append(&sep());
+        let _ = view.append(&item("cd_layout", "CD Layout…", None));
         let _ = view.append(&sep());
         let _ = view.append(&item("zoom_in", "Zoom In (Time)", None));
         let _ = view.append(&item("zoom_out", "Zoom Out (Time)", None));
@@ -431,6 +437,12 @@ impl App {
             "amp_in" => Action::AmpIn,
             "amp_out" => Action::AmpOut,
             "import_markers" => Action::MarkerCmd(crate::markers_ui::MarkerCmd::ImportCsv),
+            "mt_tempo" => Action::MtClip(crate::mt_ui::ClipCmd::TempoDialog),
+            "mt_xml" => Action::MtClip(crate::mt_ui::ClipCmd::ExportXml),
+            "cd_layout" => {
+                self.cd.show = true;
+                return;
+            }
             "export_markers" => Action::MarkerCmd(crate::markers_ui::MarkerCmd::ExportCsv),
             "snap_markers" => {
                 self.prefs.snap_markers = !self.prefs.snap_markers;

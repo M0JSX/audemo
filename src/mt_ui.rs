@@ -90,6 +90,11 @@ pub enum ClipCmd {
     Match { mode: usize, target: f32 },
     Bounce(BounceKind),
     ShowEssential,
+    TempoDialog,
+    ExportXml,
+    SetTempo { bpm: f64, beats_per_bar: u32, metronome_db: f32 },
+    ToggleMetronome,
+    ToggleGrid,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -884,7 +889,7 @@ impl App {
 
     fn mt_clip_cmd(&mut self, si: usize, cmd: ClipCmd) {
         let sel: Vec<u64> = self.sessions[si].selected_clips.iter().copied().collect();
-        let need_clips = !matches!(cmd, ClipCmd::Bounce(BounceKind::Track) | ClipCmd::Bounce(BounceKind::TimeSelection) | ClipCmd::ShowEssential);
+        let need_clips = !matches!(cmd, ClipCmd::Bounce(BounceKind::Track) | ClipCmd::Bounce(BounceKind::TimeSelection) | ClipCmd::ShowEssential | ClipCmd::TempoDialog | ClipCmd::ExportXml | ClipCmd::SetTempo { .. } | ClipCmd::ToggleMetronome | ClipCmd::ToggleGrid);
         if need_clips && sel.is_empty() {
             self.set_status("Select one or more clips first.");
             return;
@@ -971,6 +976,29 @@ impl App {
             }
             ClipCmd::Bounce(kind) => self.mt_bounce(si, kind),
             ClipCmd::ShowEssential => self.show_panel(crate::app::Panel::EssentialSound),
+            ClipCmd::ExportXml => self.mt_export_xml(si),
+            ClipCmd::TempoDialog => {
+                let s = &self.sessions[si];
+                self.dialog = Some(Dialog::Tempo { bpm: s.tempo, beats_per_bar: s.beats_per_bar, metronome_db: s.metronome_db });
+            }
+            ClipCmd::SetTempo { bpm, beats_per_bar, metronome_db } => {
+                let s = &mut self.sessions[si];
+                s.push_undo("Tempo");
+                s.tempo = bpm.clamp(20.0, 400.0);
+                s.beats_per_bar = beats_per_bar.clamp(1, 32);
+                s.metronome_db = metronome_db.clamp(-40.0, 6.0);
+                s.touch();
+            }
+            ClipCmd::ToggleMetronome => {
+                let s = &mut self.sessions[si];
+                s.metronome_on = !s.metronome_on;
+                s.touch();
+            }
+            ClipCmd::ToggleGrid => {
+                let s = &mut self.sessions[si];
+                s.show_grid = !s.show_grid;
+                s.dirty = true;
+            }
         }
     }
 
@@ -1102,6 +1130,48 @@ impl App {
         }
         s.touch();
         self.set_status(if remixed { "Remixed to the new length".to_string() } else { format!("Stretched to {percent:.0}%") });
+    }
+
+    /// Multitrack > Export > FCP XML (for Premiere Pro).
+    fn mt_export_xml(&mut self, si: usize) {
+        let s = &self.sessions[si];
+        let used: std::collections::BTreeSet<u64> = s.tracks.iter().flat_map(|t| t.clips.iter().map(|c| c.source)).collect();
+        let mut files = BTreeMap::new();
+        let mut missing = Vec::new();
+        for id in used {
+            let Some(src) = s.sources.get(&id) else { continue };
+            let doc = src.doc_id.and_then(|d| self.docs.iter().find(|x| x.id == d));
+            let file = match doc {
+                Some(d) if !d.dirty => d.path.clone().map(|p| (p, d.sample_rate)),
+                Some(_) => None,
+                None => src.path.clone().filter(|p| p.is_file()).map(|p| (p, s.sample_rate)),
+            };
+            match file {
+                Some((p, rate)) => {
+                    let p = std::fs::canonicalize(&p).unwrap_or(p);
+                    files.insert(id, (p, rate, src.audio.len().clamp(1, 2), src.len()));
+                }
+                None => missing.push(src.name.clone()),
+            }
+        }
+        if !missing.is_empty() {
+            self.dialog = Some(Dialog::Message {
+                title: "Export FCP XML".into(),
+                text: format!("These clips' audio isn't saved in a file yet: {}.\n\nSave the session (File > Save Session) or the files first, then export again.", missing.join(", ")),
+            });
+            return;
+        }
+        let name = safe_file_name(&s.name);
+        let mut dlg = rfd::FileDialog::new().add_filter("Final Cut Pro XML", &["xml"]).set_file_name(format!("{name}.xml"));
+        if let Some(dir) = s.path.as_ref().and_then(|p| p.parent()) {
+            dlg = dlg.set_directory(dir);
+        }
+        let Some(path) = dlg.save_file() else { return };
+        let xml = crate::interchange::session_xml(s, &files, 30);
+        match std::fs::write(&path, xml) {
+            Ok(()) => self.set_status(format!("Exported {} for Premiere Pro (File > Import there)", path.display())),
+            Err(e) => self.set_status(format!("Couldn't write {}: {e}", path.display())),
+        }
     }
 
     fn mt_mixdown(&mut self, selection: bool) {
@@ -1869,6 +1939,32 @@ impl App {
                     s.cursor = pos;
                     if resp.clicked() || resp.drag_stopped() {
                         self.actions.push(Action::SetCursor(pos));
+                    }
+                }
+            }
+        }
+
+        // Beat grid: bars numbered in the ruler, lines down through the tracks.
+        if s.show_grid {
+            let beat = s.beat_len();
+            let px_beat = beat / v.spp();
+            let per_bar = s.beats_per_bar.max(1) as usize;
+            if px_beat > 1.5 {
+                let first = (v.start.max(0.0) / beat).floor() as usize;
+                let last = (v.end / beat).ceil() as usize;
+                for k in first..=last {
+                    let x = v.x(k as f64 * beat);
+                    if x < lanes.left() || x > lanes.right() {
+                        continue;
+                    }
+                    let bar = k % per_bar == 0;
+                    if !bar && px_beat < 6.0 {
+                        continue;
+                    }
+                    let col = if bar { Color32::from_rgba_unmultiplied(0x6d, 0xe0, 0x8a, 60) } else { Color32::from_rgba_unmultiplied(0x6d, 0xe0, 0x8a, 22) };
+                    painter.line_segment([pos2(x, ruler.bottom() - if bar { 12.0 } else { 6.0 }), pos2(x, body.bottom())], Stroke::new(1.0_f32, col));
+                    if bar && px_beat * per_bar as f64 > 26.0 {
+                        painter.text(pos2(x + 2.0, ruler.bottom() - 12.0), Align2::LEFT_BOTTOM, format!("{}", k / per_bar + 1), FontId::monospace(9.0), Color32::from_rgb(0x6d, 0xe0, 0x8a));
                     }
                 }
             }
@@ -2731,6 +2827,11 @@ impl App {
             let end = s.end();
             child.add_space(16.0);
             child.label(RichText::new(format!("{} tracks · {} · {} Hz", s.tracks.len(), format_time(end as f64, s.sample_rate), s.sample_rate)).color(TEXT_DIM()).size(11.0));
+            child.add_space(16.0);
+            let tempo = format!("♩ {:.1} BPM  {}/4{}", s.tempo, s.beats_per_bar, if s.metronome_on { "  · metronome" } else { "" });
+            if child.add(egui::Label::new(RichText::new(tempo).color(TEXT_DIM()).size(11.0)).sense(Sense::click())).on_hover_text("Click to set the tempo, metre and metronome").clicked() {
+                self.actions.push(Action::MtClip(ClipCmd::TempoDialog));
+            }
         }
 
         // ------------------------------------------------ clip context menu

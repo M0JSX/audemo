@@ -4,12 +4,14 @@
 mod analysis_ui;
 mod app;
 mod autosave;
+mod cd;
 mod dialogs;
 mod dsp;
 mod editor;
 mod engine;
 mod essential;
 mod export;
+mod interchange;
 mod io;
 mod liverack;
 #[cfg(any(target_os = "macos", audemo_check_menu))]
@@ -50,6 +52,7 @@ impl eframe::App for app::App {
                     .show_inside(ui, |ui| self.editor_ui(ui));
             });
         self.dialogs(ctx);
+        self.cd_window(ctx);
         self.job_overlay(ctx);
         self.finish_frame(ctx);
     }

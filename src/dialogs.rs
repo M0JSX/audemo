@@ -359,6 +359,32 @@ impl App {
                     next = Some(Dialog::MatchClipVolume { mode, target });
                 }
             }
+            Dialog::Tempo { mut bpm, mut beats_per_bar, mut metronome_db } => {
+                let mut open = true;
+                let mut go = false;
+                centered(egui::Window::new("Tempo and Metronome")).open(&mut open).show(ctx, |ui| {
+                    egui::Grid::new("tempo").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                        ui.label("Tempo");
+                        ui.add(egui::DragValue::new(&mut bpm).speed(0.2).range(20.0..=400.0).fixed_decimals(2).suffix(" BPM"));
+                        ui.end_row();
+                        ui.label("Beats per bar");
+                        ui.add(egui::DragValue::new(&mut beats_per_bar).range(1..=32));
+                        ui.end_row();
+                        ui.label("Metronome volume");
+                        ui.add(egui::Slider::new(&mut metronome_db, -40.0..=6.0).suffix(" dB"));
+                        ui.end_row();
+                    });
+                    ui.label(RichText::new("The beat grid (Multitrack > Show Beat Grid) and snapping follow the tempo; the metronome plays during playback and recording but is never mixed down.").color(TEXT_DIM()).size(11.0));
+                    if ui.button("     OK     ").clicked() {
+                        go = true;
+                    }
+                });
+                if go {
+                    self.actions.push(Action::MtClip(crate::mt_ui::ClipCmd::SetTempo { bpm, beats_per_bar, metronome_db }));
+                } else if open {
+                    next = Some(Dialog::Tempo { bpm, beats_per_bar, metronome_db });
+                }
+            }
             Dialog::About => {
                 let mut open = true;
                 centered(egui::Window::new("About Audemo")).open(&mut open).show(ctx, |ui| {

@@ -213,6 +213,10 @@ impl App {
                                 if item(ui, label, &km.label(id), in_mt) { self.actions.push(Action::MtClip(cmd)); }
                             }
                         });
+                        if item(ui, "Tempo and Metronome…", "", has_session) { self.actions.push(Action::MtClip(crate::mt_ui::ClipCmd::TempoDialog)); }
+                        let (grid, metro) = self.session().map(|s| (s.show_grid, s.metronome_on)).unwrap_or((false, false));
+                        if item(ui, if grid { "✓ Show Beat Grid" } else { "Show Beat Grid" }, &km.label("mt_grid"), has_session) { self.actions.push(Action::MtClip(crate::mt_ui::ClipCmd::ToggleGrid)); }
+                        if item(ui, if metro { "✓ Metronome" } else { "Metronome" }, &km.label("mt_metronome"), has_session) { self.actions.push(Action::MtClip(crate::mt_ui::ClipCmd::ToggleMetronome)); }
                         ui.menu_button("Bounce to New Track", |ui| {
                             use crate::mt_ui::{BounceKind as B, ClipCmd as C};
                             if item(ui, "Selected Track", &km.label("mt_bounce"), in_mt) { self.actions.push(Action::MtClip(C::Bounce(B::Track))); }
@@ -220,6 +224,7 @@ impl App {
                             if item(ui, "Selected Clips", &km.label("mt_bounce_clips"), in_mt) { self.actions.push(Action::MtClip(C::Bounce(B::Clips))); }
                         });
                         ui.separator();
+                        if item(ui, "Export to Premiere Pro (FCP XML)…", "", has_session) { self.actions.push(Action::MtClip(crate::mt_ui::ClipCmd::ExportXml)); }
                         ui.menu_button("Mixdown Session to New File", |ui| {
                             if item(ui, "Entire Session", "", has_session) { self.actions.push(Action::MtMixdown(false)); }
                             if item(ui, "Time Selection", "", has_time_sel) { self.actions.push(Action::MtMixdown(true)); }
@@ -258,6 +263,7 @@ impl App {
                         }
                     });
                     ui.menu_button("View", |ui| {
+                        if item(ui, "CD Layout…", "", true) { self.cd.show = true; }
                         if item(ui, "Waveform Editor", &km.label("mode_waveform"), true) { self.actions.push(Action::SetMode(Mode::Waveform)); }
                         if item(ui, "Multitrack Editor", &km.label("mode_multitrack"), true) { self.actions.push(Action::SetMode(Mode::Multitrack)); }
                         ui.separator();

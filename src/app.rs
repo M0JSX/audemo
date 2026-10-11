@@ -498,6 +498,8 @@ pub enum Dialog {
     ClipStretch { percent: f32 },
     /// Clip > Match Clip Volume.
     MatchClipVolume { mode: usize, target: f32 },
+    /// Multitrack > Tempo and Metronome.
+    Tempo { bpm: f64, beats_per_bar: u32, metronome_db: f32 },
     PluginManager,
     About,
     Message { title: String, text: String },
@@ -741,6 +743,8 @@ pub struct App {
     /// View > Show Pitch Display (over the spectral display).
     pub show_pitch: bool,
     pub pitch: PitchState,
+    /// View > CD Layout.
+    pub cd: crate::cd::CdLayout,
 }
 
 /// The pitch display's track, worked out in the background.
@@ -840,6 +844,7 @@ impl App {
             keymap_gen: 0,
             show_pitch: false,
             pitch: Default::default(),
+            cd: Default::default(),
         };
         let opened_files = !open.is_empty();
         if opened_files {
