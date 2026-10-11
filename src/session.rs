@@ -21,6 +21,11 @@ use crate::engine::Buffer;
 
 pub const SESSION_EXT: &str = "audemo";
 
+/// An Audemo (.audemo) or Audition (.sesx) multitrack session.
+pub fn is_session_file(p: &Path) -> bool {
+    p.extension().map(|e| e.eq_ignore_ascii_case(SESSION_EXT)).unwrap_or(false) || crate::sesx::is_sesx(p)
+}
+
 /// Track colours, cycled as tracks are added.
 pub const TRACK_COLOURS: [[u8; 3]; 8] = [
     [0x3f, 0xdc, 0x9b],
@@ -735,7 +740,7 @@ impl Session {
         self.sel.filter(|(a, b)| b > a)
     }
 
-    fn add_track_silent(&mut self) -> usize {
+    pub(crate) fn add_track_silent(&mut self) -> usize {
         let id = self.new_id();
         let n = self.tracks.len();
         self.tracks.push(Track::new(id, format!("Track {}", n + 1), TRACK_COLOURS[n % TRACK_COLOURS.len()]));

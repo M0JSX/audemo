@@ -454,7 +454,8 @@ impl App {
             }
         };
         let id = self.new_id();
-        let parsed = match session::from_text(id, &text, path.parent(), &self.effects) {
+        let parsed = if crate::sesx::is_sesx(path) { crate::sesx::from_sesx(id, &text, path.parent(), &self.effects) } else { session::from_text(id, &text, path.parent(), &self.effects) };
+        let parsed = match parsed {
             Ok(p) => p,
             Err(e) => {
                 self.dialog = Some(Dialog::Message { title: "Couldn't open session".into(), text: e });
@@ -507,12 +508,17 @@ impl App {
         let path = match (&s.path, force_dialog) {
             (Some(p), false) => p.clone(),
             _ => {
-                let mut dlg = rfd::FileDialog::new().add_filter("Audemo session", &[SESSION_EXT]).set_file_name(format!("{}.{SESSION_EXT}", safe_file_name(&s.name)));
+                // Audition's .sesx by default (Audemo's own data rides along
+                // inside it); .audemo is still offered.
+                let mut dlg = rfd::FileDialog::new()
+                    .add_filter("Audition session (.sesx)", &[crate::sesx::EXT])
+                    .add_filter("Audemo session (.audemo)", &[SESSION_EXT])
+                    .set_file_name(format!("{}.{}", safe_file_name(&s.name), crate::sesx::EXT));
                 if let Some(dir) = s.path.as_ref().and_then(|p| p.parent()) {
                     dlg = dlg.set_directory(dir);
                 }
                 match dlg.save_file() {
-                    Some(p) if p.extension().is_none() => p.with_extension(SESSION_EXT),
+                    Some(p) if p.extension().is_none() => p.with_extension(crate::sesx::EXT),
                     Some(p) => p,
                     None => return,
                 }
@@ -566,7 +572,7 @@ impl App {
             paths.insert(*id, p.clone());
             written.push((*id, p));
         }
-        let text = session::to_text(s, &paths, Some(&base));
+        let text = if crate::sesx::is_sesx(&path) { crate::sesx::to_sesx(s, &paths, &base) } else { session::to_text(s, &paths, Some(&base)) };
         if let Err(e) = std::fs::write(&path, text) {
             self.dialog = Some(Dialog::Message { title: "Save failed".into(), text: e.to_string() });
             return;
@@ -1270,7 +1276,7 @@ impl App {
                 };
                 let mut t = track;
                 for p in paths {
-                    if p.extension().map(|e| e.eq_ignore_ascii_case(SESSION_EXT)).unwrap_or(false) {
+                    if session::is_session_file(&p) {
                         self.open_session(&p);
                         continue;
                     }

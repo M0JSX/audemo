@@ -25,6 +25,7 @@ mod plugin_ui;
 mod prefs;
 mod prefs_ui;
 mod session;
+mod sesx;
 mod shortcuts;
 mod theme;
 mod tools_ui;

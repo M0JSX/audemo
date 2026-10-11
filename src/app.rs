@@ -1398,7 +1398,7 @@ impl App {
 
     fn open_paths(&mut self, paths: Vec<PathBuf>) {
         for p in paths {
-            if p.extension().map(|e| e.eq_ignore_ascii_case(crate::session::SESSION_EXT)).unwrap_or(false) {
+            if crate::session::is_session_file(&p) {
                 self.open_session(&p);
                 continue;
             }
@@ -2253,6 +2253,7 @@ impl App {
             Action::Open => {
                 let mut exts: Vec<&str> = io::OPEN_EXTENSIONS.to_vec();
                 exts.push(crate::session::SESSION_EXT);
+                exts.push(crate::sesx::EXT);
                 let picked = rfd::FileDialog::new()
                     .add_filter("Audio files and sessions", &exts)
                     .add_filter("All files", &["*"])
