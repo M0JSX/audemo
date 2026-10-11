@@ -4,6 +4,7 @@
 mod amplitude;
 mod delay;
 pub mod diagnose;
+pub mod drawn;
 mod filter;
 mod generate;
 mod modulation;
@@ -91,6 +92,8 @@ pub struct Ctx<'a> {
     pub sample_rate: u32,
     pub channels: usize,
     pub noise_print: Option<&'a NoiseProfile>,
+    /// Example of the sound to remove (Effects > Learn Sound Model).
+    pub sound_model: Option<&'a NoiseProfile>,
 }
 
 pub struct EffectDef {
@@ -201,6 +204,7 @@ pub fn registry() -> Vec<EffectDef> {
     v.extend(timepitch::defs());
     v.extend(generate::defs());
     v.extend(more::defs());
+    v.extend(drawn::defs());
     v
 }
 

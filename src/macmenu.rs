@@ -193,6 +193,7 @@ impl NativeMenu {
             let sub = Submenu::new(cat.name(), true);
             if cat == Category::Restoration {
                 let _ = sub.append(&item("noise_print", "Capture Noise Print", None));
+                let _ = sub.append(&item("learn_sound", "Learn Sound Model", None));
                 let _ = sub.append(&sep());
             }
             for (i, e) in app.effects.iter().enumerate().filter(|(_, e)| e.category == cat) {
@@ -406,6 +407,7 @@ impl App {
             "deselect" => Action::Deselect,
             "marker" => Action::AddMarker,
             "noise_print" => Action::CaptureNoise,
+            "learn_sound" => Action::LearnSoundModel,
             "zoom_in" => Action::ZoomIn,
             "zoom_out" => Action::ZoomOut,
             "zoom_full" => Action::ZoomFull,

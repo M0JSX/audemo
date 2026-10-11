@@ -992,7 +992,7 @@ mod tests {
                     // Removing the average needs the whole file; live uses the high-pass method.
                     p.set("method", Value::C(1));
                 }
-                let ctx = Ctx { sample_rate: sr, channels: 2, noise_print: None };
+                let ctx = Ctx { sample_rate: sr, channels: 2, noise_print: None, sound_model: None };
                 let want = def.run(&[l.clone(), r.clone()], &ctx, &p).unwrap();
                 let mut e = make(id, &p, sr).unwrap();
                 let (mut ol, mut or) = (l.clone(), r.clone());

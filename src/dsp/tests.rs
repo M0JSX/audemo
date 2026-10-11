@@ -14,7 +14,7 @@ fn sine(f: f32, secs: f32, amp: f32) -> Vec<f32> {
 }
 
 fn ctx(ch: usize) -> Ctx<'static> {
-    Ctx { sample_rate: SR, channels: ch, noise_print: None }
+    Ctx { sample_rate: SR, channels: ch, noise_print: None, sound_model: None }
 }
 
 fn rms_between(x: &[f32], a: usize, b: usize) -> f32 {
@@ -105,9 +105,11 @@ fn every_effect_runs_with_defaults_and_presets() {
             all.push((name, e.preset_params(name).unwrap()));
         }
         for (name, p) in all {
-            let c = Ctx { sample_rate: SR, channels: 2, noise_print: Some(&profile) };
+            let c = Ctx { sample_rate: SR, channels: 2, noise_print: Some(&profile), sound_model: Some(&profile) };
             let out = e.run(&input, &c, &p).unwrap_or_else(|err| panic!("{} {name}: {err}", e.id));
-            assert_eq!(out.len(), 2, "{} channel count", e.id);
+            // The band splitter returns every band's channels, band after band.
+            let per_band = if e.id == "band_splitter" { out.len() / 2 } else { 1 };
+            assert_eq!(out.len(), 2 * per_band, "{} channel count", e.id);
             if !e.changes_length {
                 assert_eq!(out[0].len(), input[0].len(), "{} {name} length", e.id);
             }
@@ -126,7 +128,7 @@ fn mono_input_rejected_by_stereo_effects_only() {
         let res = e.run(&mono, &ctx(1), &e.default_params());
         if e.stereo_only {
             assert!(res.is_err(), "{}", e.id);
-        } else if e.id != "noise_reduction" && e.id != "match_loudness" {
+        } else if e.id != "noise_reduction" && e.id != "match_loudness" && e.id != "sound_remover" {
             assert!(res.is_ok(), "{}: {:?}", e.id, res.err());
         }
     }
@@ -185,7 +187,7 @@ fn noise_reduction_lowers_noise_and_keeps_tone() {
     let profile = capture_noise_print(&[noise[..SR as usize].to_vec()], SR).unwrap();
     let tone = sine(1000.0, 1.0, 0.3);
     let mixed: Vec<f32> = tone.iter().zip(&noise[SR as usize..]).map(|(a, b)| a + b).collect();
-    let c = Ctx { sample_rate: SR, channels: 1, noise_print: Some(&profile) };
+    let c = Ctx { sample_rate: SR, channels: 1, noise_print: Some(&profile), sound_model: None };
     let out = e.run(&[mixed.clone()], &c, &e.default_params()).unwrap();
     assert!(tone_level(&out[0][4096..40000], 1000.0) > 0.27, "tone {}", tone_level(&out[0][4096..40000], 1000.0));
     // Noise on its own drops by roughly the configured amount (80% ~ -11 dB).

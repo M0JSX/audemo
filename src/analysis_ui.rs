@@ -120,7 +120,7 @@ impl App {
         let label = format!("Match Loudness ({done} of {})", self.analysis.ml_total);
         self.engine.stop();
         self.spawn_job(label, JobKind::Edit { doc_id, range: (0, len), active: vec![true; n_ch], new_rate: None, select: false }, move || {
-            let ctx = crate::dsp::effects::Ctx { sample_rate: sr, channels: n_ch, noise_print: None };
+            let ctx = crate::dsp::effects::Ctx { sample_rate: sr, channels: n_ch, noise_print: None, sound_model: None };
             effects[idx].run(&input, &ctx, &params)
         });
     }

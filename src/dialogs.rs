@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, FontId, Layout, RichText, Sense, Shape, Stroke, Ui};
+use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, FontId, Layout, Pos2, RichText, Sense, Shape, Stroke, Ui};
 
 use crate::app::{Action, App, Dialog, SAMPLE_RATES};
 use crate::dsp::effects::EffectDef;
@@ -724,9 +724,25 @@ fn param_grid(ui: &mut Ui, def: &EffectDef, params: &mut Params, _sr: u32) {
     if def.id.starts_with("graphic_eq") {
         return graphic_eq_faders(ui, def, params);
     }
+    // Drawn curves first, full width, then the other parameters.
+    let spline = def.params.iter().any(|p| p.key == "spline") && params.b("spline");
+    for pd in def.params.iter().filter(|p| matches!(p.kind, Kind::Curve { .. })) {
+        ui.label(RichText::new(pd.label).color(TEXT_DIM()));
+        let mut pts = params.curve(pd.key);
+        if curve_editor(ui, egui::Id::new(("curve", def.id, pd.key)), &pd.kind, &mut pts, spline) {
+            params.set(pd.key, Value::S(crate::dsp::params::curve_text(&pts)));
+        }
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Click to add a point, drag to move, double-click a point to delete it.").size(11.0).color(TEXT_DIM()));
+            if ui.small_button("Reset").clicked() {
+                params.set(pd.key, pd.default_value());
+            }
+        });
+        ui.add_space(6.0);
+    }
     let mut group = "";
     egui::Grid::new(("params", def.id)).num_columns(2).spacing([14.0, 6.0]).show(ui, |ui| {
-        for pd in &def.params {
+        for pd in def.params.iter().filter(|p| !matches!(p.kind, Kind::Curve { .. })) {
             if pd.group != group {
                 group = pd.group;
                 if !group.is_empty() {
@@ -773,10 +789,115 @@ fn param_grid(ui: &mut Ui, def: &EffectDef, params: &mut Params, _sr: u32) {
                         params.set(pd.key, Value::S(t));
                     }
                 }
+                Kind::Curve { .. } => {}
             }
             ui.end_row();
         }
     });
+}
+
+/// Editor for a drawn curve (Fade/Gain Envelope, FFT Filter …). The end
+/// points stay at the ends of the x axis. Returns true when changed.
+fn curve_editor(ui: &mut Ui, id: egui::Id, kind: &Kind, pts: &mut Vec<(f32, f32)>, spline: bool) -> bool {
+    let Kind::Curve { x_min, x_max, log_x, x_unit, y_min, y_max, y_unit, .. } = *kind else { return false };
+    let size = vec2(ui.available_width().max(540.0), 200.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
+    let plot = rect.shrink2(vec2(8.0, 8.0));
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, 3.0, LANE_BG());
+    let to_u = |x: f32| if log_x { (x.max(x_min) / x_min).ln() / (x_max / x_min).ln() } else { (x - x_min) / (x_max - x_min) };
+    let from_u = |u: f32| if log_x { x_min * (x_max / x_min).powf(u.clamp(0.0, 1.0)) } else { x_min + u.clamp(0.0, 1.0) * (x_max - x_min) };
+    let sx = |x: f32| plot.left() + to_u(x) * plot.width();
+    let sy = |y: f32| plot.bottom() - (y - y_min) / (y_max - y_min) * plot.height();
+    let xs = |px: f32| from_u((px - plot.left()) / plot.width());
+    let ys = |py: f32| (y_min + (plot.bottom() - py) / plot.height() * (y_max - y_min)).clamp(y_min, y_max);
+    // Grid.
+    let grid = Stroke::new(1.0_f32, Color32::from_white_alpha(18));
+    let ticks: Vec<f32> = if log_x { vec![50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0] } else { vec![25.0, 50.0, 75.0] };
+    for t in ticks.iter().filter(|t| **t > x_min && **t < x_max) {
+        let x = sx(*t);
+        p.line_segment([pos2(x, plot.top()), pos2(x, plot.bottom())], grid);
+        let label = if *t >= 1000.0 { format!("{}k", t / 1000.0) } else { format!("{t}") };
+        p.text(pos2(x + 2.0, plot.bottom() - 2.0), Align2::LEFT_BOTTOM, label, FontId::proportional(9.0), TEXT_DIM());
+    }
+    for k in 0..=4 {
+        let y = y_min + (y_max - y_min) * k as f32 / 4.0;
+        let py = sy(y);
+        p.line_segment([pos2(plot.left(), py), pos2(plot.right(), py)], grid);
+        p.text(pos2(plot.left() + 2.0, py - 1.0), Align2::LEFT_BOTTOM, format!("{y:.0} {y_unit}"), FontId::proportional(9.0), TEXT_DIM());
+    }
+    // End points pinned to the ends of the axis.
+    if pts.is_empty() {
+        pts.push((x_min, 0.0f32.clamp(y_min, y_max)));
+    }
+    pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    pts[0].0 = x_min;
+    if pts.len() == 1 {
+        pts.push((x_max, pts[0].1));
+    }
+    let last = pts.len() - 1;
+    pts[last].0 = x_max;
+    let mut changed = false;
+    let pointer = resp.interact_pointer_pos().or(resp.hover_pos());
+    let near = |pts: &[(f32, f32)], pos: Pos2| -> Option<usize> {
+        pts.iter().enumerate().map(|(i, (x, y))| (i, pos2(sx(*x), sy(*y)).distance(pos))).filter(|(_, d)| *d < 9.0).min_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).map(|(i, _)| i)
+    };
+    let mut drag: Option<usize> = ui.data(|d| d.get_temp(id)).flatten();
+    if resp.double_clicked() {
+        if let Some(i) = pointer.and_then(|pos| near(pts, pos)).filter(|i| *i != 0 && *i != pts.len() - 1) {
+            pts.remove(i);
+            changed = true;
+        }
+        drag = None;
+    } else if resp.drag_started() || resp.clicked() {
+        if let Some(pos) = pointer {
+            drag = match near(pts, pos) {
+                Some(i) => Some(i),
+                None => {
+                    let pt = (xs(pos.x), ys(pos.y));
+                    let at = pts.iter().position(|q| q.0 > pt.0).unwrap_or(pts.len() - 1).max(1);
+                    pts.insert(at, pt);
+                    changed = true;
+                    Some(at)
+                }
+            };
+        }
+    }
+    if resp.dragged() {
+        if let (Some(i), Some(pos)) = (drag, pointer) {
+            if i < pts.len() {
+                let n = pts.len();
+                let x = if i == 0 {
+                    x_min
+                } else if i == n - 1 {
+                    x_max
+                } else {
+                    xs(pos.x).clamp(pts[i - 1].0, pts[i + 1].0)
+                };
+                pts[i] = (x, ys(pos.y));
+                changed = true;
+            }
+        }
+    }
+    if resp.drag_stopped() || resp.clicked() {
+        drag = None;
+    }
+    ui.data_mut(|d| d.insert_temp(id, drag));
+    // The curve.
+    let line: Vec<Pos2> = (0..=240).map(|k| {
+        let x = from_u(k as f32 / 240.0);
+        pos2(sx(x), sy(crate::dsp::params::eval_curve(pts, x, spline, log_x).clamp(y_min, y_max)))
+    }).collect();
+    p.add(Shape::line(line, Stroke::new(2.0_f32, WAVE())));
+    for (x, y) in pts.iter() {
+        p.circle_filled(pos2(sx(*x), sy(*y)), 4.0, HOT());
+    }
+    if let Some(pos) = resp.hover_pos() {
+        let (x, y) = (xs(pos.x), ys(pos.y));
+        let xt = if log_x { format!("{x:.0} {x_unit}") } else { format!("{x:.1} {x_unit}") };
+        p.text(pos2(plot.right(), plot.top()), Align2::RIGHT_TOP, format!("{xt}   {y:.1} {y_unit}"), FontId::monospace(10.0), TEXT());
+    }
+    changed
 }
 
 /// Frequency-response graph with draggable band handles (log frequency axis).

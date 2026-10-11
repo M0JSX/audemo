@@ -219,6 +219,7 @@ impl App {
                             ui.menu_button(cat.name(), |ui| {
                                 if cat == Category::Restoration {
                                     if item(ui, "Capture Noise Print", &km.label("capture_noise"), has_sel) { self.actions.push(Action::CaptureNoise); }
+                                    if item(ui, "Learn Sound Model", "", has_sel) { self.actions.push(Action::LearnSoundModel); }
                                     ui.separator();
                                 }
                                 for (i, e) in effects.iter().enumerate().filter(|(_, e)| e.category == cat) {

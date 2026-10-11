@@ -30,9 +30,9 @@ fn dir() -> std::path::PathBuf {
 fn lossless_round_trips_are_exact() {
     let rate = 44100;
     let chs = signal(30_000, rate as f32);
-    let mut chorus = Marker::range(30_000, 4_000, "Chorus");
+    let mut chorus = Marker::range(22_000, 4_000, "Chorus");
     chorus.description = "loud".into();
-    let mut track = Marker::point(40_000, "Track 2");
+    let mut track = Marker::point(28_000, "Track 2");
     track.kind = MarkerKind::CdTrack;
     let markers = vec![Marker::point(1000, "Intro"), Marker::point(20_000, "Verse"), chorus, track];
     for (c, bits) in [(Container::Wav, 16u32), (Container::Wav, 24), (Container::Flac, 16), (Container::Flac, 24)] {

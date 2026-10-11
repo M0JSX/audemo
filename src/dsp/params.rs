@@ -28,6 +28,18 @@ pub enum Kind {
     Text {
         default: &'static str,
     },
+    /// A curve drawn in the dialog: points "x:y,x:y,…" (stored as text),
+    /// x from `x_min` to `x_max` (log axis when `log_x`), y in the range.
+    Curve {
+        x_min: f32,
+        x_max: f32,
+        log_x: bool,
+        x_unit: &'static str,
+        y_min: f32,
+        y_max: f32,
+        y_unit: &'static str,
+        default: &'static str,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -62,6 +74,7 @@ impl ParamDef {
             Kind::Choice { default, .. } => Value::C(*default),
             Kind::Toggle { default } => Value::B(*default),
             Kind::Text { default } => Value::S(default.to_string()),
+            Kind::Curve { default, .. } => Value::S(default.to_string()),
         }
     }
 }
@@ -107,6 +120,75 @@ pub fn text(key: &'static str, label: &'static str, default: &'static str) -> Pa
     ParamDef { key, label, kind: Kind::Text { default }, group: "" }
 }
 
+/// A drawn curve over time (x 0–100 % of the selection).
+pub fn time_curve(key: &'static str, label: &'static str, y: (f32, f32, &'static str), default: &'static str) -> ParamDef {
+    ParamDef { key, label, kind: Kind::Curve { x_min: 0.0, x_max: 100.0, log_x: false, x_unit: "%", y_min: y.0, y_max: y.1, y_unit: y.2, default }, group: "" }
+}
+
+/// A drawn curve over frequency (log axis, 20 Hz – 20 kHz).
+pub fn freq_curve(key: &'static str, label: &'static str, y: (f32, f32, &'static str), default: &'static str) -> ParamDef {
+    ParamDef { key, label, kind: Kind::Curve { x_min: 20.0, x_max: 20000.0, log_x: true, x_unit: "Hz", y_min: y.0, y_max: y.1, y_unit: y.2, default }, group: "" }
+}
+
+/// Points of a curve value, sorted by x.
+pub fn parse_curve(s: &str) -> Vec<(f32, f32)> {
+    let mut v: Vec<(f32, f32)> = s
+        .split(',')
+        .filter_map(|p| {
+            let (x, y) = p.split_once(':')?;
+            Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+        })
+        .filter(|(x, y): &(f32, f32)| x.is_finite() && y.is_finite())
+        .collect();
+    v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    v
+}
+
+pub fn curve_text(pts: &[(f32, f32)]) -> String {
+    pts.iter().map(|(x, y)| format!("{}:{}", round4(*x), round4(*y))).collect::<Vec<_>>().join(",")
+}
+
+fn round4(v: f32) -> f32 {
+    (v * 10000.0).round() / 10000.0
+}
+
+/// The curve's value at `x`: straight lines between points, or a smooth
+/// (Catmull-Rom) curve through them with `spline`. `log_x` interpolates
+/// in log x (frequency curves). Flat beyond the end points.
+pub fn eval_curve(pts: &[(f32, f32)], x: f32, spline: bool, log_x: bool) -> f32 {
+    match pts.len() {
+        0 => return 0.0,
+        1 => return pts[0].1,
+        _ => {}
+    }
+    let tx = |v: f32| if log_x { v.max(1e-6).ln() } else { v };
+    let x = tx(x);
+    let n = pts.len();
+    if x <= tx(pts[0].0) {
+        return pts[0].1;
+    }
+    if x >= tx(pts[n - 1].0) {
+        return pts[n - 1].1;
+    }
+    let i = (0..n - 1).find(|&i| x <= tx(pts[i + 1].0)).unwrap_or(n - 2);
+    let (x0, y0) = (tx(pts[i].0), pts[i].1);
+    let (x1, y1) = (tx(pts[i + 1].0), pts[i + 1].1);
+    let w = x1 - x0;
+    if w <= 0.0 {
+        return y1;
+    }
+    let t = (x - x0) / w;
+    if !spline {
+        return y0 + (y1 - y0) * t;
+    }
+    // Catmull-Rom tangents (scaled to this segment), clamped at the ends.
+    let slope = |a: usize, b: usize| (pts[b].1 - pts[a].1) / (tx(pts[b].0) - tx(pts[a].0)).max(1e-9);
+    let m0 = if i == 0 { slope(0, 1) } else { slope(i - 1, i + 1) } * w;
+    let m1 = if i + 2 >= n { slope(n - 2, n - 1) } else { slope(i, i + 2) } * w;
+    let (t2, t3) = (t * t, t * t * t);
+    (2.0 * t3 - 3.0 * t2 + 1.0) * y0 + (t3 - 2.0 * t2 + t) * m0 + (-2.0 * t3 + 3.0 * t2) * y1 + (t3 - t2) * m1
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Params {
     pub values: Vec<(&'static str, Value)>,
@@ -144,6 +226,11 @@ impl Params {
             Some(Value::F(v)) => *v != 0.0,
             _ => false,
         }
+    }
+
+    /// A curve parameter's points.
+    pub fn curve(&self, key: &str) -> Vec<(f32, f32)> {
+        parse_curve(&self.s(key))
     }
 
     pub fn s(&self, key: &str) -> String {

@@ -506,6 +506,8 @@ pub enum JobKind {
     Preview { params: Params },
     /// Open the result as a new file (e.g. a multitrack mixdown).
     NewDoc { name: String, rate: u32 },
+    /// Open the result as several files of `per` channels each.
+    NewDocs { names: Vec<String>, rate: u32, per: usize },
 }
 
 /// A file being written in the background.
@@ -556,6 +558,8 @@ pub enum Action {
     ApplyFade { fade_in: bool, len: usize, curve: f32, cosine: bool },
     ApplyGain(f32),
     CaptureNoise,
+    /// Effects > Learn Sound Model (for the Sound Remover).
+    LearnSoundModel,
     Convert(u32, usize),
     AddMarker,
     /// Edit > Marker > Add CD Track / Cartridge Timer marker.
@@ -643,6 +647,8 @@ pub struct App {
     pub effects: Arc<Vec<EffectDef>>,
     pub clipboard: Option<(Vec<Vec<f32>>, u32)>,
     pub noise_print: Option<NoiseProfile>,
+    /// Example of a sound to remove (Sound Remover).
+    pub sound_model: Option<NoiseProfile>,
     pub dialog: Option<Dialog>,
     pub job: Option<Job>,
     pub saving: Option<SaveJob>,
@@ -744,6 +750,7 @@ impl App {
             effects: Arc::new(Self::all_effects()),
             clipboard: None,
             noise_print: None,
+            sound_model: None,
             dialog: None,
             job: None,
             saving: None,
@@ -1397,6 +1404,24 @@ impl App {
                     }
                 }
             }
+            JobKind::NewDocs { names, rate, per } => match res {
+                Ok(out) => {
+                    let mut it = out.into_iter();
+                    for name in &names {
+                        let chans: Vec<Vec<f32>> = it.by_ref().take(per.max(1)).collect();
+                        if chans.is_empty() {
+                            break;
+                        }
+                        let id = self.new_id();
+                        let mut doc = Document::new(id, name.clone(), None, chans, rate, None, &job.label);
+                        doc.dirty = true;
+                        self.add_doc(doc);
+                    }
+                    self.mode = Mode::Waveform;
+                    self.set_status(format!("{}: {} new files", job.label, names.len()));
+                }
+                Err(e) => self.dialog = Some(Dialog::Message { title: job.label.clone(), text: e }),
+            },
             JobKind::NewDoc { name, rate } => match res {
                 Ok(out) => {
                     let id = self.new_id();
@@ -1451,6 +1476,7 @@ impl App {
         let sr = doc.sample_rate;
         let n_ch = doc.n_ch();
         let np = self.noise_print.clone();
+        let sm = self.sound_model.clone();
         let effects = self.effects.clone();
         let dry: Buffer = Arc::new(input.clone());
         if let Some(Dialog::Effect(d)) = &mut self.dialog {
@@ -1458,7 +1484,7 @@ impl App {
         }
         let p2 = params.clone();
         self.spawn_job("Preview".into(), JobKind::Preview { params }, move || {
-            let ctx = Ctx { sample_rate: sr, channels: n_ch, noise_print: np.as_ref() };
+            let ctx = Ctx { sample_rate: sr, channels: n_ch, noise_print: np.as_ref(), sound_model: sm.as_ref() };
             let input = if generator { vec![Vec::new(); n_ch] } else { input };
             let mut out = effects[def_idx].run(&input, &ctx, &p2)?;
             if let Some(shape) = &spec {
@@ -1675,15 +1701,35 @@ impl App {
         let n_ch = doc.n_ch();
         let active = doc.active_ch.clone();
         let doc_id = doc.id;
+        let doc_name = doc.name.clone();
         let np = self.noise_print.clone();
+        let sm = self.sound_model.clone();
         let label = def.name.to_string();
         let effects2 = effects.clone();
         if !def.generator || def.params.iter().any(|p| p.key == "duration") {
             self.last_effect = Some((idx, params.clone()));
         }
+        // The Frequency Band Splitter opens each band as a new file.
+        if def.id == "band_splitter" {
+            let cross = effects::drawn::band_crossovers(&params, sr);
+            let stem = std::path::Path::new(&doc_name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let hz = |f: f32| if f >= 1000.0 { format!("{:.1} kHz", f / 1000.0) } else { format!("{f:.0} Hz") };
+            let names: Vec<String> = (0..=cross.len())
+                .map(|b| {
+                    let lo = if b == 0 { "0 Hz".to_string() } else { hz(cross[b - 1]) };
+                    let hi = if b == cross.len() { hz(sr as f32 / 2.0) } else { hz(cross[b]) };
+                    format!("{stem} Band {} ({lo}–{hi})", b + 1)
+                })
+                .collect();
+            self.spawn_job(label, JobKind::NewDocs { names, rate: sr, per: n_ch }, move || {
+                let ctx = Ctx { sample_rate: sr, channels: n_ch, noise_print: None, sound_model: None };
+                effects2[idx].run(&input, &ctx, &params)
+            });
+            return;
+        }
         let select = spec.is_none();
         self.spawn_job(label, JobKind::Edit { doc_id, range: (a, b), active, new_rate: None, select }, move || {
-            let ctx = Ctx { sample_rate: sr, channels: n_ch, noise_print: np.as_ref() };
+            let ctx = Ctx { sample_rate: sr, channels: n_ch, noise_print: np.as_ref(), sound_model: sm.as_ref() };
             let out = effects2[idx].run(&input, &ctx, &params)?;
             Ok(match spec {
                 Some(shape) => crate::dsp::spectral::blend(&input, &out, &shape.shifted(-(a as f64)), sr),
@@ -2396,6 +2442,21 @@ impl App {
                     Err(e) => self.set_status(e),
                 }
             }
+            Action::LearnSoundModel => {
+                let Some(d) = self.doc() else { return };
+                let Some((a, b)) = d.sel_range() else {
+                    self.set_status("Select a passage containing only the sound to remove, then Learn Sound Model.");
+                    return;
+                };
+                match effects::capture_noise_print(&slice_range(&d.audio, a, b), d.sample_rate) {
+                    Ok(m) => {
+                        let secs = (b - a) as f64 / d.sample_rate as f64;
+                        self.sound_model = Some(m);
+                        self.set_status(format!("Sound model learned from {secs:.2} s. Select the audio to clean and run Sound Remover."));
+                    }
+                    Err(_) => self.set_status("Select at least 0.1 s of the sound to learn it."),
+                }
+            }
             Action::Convert(rate, channels) => {
                 let Some(d) = self.doc() else { return };
                 let audio = d.audio.clone();
@@ -2707,7 +2768,7 @@ pub fn run_rack(
     in_db: f32,
     out_db: f32,
 ) -> Result<Vec<Vec<f32>>, String> {
-    let ctx = Ctx { sample_rate: sr, channels: n_ch, noise_print: np };
+    let ctx = Ctx { sample_rate: sr, channels: n_ch, noise_print: np, sound_model: None };
     let gi = db_to_lin(in_db);
     let go = db_to_lin(out_db);
     let mut x: Vec<Vec<f32>> = input.iter().map(|c| c.iter().map(|s| s * gi).collect()).collect();

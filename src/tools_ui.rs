@@ -420,7 +420,7 @@ impl App {
                         BatchJob::None => audio,
                         BatchJob::Rack { slots, mix, in_db, out_db } => run_rack(&effects, slots, audio, sr, n_ch, None, *mix, *in_db, *out_db)?,
                         BatchJob::Effect(idx, p) => {
-                            let ctx = Ctx { sample_rate: sr, channels: n_ch, noise_print: None };
+                            let ctx = Ctx { sample_rate: sr, channels: n_ch, noise_print: None, sound_model: None };
                             effects[*idx].run(&audio, &ctx, p)?
                         }
                     };
