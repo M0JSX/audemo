@@ -42,7 +42,23 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libasound2-dev libxkbcommon-dev libwayland-dev \
-            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libgtk-3-dev libfuse2
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libgtk-3-dev libfuse2 \
+            libjack-jackd2-dev
+
+      # ASIO support builds Steinberg's ASIO SDK; bindgen needs libclang.
+      - name: ASIO SDK and LLVM (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          curl.exe -fsSL -o asio.zip https://www.steinberg.net/asiosdk
+          7z x -oasio_tmp asio.zip | Out-Null
+          $inner = Get-ChildItem asio_tmp -Directory | Select-Object -First 1
+          $dir = Join-Path $env:RUNNER_TEMP "asio_sdk"
+          Move-Item $inner.FullName $dir
+          Get-ChildItem $dir
+          "CPAL_ASIO_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
+          if (-not (Test-Path "C:\Program Files\LLVM\bin\libclang.dll")) { choco install llvm -y --no-progress }
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Test
         shell: bash

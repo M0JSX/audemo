@@ -1,6 +1,6 @@
 [package]
 name = "audemo"
-version = "1.1.2"
+version = "1.2.0"
 edition = "2021"
 rust-version = "1.80"
 description = "Audemo: a cross-platform waveform audio editor with a built-in effects suite"
@@ -14,7 +14,8 @@ path = "src/main.rs"
 [dependencies]
 # GUI. Versions are pinned to known APIs; bump deliberately.
 eframe = "0.29.1"
-# Audio devices (WASAPI on Windows, CoreAudio on macOS, ALSA on Linux).
+# Audio devices: WASAPI and ASIO on Windows, Core Audio on macOS, ALSA and
+# JACK on Linux (the per-platform features are added below).
 cpal = "0.15.3"
 # Decoding: WAV, AIFF, FLAC, MP3, OGG/Vorbis, AAC/M4A, ALAC, MKV/WebM.
 symphonia = { version = "0.5.4", features = ["all"] }
@@ -24,6 +25,16 @@ mp3lame-encoder = "0.2.5"
 fdk-aac = "0.8.0"
 # Native open/save dialogs.
 rfd = "0.14.1"
+
+# ASIO: builds the Steinberg ASIO SDK (CPAL_ASIO_DIR, or downloaded) and
+# needs LLVM/clang for its bindings.
+[target.'cfg(windows)'.dependencies]
+cpal = { version = "0.15.3", features = ["asio"] }
+
+# JACK: needs libjack headers to build; libjack is loaded at run time only
+# when JACK is chosen, so it isn't a package dependency.
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { version = "0.15.3", features = ["jack"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

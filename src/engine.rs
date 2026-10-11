@@ -259,7 +259,9 @@ pub fn default_host_name() -> String {
 
 /// What an output device supports: (channels, sample rates, buffer-size range).
 pub fn output_caps(host_name: Option<&str>, name: Option<&str>) -> (usize, Vec<u32>, Option<(u32, u32)>) {
-    let Some(d) = find_output(host_name, name) else { return (2, Vec::new(), None) };
+    // Asking about another ASIO driver must not unload the one in use.
+    let d = if is_asio(host_name) { asio_device(name, false) } else { find_output(host_name, name) };
+    let Some(d) = d else { return (2, Vec::new(), None) };
     let ch = d.default_output_config().map(|c| c.channels() as usize).unwrap_or(2);
     let mut rates = Vec::new();
     let mut buf = None;
@@ -286,6 +288,15 @@ pub fn input_channels(host_name: Option<&str>, name: Option<&str>) -> usize {
 
 /// Names of the available (input, output) devices of `host_name`.
 pub fn list_devices(host_name: Option<&str>) -> (Vec<String>, Vec<String>) {
+    if is_asio(host_name) {
+        // Read from the registry: enumerating through the driver would
+        // load each one, which fails while another is in use.
+        let names = asio_driver_names();
+        return (names.clone(), names);
+    }
+    if is_jack(host_name) {
+        return (vec![JACK_DEVICE.into()], vec![JACK_DEVICE.into()]);
+    }
     let host = host(host_name);
     let ins = host
         .input_devices()
@@ -298,7 +309,162 @@ pub fn list_devices(host_name: Option<&str>) -> (Vec<String>, Vec<String>) {
     (ins, outs)
 }
 
+pub const ASIO: &str = "ASIO";
+pub const JACK: &str = "JACK";
+/// The single "device" listed for JACK: Audemo's own client on the server.
+const JACK_DEVICE: &str = "JACK server";
+
+pub fn is_asio(host_name: Option<&str>) -> bool {
+    host_name == Some(ASIO)
+}
+
+pub fn is_jack(host_name: Option<&str>) -> bool {
+    host_name == Some(JACK)
+}
+
+thread_local! {
+    /// ASIO allows one loaded driver per process, and each cpal ASIO host
+    /// would load its own, so one host is kept along with the device of the
+    /// loaded driver. Output and input streams share that device (and its
+    /// buffers). Engine and Preferences calls all come from the UI thread.
+    static ASIO_STATE: std::cell::RefCell<(Option<cpal::Host>, Option<cpal::Device>)> = const { std::cell::RefCell::new((None, None)) };
+}
+
+/// The ASIO driver `name` (None = the loaded one, else the first that
+/// works). Another driver can only be loaded when `may_switch` and nothing
+/// still uses the current one.
+fn asio_device(name: Option<&str>, may_switch: bool) -> Option<cpal::Device> {
+    ASIO_STATE.with(|st| {
+        let mut st = st.borrow_mut();
+        if st.0.is_none() {
+            let id = cpal::available_hosts().into_iter().find(|h| h.name() == ASIO)?;
+            st.0 = Some(cpal::host_from_id(id).ok()?);
+        }
+        if let Some(d) = &st.1 {
+            if name.map(|n| d.name().map(|x| x == n).unwrap_or(false)).unwrap_or(true) {
+                return Some(d.clone());
+            }
+            if !may_switch {
+                return None;
+            }
+        }
+        // Unloads the previous driver (once no stream holds it).
+        st.1 = None;
+        let host = st.0.as_ref()?;
+        let named = name.and_then(|n| host.devices().ok()?.find(|d| d.name().map(|x| x == n).unwrap_or(false)));
+        let dev = named.or_else(|| host.devices().ok()?.find(|d| d.default_output_config().is_ok()));
+        st.1 = dev.clone();
+        dev
+    })
+}
+
+/// Unload the ASIO driver (when no stream uses it), so the next open
+/// starts it afresh with the chosen buffer size and rate.
+fn release_asio() {
+    ASIO_STATE.with(|st| st.borrow_mut().1 = None);
+}
+
+/// Installed ASIO drivers, as registered under HKLM\SOFTWARE\ASIO.
+fn asio_driver_names() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        win_asio::driver_names()
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+/// Open the ASIO driver's own control panel (buffer size, clock, routing).
+pub fn asio_control_panel(name: Option<&str>) -> Result<(), String> {
+    asio_device(name, false).ok_or("Another ASIO driver is in use. Click OK to switch to this one, then open its settings.")?;
+    #[cfg(windows)]
+    {
+        win_asio::control_panel()
+    }
+    #[cfg(not(windows))]
+    {
+        Err("ASIO is only available on Windows.".into())
+    }
+}
+
+#[cfg(windows)]
+mod win_asio {
+    use std::ffi::c_void;
+
+    type Hkey = *mut c_void;
+    // HKEY_LOCAL_MACHINE is (HKEY)(LONG)0x80000002, sign-extended.
+    const HKEY_LOCAL_MACHINE: Hkey = 0x8000_0002u32 as i32 as isize as Hkey;
+    const KEY_READ: u32 = 0x2_0019;
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn RegOpenKeyExW(key: Hkey, sub_key: *const u16, options: u32, sam: u32, result: *mut Hkey) -> i32;
+        fn RegEnumKeyExW(key: Hkey, index: u32, name: *mut u16, name_len: *mut u32, reserved: *mut u32, class: *mut u16, class_len: *mut u32, last_write: *mut c_void) -> i32;
+        fn RegCloseKey(key: Hkey) -> i32;
+    }
+
+    // From the ASIO SDK's host library, which cpal's ASIO support links in
+    // (C++ linkage: `ASIOError ASIOControlPanel(void)`).
+    extern "C" {
+        #[link_name = "?ASIOControlPanel@@YAJXZ"]
+        fn ASIOControlPanel() -> i32;
+    }
+
+    pub fn driver_names() -> Vec<String> {
+        let path: Vec<u16> = "SOFTWARE\\ASIO".encode_utf16().chain(Some(0)).collect();
+        let mut key: Hkey = std::ptr::null_mut();
+        let mut out = Vec::new();
+        unsafe {
+            if RegOpenKeyExW(HKEY_LOCAL_MACHINE, path.as_ptr(), 0, KEY_READ, &mut key) != 0 {
+                return out;
+            }
+            for i in 0.. {
+                let mut buf = [0u16; 256];
+                let mut len = buf.len() as u32;
+                let r = RegEnumKeyExW(key, i, buf.as_mut_ptr(), &mut len, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
+                if r != 0 {
+                    break;
+                }
+                out.push(String::from_utf16_lossy(&buf[..len as usize]));
+            }
+            RegCloseKey(key);
+        }
+        out
+    }
+
+    pub fn control_panel() -> Result<(), String> {
+        match unsafe { ASIOControlPanel() } {
+            0 => Ok(()),
+            e => Err(format!("The ASIO driver has no control panel (error {e}).")),
+        }
+    }
+}
+
+/// Audemo's client on the JACK server (its ports connect to the system
+/// ports automatically). None when no server is running.
+fn jack_device(output: bool) -> Option<cpal::Device> {
+    #[cfg(target_os = "linux")]
+    {
+        use cpal::platform::JackDevice;
+        let d = if output { JackDevice::default_output_device("Audemo", true, false) } else { JackDevice::default_input_device("Audemo", true, false) };
+        d.ok().map(cpal::Device::from)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = output;
+        None
+    }
+}
+
 fn find_output(host_name: Option<&str>, name: Option<&str>) -> Option<cpal::Device> {
+    if is_asio(host_name) {
+        return asio_device(name, true);
+    }
+    if is_jack(host_name) {
+        return jack_device(true);
+    }
     let host = host(host_name);
     if let Some(n) = name {
         if let Ok(mut it) = host.output_devices() {
@@ -311,6 +477,13 @@ fn find_output(host_name: Option<&str>, name: Option<&str>) -> Option<cpal::Devi
 }
 
 fn find_input(host_name: Option<&str>, name: Option<&str>) -> Option<cpal::Device> {
+    if is_asio(host_name) {
+        // Input and output must come from the driver that is loaded.
+        return asio_device(name, false);
+    }
+    if is_jack(host_name) {
+        return jack_device(false);
+    }
     let host = host(host_name);
     if let Some(n) = name {
         if let Ok(mut it) = host.input_devices() {
@@ -374,6 +547,7 @@ impl Engine {
         self.stop();
         self._stream = None;
         self.rate_override = None;
+        self.release_driver();
         let r = self.open_output();
         self.error = r.clone().err();
         r
@@ -390,9 +564,27 @@ impl Engine {
         self.rate_override = rate;
         self.stop();
         self._stream = None;
+        self.release_driver();
         let r = self.open_output();
         self.error = r.err();
         true
+    }
+
+    /// Before reopening on ASIO: let the driver restart with the new
+    /// settings (it keeps its buffers while any stream uses it).
+    fn release_driver(&mut self) {
+        if is_asio(self.config.host.as_deref()) || self.host_name == ASIO {
+            self.rec = None;
+            release_asio();
+        }
+    }
+
+    /// Unload an ASIO driver that Preferences loaded to read its settings
+    /// when the engine isn't using ASIO.
+    pub fn drop_idle_driver(&self) {
+        if !is_asio(self.config.host.as_deref()) && self.host_name != ASIO {
+            release_asio();
+        }
     }
 
     fn open_output(&mut self) -> Result<(), String> {
@@ -698,6 +890,9 @@ impl Engine {
         }
         let device = find_input(self.config.host.as_deref(), self.config.input.as_deref()).ok_or("No audio input device found.")?;
         let default = device.default_input_config().map_err(|e| e.to_string())?;
+        // ASIO input and output share one clock: changing the rate for the
+        // input would retune the running output.
+        let want_rate = if is_asio(self.config.host.as_deref()) { None } else { want_rate };
         let at_rate = want_rate.filter(|&r| r != default.sample_rate().0).and_then(|r| {
             let ranges = device.supported_input_configs().ok()?;
             ranges

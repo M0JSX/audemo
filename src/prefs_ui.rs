@@ -308,9 +308,11 @@ impl App {
             let mut new = d.edit.clone();
             new.sanitize();
             self.apply_prefs(ctx, new, &d.opened_with);
+            self.engine.drop_idle_driver();
             return None;
         }
         if cancel || !open {
+            self.engine.drop_idle_driver();
             return None;
         }
         Some(d)
@@ -465,8 +467,22 @@ impl App {
                 });
                 ui.add_space(6.0);
                 group(ui, |ui| {
-                    row(ui, "Default Input", |ui| device_combo(ui, "hw_in", &mut p.input_device, &d.inputs, "System Default"));
-                    row(ui, "Default Output", |ui| device_combo(ui, "hw_out", &mut p.output_device, &d.outputs, "System Default"));
+                    let asio = crate::engine::is_asio(p.host.as_deref());
+                    let jack = crate::engine::is_jack(p.host.as_deref());
+                    if asio {
+                        // One ASIO driver drives both directions, as in Audition.
+                        row(ui, "Device", |ui| device_combo(ui, "hw_asio", &mut p.output_device, &d.outputs, "First available driver"));
+                        p.input_device = p.output_device.clone();
+                    } else if jack {
+                        row(ui, "Device", |ui| {
+                            ui.label("JACK server (ports Audemo_in and Audemo_out)");
+                        });
+                        p.input_device = None;
+                        p.output_device = None;
+                    } else {
+                        row(ui, "Default Input", |ui| device_combo(ui, "hw_in", &mut p.input_device, &d.inputs, "System Default"));
+                        row(ui, "Default Output", |ui| device_combo(ui, "hw_out", &mut p.output_device, &d.outputs, "System Default"));
+                    }
                     ui.add_space(4.0);
                     row(ui, "Master Clock", |ui| {
                         ui.label(format!("Out: {}", p.output_device.clone().unwrap_or_else(|| "System Default".into())));
@@ -510,8 +526,25 @@ impl App {
                     });
                     ui.add_space(4.0);
                     row(ui, "", |ui| {
-                        if ui.button("  Settings...  ").on_hover_text("Open the system's audio settings").clicked() {
-                            open_system_audio_settings();
+                        let hint = if asio {
+                            "Open the ASIO driver's control panel"
+                        } else if jack {
+                            "Open the JACK control application (QjackCtl)"
+                        } else {
+                            "Open the system's audio settings"
+                        };
+                        if ui.button("  Settings...  ").on_hover_text(hint).clicked() {
+                            if asio {
+                                if let Err(e) = crate::engine::asio_control_panel(p.output_device.as_deref()) {
+                                    self.set_status(e);
+                                }
+                            } else if jack {
+                                if std::process::Command::new("qjackctl").spawn().is_err() {
+                                    self.set_status("QjackCtl isn't installed; change JACK's rate and buffer size in your JACK control program.");
+                                }
+                            } else {
+                                open_system_audio_settings();
+                            }
                         }
                     });
                 });
