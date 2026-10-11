@@ -151,7 +151,7 @@ impl PrefsDialog {
 
 /// Physical memory in bytes.
 pub fn total_ram() -> Option<u64> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         let t = std::fs::read_to_string("/proc/meminfo").ok()?;
         let kb: u64 = t.lines().find(|l| l.starts_with("MemTotal:"))?.split_whitespace().nth(1)?.parse().ok()?;
@@ -187,7 +187,7 @@ pub fn total_ram() -> Option<u64> {
         m.len = std::mem::size_of::<MemStatus>() as u32;
         (unsafe { GlobalMemoryStatusEx(&mut m) } != 0).then_some(m.total_phys)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", windows)))]
     {
         None
     }
@@ -667,9 +667,10 @@ impl App {
                         let shown = p.backup_dir.clone().or_else(crate::autosave::default_dir).map(|d| d.display().to_string()).unwrap_or_default();
                         ui.add_enabled(p.backup_location == BackupLocation::Folder, egui::Label::new(RichText::new(shown).monospace().size(11.0)));
                         if ui.add_enabled(p.backup_location == BackupLocation::Folder, egui::Button::new("Browse...")).clicked() {
-                            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                                p.backup_dir = Some(dir);
-                            }
+                            crate::filedlg::request("prefs-backup-dir", crate::filedlg::Spec::folder().dir(p.backup_dir.as_deref()));
+                        }
+                        if let Some(dir) = crate::filedlg::answer_one("prefs-backup-dir") {
+                            p.backup_dir = Some(dir);
                         }
                     });
                 });
@@ -756,13 +757,10 @@ impl App {
                     });
                     row(ui, "", |ui| {
                         if ui.button("Browse...").clicked() {
-                            let mut dlg = rfd::FileDialog::new();
-                            if shown.is_dir() {
-                                dlg = dlg.set_directory(&shown);
-                            }
-                            if let Some(dir) = dlg.pick_folder() {
-                                p.temp_dir = (dir != crate::prefs::system_temp()).then_some(dir);
-                            }
+                            crate::filedlg::request("prefs-temp-dir", crate::filedlg::Spec::folder().dir(Some(shown.as_path())));
+                        }
+                        if let Some(dir) = crate::filedlg::answer_one("prefs-temp-dir") {
+                            p.temp_dir = (dir != crate::prefs::system_temp()).then_some(dir);
                         }
                         if ui.add_enabled(p.temp_dir.is_some(), egui::Button::new("Use System Default")).clicked() {
                             p.temp_dir = None;

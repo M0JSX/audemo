@@ -250,6 +250,8 @@ pub fn default_folders() -> Vec<PathBuf> {
         if let Some(h) = crate::prefs::home_dir() {
             v.push(h.join("Library/Audio/Plug-Ins/VST3"));
         }
+    } else if cfg!(target_os = "android") {
+        // No VST3 plug-ins are built for Android.
     } else {
         if let Some(h) = crate::prefs::home_dir() {
             v.push(h.join(".vst3"));

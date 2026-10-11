@@ -178,7 +178,10 @@ impl App {
             scan = Some(false);
         }
         if add_folder {
-            if let Some(d) = rfd::FileDialog::new().pick_folder() {
+            crate::filedlg::request("plugin-folder", crate::filedlg::Spec::folder());
+        }
+        {
+            if let Some(d) = crate::filedlg::answer_one("plugin-folder") {
                 plugin::update(|r| {
                     if !r.folders.contains(&d) {
                         r.folders.push(d);

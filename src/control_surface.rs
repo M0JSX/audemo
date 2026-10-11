@@ -7,6 +7,58 @@ use std::sync::mpsc::{channel, Receiver};
 
 use crate::app::{Action, App, Mode};
 
+/// midir has no Android backend: no ports, and opening one fails.
+#[cfg(target_os = "android")]
+mod midir {
+    pub struct Unavailable;
+    impl std::fmt::Display for Unavailable {
+        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("MIDI control surfaces aren't available on Android yet.")
+        }
+    }
+    pub struct Port;
+    pub struct MidiInput;
+    pub struct MidiOutput;
+    pub struct MidiInputConnection<T>(std::marker::PhantomData<T>);
+    pub struct MidiOutputConnection;
+    impl MidiInput {
+        pub fn new(_: &str) -> Result<Self, Unavailable> {
+            Err(Unavailable)
+        }
+        pub fn ports(&self) -> Vec<Port> {
+            Vec::new()
+        }
+        pub fn port_name(&self, _: &Port) -> Result<String, Unavailable> {
+            Err(Unavailable)
+        }
+        pub fn connect<F, T>(self, _: &Port, _: &str, _: F, _: T) -> Result<MidiInputConnection<T>, Unavailable>
+        where
+            F: FnMut(u64, &[u8], &mut T) + Send + 'static,
+        {
+            Err(Unavailable)
+        }
+    }
+    impl MidiOutput {
+        pub fn new(_: &str) -> Result<Self, Unavailable> {
+            Err(Unavailable)
+        }
+        pub fn ports(&self) -> Vec<Port> {
+            Vec::new()
+        }
+        pub fn port_name(&self, _: &Port) -> Result<String, Unavailable> {
+            Err(Unavailable)
+        }
+        pub fn connect(self, _: &Port, _: &str) -> Result<MidiOutputConnection, Unavailable> {
+            Err(Unavailable)
+        }
+    }
+    impl MidiOutputConnection {
+        pub fn send(&mut self, _: &[u8]) -> Result<(), Unavailable> {
+            Ok(())
+        }
+    }
+}
+
 /// MIDI ports available: (inputs, outputs).
 pub fn ports() -> (Vec<String>, Vec<String>) {
     let ins = midir::MidiInput::new("Audemo")

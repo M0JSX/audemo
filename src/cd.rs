@@ -204,12 +204,15 @@ impl App {
             self.cd_add_markers();
         }
         if export {
-            self.cd_export();
+            let name = format!("{}.cue", if self.cd.title.is_empty() { "Disc" } else { &self.cd.title });
+            crate::filedlg::request("cd-export", crate::filedlg::Spec::save(name).filter("Cue sheet", &["cue"]));
+        }
+        if let Some(p) = crate::filedlg::answer_one("cd-export") {
+            self.cd_export(p);
         }
     }
 
-    fn cd_export(&mut self) {
-        let Some(path) = rfd::FileDialog::new().add_filter("Cue sheet", &["cue"]).set_file_name(format!("{}.cue", if self.cd.title.is_empty() { "Disc" } else { &self.cd.title })).save_file() else { return };
+    fn cd_export(&mut self, path: PathBuf) {
         let cue_path = if path.extension().is_none() { path.with_extension("cue") } else { path };
         let wav_path: PathBuf = cue_path.with_extension("wav");
         // Gather each track's audio now (on this thread: it's shared, not copied).

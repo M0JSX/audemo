@@ -573,6 +573,10 @@ pub struct Job {
 pub enum Action {
     New,
     Open,
+    /// Ask where to save (Save As window), then save there.
+    SaveAsPick { settings: crate::export::ExportSettings, selection: bool },
+    /// Save the active session under a new name.
+    MtSaveAs,
     OpenPaths(Vec<PathBuf>),
     Save,
     SaveAs,
@@ -954,7 +958,8 @@ impl App {
         }
         app.follow = app.prefs.follow;
         app.rack_entire = app.prefs.rack_entire;
-        if crate::plugin::needs_first_scan() || app.prefs.scan_at_startup {
+        // No VST3 plug-ins exist for Android.
+        if !cfg!(target_os = "android") && (crate::plugin::needs_first_scan() || app.prefs.scan_at_startup) {
             app.plugin_scan = Some(crate::plugin::start_scan(false));
         }
         if !opened_files && app.prefs.startup == crate::prefs::Startup::MostRecent {
@@ -1415,6 +1420,9 @@ impl App {
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         // The Keyboard Shortcuts window is listening for a new key.
         if matches!(&self.dialog, Some(Dialog::Shortcuts(e)) if e.capturing.is_some()) {
+            return;
+        }
+        if crate::filedlg::is_open() {
             return;
         }
         let typing = ctx.wants_keyboard_input();
@@ -2525,7 +2533,7 @@ impl App {
                 self.save_doc_now(i, p, s);
             } else {
                 let s = d.save_as_settings();
-                if let Some(p) = self.pick_save_path(s.container) {
+                if let Some(p) = self.pick_save_path("save-everything", s.container, None) {
                     self.save_doc_now(i, p, s);
                 }
             }
@@ -2535,15 +2543,21 @@ impl App {
         !self.docs.iter().any(|d| d.dirty) && !self.sessions.iter().any(|s| s.dirty)
     }
 
-    /// Ask where to save the active file in format `c`.
-    pub fn pick_save_path(&self, c: Container) -> Option<PathBuf> {
+    /// Ask where to save the active file in format `c`. With `retry`, the
+    /// answer may come later (see `filedlg::ask`); without, only the
+    /// desktop's own dialog answers.
+    pub fn pick_save_path(&self, key: &str, c: Container, retry: Option<Action>) -> Option<PathBuf> {
         let doc = self.doc()?;
         let stem = Path::new(&doc.name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled".into());
-        let mut dlg = rfd::FileDialog::new().add_filter(c.label(), &[c.ext()]).set_file_name(format!("{stem}.{}", c.ext()));
-        if let Some(dir) = doc.path.as_ref().and_then(|p| p.parent()) {
-            dlg = dlg.set_directory(dir);
-        }
-        dlg.save_file().map(|p| if Container::from_path(&p) == Some(c) { p } else { p.with_extension(c.ext()) })
+        let spec = crate::filedlg::Spec::save(format!("{stem}.{}", c.ext())).filter(c.label(), &[c.ext()]).dir(doc.path.as_ref().and_then(|p| p.parent()));
+        let p = match retry {
+            Some(r) => crate::filedlg::ask_one(key, spec, r),
+            None => {
+                crate::filedlg::request(key, spec);
+                crate::filedlg::answer_one(key)
+            }
+        }?;
+        Some(if Container::from_path(&p) == Some(c) { p } else { p.with_extension(c.ext()) })
     }
 
     // ---------------------------------------------------------------- dispatcher
@@ -2604,11 +2618,8 @@ impl App {
                 exts.push(crate::session::SESSION_EXT);
                 exts.push(crate::session::OLD_SESSION_EXT);
                 exts.push(crate::sesx::EXT);
-                let picked = rfd::FileDialog::new()
-                    .add_filter("Audio files and sessions", &exts)
-                    .add_filter("All files", &["*"])
-                    .pick_files();
-                if let Some(p) = picked {
+                let spec = crate::filedlg::Spec::open_many().filter("Audio files and sessions", &exts).filter("All files", &["*"]);
+                if let Some(p) = crate::filedlg::ask("open", spec, Action::Open) {
                     self.open_paths(p);
                 }
             }
@@ -3029,6 +3040,13 @@ impl App {
                 });
             }
             Action::SaveSelectionAs => self.open_save_dialog(true),
+            Action::SaveAsPick { settings, selection } => {
+                if let Some(p) = self.pick_save_path("save-as", settings.container, Some(Action::SaveAsPick { settings, selection })) {
+                    self.prefs.export = Some(settings);
+                    self.begin_save(p, settings, selection);
+                }
+            }
+            Action::MtSaveAs => self.save_session(true),
             Action::CopyToNew => {
                 let with_meta = self.prefs.copy_markers;
                 let res = self.doc().map(|d| {
@@ -3060,7 +3078,7 @@ impl App {
                     self.actions.push(Action::Open);
                     return;
                 };
-                if let Some(paths) = rfd::FileDialog::new().add_filter("Audio files", io::OPEN_EXTENSIONS).pick_files() {
+                if let Some(paths) = crate::filedlg::ask("open-append", crate::filedlg::Spec::open_many().filter("Audio files", io::OPEN_EXTENSIONS), Action::OpenAppend) {
                     for p in paths {
                         self.load_async(p, LoadIntent::Append(doc_id));
                     }

@@ -493,11 +493,8 @@ impl App {
                 let Some(d) = self.doc() else { return };
                 let csv = markers_to_csv(&d.markers, d.sample_rate);
                 let stem = Path::new(&d.name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Markers".into());
-                let mut dlg = rfd::FileDialog::new().add_filter("Markers (CSV)", &["csv"]).set_file_name(format!("{stem} Markers.csv"));
-                if let Some(dir) = d.path.as_deref().and_then(|p| p.parent()) {
-                    dlg = dlg.set_directory(dir);
-                }
-                if let Some(p) = dlg.save_file() {
+                let spec = crate::filedlg::Spec::save(format!("{stem} Markers.csv")).filter("Markers (CSV)", &["csv"]).dir(d.path.as_deref().and_then(|p| p.parent()));
+                if let Some(p) = crate::filedlg::ask_one("markers-csv-out", spec, Action::MarkerCmd(MarkerCmd::ExportCsv)) {
                     match std::fs::write(&p, csv) {
                         Ok(()) => self.set_status(format!("Exported {} marker(s) to {}", d.markers.len(), p.display())),
                         Err(e) => self.set_status(format!("Couldn't write {}: {e}", p.display())),
@@ -505,7 +502,7 @@ impl App {
                 }
             }
             MarkerCmd::ImportCsv => {
-                let Some(p) = rfd::FileDialog::new().add_filter("Markers (CSV)", &["csv", "txt"]).pick_file() else { return };
+                let Some(p) = crate::filedlg::ask_one("markers-csv-in", crate::filedlg::Spec::open().filter("Markers (CSV)", &["csv", "txt"]), Action::MarkerCmd(MarkerCmd::ImportCsv)) else { return };
                 let text = match std::fs::read_to_string(&p) {
                     Ok(t) => t,
                     Err(e) => return self.set_status(format!("Couldn't read {}: {e}", p.display())),
@@ -539,11 +536,8 @@ impl App {
         if ranges.is_empty() {
             return;
         }
-        let mut dlg = rfd::FileDialog::new().set_title("Folder for the exported ranges");
-        if let Some(dir) = d.path.as_deref().and_then(|p| p.parent()) {
-            dlg = dlg.set_directory(dir);
-        }
-        let Some(dir) = dlg.pick_folder() else { return };
+        let spec = crate::filedlg::Spec::folder().title("Folder for the exported ranges").dir(d.path.as_deref().and_then(|p| p.parent()));
+        let Some(dir) = crate::filedlg::ask_one("range-export", spec, Action::MarkerCmd(MarkerCmd::ExportAudio)) else { return };
         let mut settings = d.save_as_settings();
         settings.dither = self.prefs.dither;
         let (audio, sr, meta) = (d.audio.clone(), d.sample_rate, d.meta.clone());
@@ -701,11 +695,8 @@ impl App {
             MarkerCmd::ExportCsv => {
                 let csv = markers_to_csv(&s.markers, s.sample_rate);
                 let n = s.markers.len();
-                let mut dlg = rfd::FileDialog::new().add_filter("Markers (CSV)", &["csv"]).set_file_name(format!("{} Markers.csv", s.name));
-                if let Some(dir) = s.path.as_deref().and_then(|p| p.parent()) {
-                    dlg = dlg.set_directory(dir);
-                }
-                if let Some(p) = dlg.save_file() {
+                let spec = crate::filedlg::Spec::save(format!("{} Markers.csv", s.name)).filter("Markers (CSV)", &["csv"]).dir(s.path.as_deref().and_then(|p| p.parent()));
+                if let Some(p) = crate::filedlg::ask_one("mt-markers-csv-out", spec, Action::MarkerCmd(MarkerCmd::ExportCsv)) {
                     match std::fs::write(&p, csv) {
                         Ok(()) => self.set_status(format!("Exported {n} marker(s) to {}", p.display())),
                         Err(e) => self.set_status(format!("Couldn't write {}: {e}", p.display())),
@@ -713,7 +704,8 @@ impl App {
                 }
             }
             MarkerCmd::ImportCsv => {
-                let Some(p) = rfd::FileDialog::new().add_filter("Markers (CSV)", &["csv", "txt"]).pick_file() else { return };
+                let spec = crate::filedlg::Spec::open().filter("Markers (CSV)", &["csv", "txt"]);
+                let Some(p) = crate::filedlg::ask_one("mt-markers-csv-in", spec, Action::MarkerCmd(MarkerCmd::ImportCsv)) else { return };
                 let text = match std::fs::read_to_string(&p) {
                     Ok(t) => t,
                     Err(e) => return self.set_status(format!("Couldn't read {}: {e}", p.display())),

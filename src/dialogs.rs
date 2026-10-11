@@ -204,10 +204,12 @@ impl App {
                         }
                         if ui.add(egui::Button::new(RichText::new("Choose location and save…").color(Color32::WHITE))).clicked() {
                             keep = false;
-                            let target = path.clone().filter(|p| Container::from_path(p) == Some(settings.container)).or_else(|| self.pick_save_path(settings.container));
-                            if let Some(p) = target {
-                                self.prefs.export = Some(settings);
-                                self.begin_save(p, settings, selection);
+                            match path.clone().filter(|p| Container::from_path(p) == Some(settings.container)) {
+                                Some(p) => {
+                                    self.prefs.export = Some(settings);
+                                    self.begin_save(p, settings, selection);
+                                }
+                                None => self.actions.push(Action::SaveAsPick { settings, selection }),
                             }
                         }
                     });

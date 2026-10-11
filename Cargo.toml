@@ -7,6 +7,13 @@ description = "Audemo: a cross-platform waveform audio editor with a built-in ef
 license = "MIT"
 authors = ["Jonathan <jonathan@m0jsx.radio>"]
 
+# The app is a library so Android can load it as a shared library
+# (built with `cargo rustc --lib --crate-type cdylib`, see
+# scripts/package-android.sh); the desktop binary is a thin wrapper.
+[lib]
+name = "audemo"
+path = "src/lib.rs"
+
 [[bin]]
 name = "audemo"
 path = "src/main.rs"
@@ -23,12 +30,21 @@ symphonia = { version = "0.5.4", features = ["all"] }
 mp3lame-encoder = "0.2.5"
 # AAC export (Fraunhofer FDK AAC, built from source).
 fdk-aac = "0.8.0"
-# Native open/save dialogs.
-rfd = "0.14.1"
-# MIDI for control surfaces (Mackie Control).
-midir = "0.10.0"
 # HTTPS for Check for Updates (rustls: no system TLS libraries needed).
 ureq = "2.10"
+
+# Native open/save dialogs and MIDI control surfaces (neither has an
+# Android backend; Android uses Audemo's own file browser).
+[target.'cfg(not(target_os = "android"))'.dependencies]
+rfd = "0.14.1"
+midir = "0.10.0"
+
+# Android: NativeActivity, JNI for permissions. cpal uses Oboe (AAudio).
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { version = "0.29.1", features = ["android-native-activity"] }
+winit = { version = "0.30", default-features = false, features = ["android-native-activity"] }
+jni = "0.21"
+ndk-context = "0.1"
 
 # ASIO: builds the Steinberg ASIO SDK (CPAL_ASIO_DIR, or downloaded) and
 # needs LLVM/clang for its bindings.

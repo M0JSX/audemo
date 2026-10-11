@@ -674,14 +674,11 @@ impl App {
             _ => {
                 // Audemo's own .ases by default; Audition's .sesx is offered
                 // too (with Audemo's data riding along inside it).
-                let mut dlg = rfd::FileDialog::new()
-                    .add_filter("Audemo session (.ases)", &[SESSION_EXT])
-                    .add_filter("Audition session (.sesx)", &[crate::sesx::EXT])
-                    .set_file_name(format!("{}.{SESSION_EXT}", safe_file_name(&s.name)));
-                if let Some(dir) = s.path.as_ref().and_then(|p| p.parent()) {
-                    dlg = dlg.set_directory(dir);
-                }
-                match dlg.save_file() {
+                let spec = crate::filedlg::Spec::save(format!("{}.{SESSION_EXT}", safe_file_name(&s.name)))
+                    .filter("Audemo session (.ases)", &[SESSION_EXT])
+                    .filter("Audition session (.sesx)", &[crate::sesx::EXT])
+                    .dir(s.path.as_ref().and_then(|p| p.parent()));
+                match crate::filedlg::ask_one("session-save", spec, Action::MtSaveAs) {
                     Some(p) if p.extension().is_none() => p.with_extension(SESSION_EXT),
                     Some(p) => p,
                     None => return,
@@ -1384,11 +1381,8 @@ impl App {
             return;
         }
         let name = safe_file_name(&s.name);
-        let mut dlg = rfd::FileDialog::new().add_filter("Final Cut Pro XML", &["xml"]).set_file_name(format!("{name}.xml"));
-        if let Some(dir) = s.path.as_ref().and_then(|p| p.parent()) {
-            dlg = dlg.set_directory(dir);
-        }
-        let Some(path) = dlg.save_file() else { return };
+        let spec = crate::filedlg::Spec::save(format!("{name}.xml")).filter("Final Cut Pro XML", &["xml"]).dir(s.path.as_ref().and_then(|p| p.parent()));
+        let Some(path) = crate::filedlg::ask_one("fcp-xml", spec, Action::MtClip(ClipCmd::ExportXml)) else { return };
         let xml = crate::interchange::session_xml(s, &files, 30);
         match std::fs::write(&path, xml) {
             Ok(()) => self.set_status(format!("Exported {} for Premiere Pro (File > Import there)", path.display())),
@@ -1490,7 +1484,10 @@ impl App {
                 };
                 let paths = match a {
                     Action::MtDropFiles(p) => p,
-                    _ => rfd::FileDialog::new().add_filter("Audio files", io::OPEN_EXTENSIONS).pick_files().unwrap_or_default(),
+                    _ => match crate::filedlg::ask("mt-insert", crate::filedlg::Spec::open_many().filter("Audio files", io::OPEN_EXTENSIONS), Action::MtInsertFiles) {
+                        Some(p) => p,
+                        None => return None,
+                    },
                 };
                 let mut t = track;
                 for p in paths {

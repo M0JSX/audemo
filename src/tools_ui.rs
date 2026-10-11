@@ -461,7 +461,10 @@ impl App {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 3.0;
             if ui.add_enabled(!running, egui::Button::new("Add Files…")).clicked() {
-                if let Some(p) = rfd::FileDialog::new().add_filter("Audio files", io::OPEN_EXTENSIONS).pick_files() {
+                crate::filedlg::request("batch-add", crate::filedlg::Spec::open_many().filter("Audio files", io::OPEN_EXTENSIONS));
+            }
+            {
+                if let Some(p) = crate::filedlg::answer("batch-add") {
                     for f in p {
                         if !self.batch.files.iter().any(|x| x.0 == f) {
                             self.batch.files.push((f, BatchStatus::Pending));
@@ -552,9 +555,10 @@ impl App {
             ui.horizontal(|ui| {
                 let label = self.batch.out_dir.as_ref().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Same folder as each file".into());
                 if ui.button(label).on_hover_text("Choose an output folder").clicked() {
-                    if let Some(d) = rfd::FileDialog::new().pick_folder() {
-                        self.batch.out_dir = Some(d);
-                    }
+                    crate::filedlg::request("batch-out", crate::filedlg::Spec::folder().dir(self.batch.out_dir.as_deref()));
+                }
+                if let Some(d) = crate::filedlg::answer_one("batch-out") {
+                    self.batch.out_dir = Some(d);
                 }
                 if self.batch.out_dir.is_some() && ui.small_button("×").on_hover_text("Use each file's own folder").clicked() {
                     self.batch.out_dir = None;

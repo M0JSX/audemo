@@ -116,9 +116,51 @@ jobs:
             dist/*.tar.gz
           if-no-files-found: error
 
+  android:
+    name: Android arm64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      # The runner has the Android SDK and NDK. Signing uses the repository's
+      # keystore secret when set, so each build installs over the last.
+      - name: Build APK
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          if [ -n "$ANDROID_KEYSTORE_B64" ]; then
+            echo "$ANDROID_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/audemo.keystore"
+            export AUDEMO_ANDROID_KEYSTORE="$RUNNER_TEMP/audemo.keystore"
+            export AUDEMO_ANDROID_KEYSTORE_PASS="$ANDROID_KEYSTORE_PASSWORD"
+          fi
+          set +e
+          bash scripts/package-android.sh 2>&1 | tee android.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" != "0" ]; then
+            msg=$(grep -E "^error|error:|^  --> |^   --> |panicked|cannot find|undefined" android.log | head -60 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=Android build failed::$msg"
+          fi
+          exit $status
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: audemo-android
+          path: dist/*.apk
+          if-no-files-found: error
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, android]
     # A fixed image (ubuntu-latest moves to Ubuntu 26 from 2026-10-19).
     runs-on: ubuntu-24.04
     steps:
