@@ -39,6 +39,9 @@ export CXX_aarch64_linux_android="$TOOLS/${TARGET}${MIN_SDK}-clang++"
 export AR_aarch64_linux_android="$TOOLS/llvm-ar"
 export RANLIB_aarch64_linux_android="$TOOLS/llvm-ranlib"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
+# FDK AAC includes AOSP's <log/log.h> on Android; a stand-in is provided.
+export CFLAGS_aarch64_linux_android="-I$PWD/assets/android/include"
+export CXXFLAGS_aarch64_linux_android="-I$PWD/assets/android/include"
 cargo rustc --target "$TARGET" --lib --release --crate-type cdylib
 
 SO="target/$TARGET/release/libaudemo.so"
