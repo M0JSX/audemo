@@ -16,7 +16,7 @@ The interface uses Adobe's open-source Source Sans 3 and Source Code Pro typefac
 - **Plug-ins**: VST3 effects on Windows, macOS and Linux, and Audio Units on macOS, from Effects > Audio Units / VST 3 and in every effects rack (waveform rack, track, bus and master racks), batch processing and previews. **Effects > Audio Plug-In Manager** scans the standard folders (plus any you add) in a separate process, so a plug-in that crashes is listed instead of closing Audemo, and lets you enable or disable each one. Each plug-in's effect window shows its parameters, and **Show Plug-In Window** opens the plug-in's own interface (Windows and macOS). Plug-in settings are saved with sessions and rack slots; a session whose plug-in isn't installed keeps the slot and its settings and passes audio through until it's available. Plug-in latency is compensated when applying effects.
 - **Metadata** panel: title, artist, album, album artist, genre, year, track number, composer, comment and copyright, read from and written to every format (RIFF INFO, ID3v2, Vorbis comments, iTunes tags). WAV files also keep their **markers** as cue points.
 - **Workspace** laid out like Audition's default: Files / Favorites, then Media Browser / Effects Rack / Markers / Properties, then History down the left; the Editor in the centre with its transport bar; Levels / Frequency Analysis / Phase Meter and Selection/View along the bottom; History / Match Loudness at the bottom left. Panel groups resize, and Window > Workspace > Reset to Default restores the layout.
-- **Multitrack editor** (toolbar *Multitrack*, or 0): sessions of tracks with volume, pan, mute, solo and record-arm; drag files from the Files panel (or the desktop) onto tracks; move clips between tracks, trim their edges, drag fade handles, set clip gain, split at the playhead (Ctrl+K), with snapping to clip edges, the cursor and the selection. The mix plays live as you edit. Arm a track and record onto it while the other tracks play. **Volume and pan automation**: press A on a track to show its yellow (volume) and blue (pan) lines; drag or double-click a line to add points, drag points, double-click one to delete it, right-click to clear. Overlapping clips on a track **crossfade automatically** (equal-power). Peak **meters** on every track. **Recording latency compensation** (Preferences) lines overdubs up with what you heard. **Track effects racks**: every track, bus and the master has a 16-slot rack of real-time effects (EQs and filters, compressors, limiter, gate, de-esser, delay, echo, chorus/flanger, reverb, distortion, stereo tools), edited in the Effects Rack panel and heard live as the session plays. **Bus tracks** (Alt+B) take tracks routed to them (Out) and **sends** (pre- or post-fader) and have their own rack and fader. A **Mixer** view with faders, pan, meters, sends, output routing and rack access for every track, bus and the master. **Mixdown Session to New File** (entire session or time selection). Clips stay linked to their files, so edits made in the Waveform editor (double-click a clip) are heard in the session. Sessions save as `.audemo` files, with any unsaved audio written to a folder beside them.
+- **Multitrack editor** (toolbar *Multitrack*, or 0): sessions of tracks with volume, pan, mute, solo and record-arm; drag files from the Files panel (or the desktop) onto tracks; move clips between tracks, trim their edges, drag fade handles, set clip gain, split at the playhead (Ctrl+K), with snapping to clip edges, the cursor and the selection. The mix plays live as you edit. Arm a track and record onto it while the other tracks play. **Volume and pan automation**: press A on a track to show its yellow (volume) and blue (pan) lines; drag or double-click a line to add points, drag points, double-click one to delete it, right-click to clear. Overlapping clips on a track **crossfade automatically** (equal-power). Peak **meters** on every track. **Recording latency compensation** (Preferences) lines overdubs up with what you heard. **Track effects racks**: every track, bus and the master has a 16-slot rack of real-time effects (EQs and filters, compressors, limiter, gate, de-esser, delay, echo, chorus/flanger, reverb, distortion, stereo tools), edited in the Effects Rack panel and heard live as the session plays. **Bus tracks** (Alt+B) take tracks routed to them (Out) and **sends** (pre- or post-fader) and have their own rack and fader. A **Mixer** view with faders, pan, meters, sends, output routing and rack access for every track, bus and the master. **Mixdown Session to New File** (entire session or time selection). **Clip groups** (Ctrl+G) move, select and colour together; clips can be **looped** (drag the right edge past the source to repeat it), **locked in time**, **stretched** (Clip > Stretch, keeping pitch) and given their own **clip effects rack**. **Bounce** a track, the time selection or the selected clips to a new clip. **Sidechain** inputs for the Compressor and Noise Gate from any track or bus. **Parameter automation lanes** for mute and any effect parameter in a track's rack, alongside volume and pan. **Tempo** (bpm, time signature), a bar/beat **grid** with snapping and a **metronome**. **Essential Sound** panel: tag clips as Dialogue, Music, SFX or Ambience and get one-click loudness matching, repair, clarity, EQ presets, reverb and **auto-ducking** of music under dialogue. **Remix** fits a music clip to a new length by re-joining it at beat boundaries. **Export to Final Cut Pro XML** (File > Export > Session to FCP XML) for Premiere Pro, Final Cut and DaVinci Resolve. Clips stay linked to their files, so edits made in the Waveform editor (double-click a clip) are heard in the session. Sessions save as `.audemo` files, with any unsaved audio written to a folder beside them.
 - **Waveform editor** with an overview/zoom navigator, time ruler, per-channel lanes, amplitude ruler in dB, sample-level zoom and channel enable toggles (edit L or R only).
 - **Spectral frequency display** (Shift+D) shown under the waveform, with **spectral editing**: Marquee (E), Lasso (D) and Paintbrush (P) tools select an area of time × frequency; any effect then changes only that area, Delete silences it, and **Auto Heal** (Ctrl+U) rebuilds it from the sound around it. The **Spot Healing Brush** (B) repairs whatever you paint over (clicks, coughs, chair squeaks, phone beeps) as soon as you let go.
 - **Diagnostics** panel: scan a file or selection for clicks, clipping, silence or audio; jump to each finding, then Repair, Delete or Mark one or all.
@@ -24,11 +24,19 @@ The interface uses Adobe's open-source Source Sans 3 and Source Code Pro typefac
 - **Edit**: cut, copy, paste, paste to new, delete, crop, select all, convert sample rate and channel count.
 - **Unlimited-style history**: 60-step undo/redo plus a History panel you can click to jump to any state.
 - **Fade handles** in the top corners of the waveform and a floating **clip gain** control.
-- **Markers** (M), with rename, jump and delete in the Markers panel.
+- **Markers and ranges** (M; with a selection and stopped, M adds a range marker). Cue, CD Track, Cart Timer and Subclip types; drag points and range edges in the timeline; rename, describe, merge, delete, convert between range and point, Select All. Markers follow edits and are stored in WAV files (cue points, labelled-text ranges and notes). **Import/Export Markers** as Audition-compatible CSV, **Export Audio** of each range to its own file, and a **Playlist** panel that plays ranges in order (with loop counts) or renders them to a new file.
+- **Zero crossings** (Edit > Zero Crossings: adjust the selection inward, outward, or move the start/end left or right) and **snapping** to markers, the ruler and zero crossings.
+- **Punch-in** (Punch In (Record over Selection), Ctrl+Shift+Space, in the Waveform and Multitrack editors): record over the time selection with pre-roll, keeping the audio either side.
+- **Keyboard shortcut editor** (Edit > Keyboard Shortcuts): reassign any command, with conflict warnings and reset; the macOS menu shows your keys.
+- **Pitch display** (View > Show Pitch Display): the detected pitch curve over the spectral display, used by Manual Pitch Correction.
+- **Surround**: open, create (File > New, 5.1 and 7.1) and convert to 5.1/7.1, with labelled channels (L R C LFE Ls Rs …). WAV files are written as WAVE_FORMAT_EXTENSIBLE with the speaker mask. Playback uses as many outputs as the device has and folds down to stereo (ITU coefficients) otherwise; MP3 and AAC exports are folded to stereo.
+- **Video files**: the audio track of MOV, MP4, M4V, MKV, WebM and 3GP files opens like any audio file (the picture isn't shown).
+- **CD Layout** (View > CD Layout): build a track list from open files or CD Track markers, set pauses, titles and performers (CD-Text), and export a single WAV with a CUE sheet for burning software.
+- **Control surfaces**: Mackie Control (and compatibles such as the Behringer X-Touch, Icon and PreSonus FaderPort in MCU mode) over MIDI, set up under Preferences > Control Surface: transport, eight track faders plus the master, pan, mute/solo/arm and bank buttons, with motor-fader feedback.
 - **Audio drivers:** WASAPI and **ASIO** on Windows, Core Audio on macOS, ALSA (PulseAudio/PipeWire) and **JACK** on Linux, chosen under Edit > Preferences > Audio Hardware > Device Class. With ASIO one driver handles input and output, the I/O buffer size is passed to the driver and Settings… opens its control panel. JACK uses the server's rate and buffer size; Audemo's ports (Audemo_out, Audemo_in) connect to the system ports, and libjack is only loaded when JACK is chosen.
 - **Playback** through the chosen device, looping, monitor volume, peak meters with hold and clip indicator.
 - **Recording** (Shift+Space) with the waveform drawn live as it records; Stop or Space ends it. Records into the selection or at the cursor, or into a new file if none is open.
-- **Preferences** (Edit > Preferences, Ctrl+, / ⌘,) with Audition's 17 pages: General (startup, tool tips, zoom factors, auto-scroll), Appearance (presets, element colours with hue/saturation, brightness from darkest to light, gradients, interface scale), Audio Channel Mapping (which device channels Audemo's L/R play and record on), Audio Hardware (device class: WASAPI/ASIO, Core Audio, ALSA/JACK; input and output devices or the ASIO driver, I/O buffer size, sample rate, force hardware to the file's sample rate, system audio settings), Auto Save (timed backups of sessions and edited files, how many to keep, where), Data (dither default, smoothing delete/cut and paste boundaries, sample rate conversion quality), Effects (open plug-in windows automatically, scan at startup), Markers & Metadata, Memory (installed RAM, undo levels), Multitrack (pan mode: L/R cut or equal power; recording latency), Multitrack Clips (automatic crossfades and their curve, default clip fades, clip names), Playback and Recording (return playhead on stop, follow, pre-roll/post-roll for View > Play with Pre-roll and Post-roll, Alt+Space), Spectral Displays (window function, resolution, decibel range, logarithmic frequency scale) and Time Display (decimal, CD 75 fps, SMPTE 30/29.97 drop/29.97/25/24, samples, bars and beats, custom fps). Control Surface, Media & Disk Cache and Video are there too, saying what Audemo does instead.
+- **Preferences** (Edit > Preferences, Ctrl+, / ⌘,) with Audition's 17 pages: General (startup, tool tips, zoom factors, auto-scroll), Appearance (presets, element colours with hue/saturation, brightness from darkest to light, gradients, interface scale), Audio Channel Mapping (which device channels Audemo's L/R play and record on), Audio Hardware (device class: WASAPI/ASIO, Core Audio, ALSA/JACK; input and output devices or the ASIO driver, I/O buffer size, sample rate, force hardware to the file's sample rate, system audio settings), Auto Save (timed backups of sessions and edited files, how many to keep, where), Data (dither default, smoothing delete/cut and paste boundaries, sample rate conversion quality), Effects (open plug-in windows automatically, scan at startup), Markers & Metadata, Memory (installed RAM, undo levels), Multitrack (pan mode: L/R cut or equal power; recording latency), Multitrack Clips (automatic crossfades and their curve, default clip fades, clip names), Playback and Recording (return playhead on stop, follow, pre-roll/post-roll for View > Play with Pre-roll and Post-roll, Alt+Space), Spectral Displays (window function, resolution, decibel range, logarithmic frequency scale) and Time Display (decimal, CD 75 fps, SMPTE 30/29.97 drop/29.97/25/24, samples, bars and beats, custom fps). Control Surface sets up a Mackie Control device; Media & Disk Cache and Video are there too, saying what Audemo does instead.
 - **Real-time Effects Rack**: chain up to 16 effects with power switches, reordering, input/output gain and dry/wet mix. With the rack's master power on, normal playback (Space, looping, seeking) is heard through the chain as you adjust it; Apply renders it into the file.
 - **Analysis**: Frequency Analysis (live FFT at the playhead, 1k–32k sizes, scan-selection average, hover readout), Phase Meter (goniometer and correlation), and Window > Amplitude Statistics (peak, true peak, RMS, clipping, DC offset, integrated loudness and loudness range).
 - **Match Loudness** panel: measure integrated loudness (ITU-R BS.1770 / EBU R128), true peak and LRA for open files and match them to EBU R128, ATSC A/85, podcast or streaming targets in one run.
@@ -37,20 +45,20 @@ The interface uses Adobe's open-source Source Sans 3 and Source Code Pro typefac
 - **Effect windows** with presets, live looping preview (Space) and bypass, plus a draggable frequency-response curve for the EQs and filters.
 - **Favorites** menu for one-click common jobs.
 
-## Effects (57)
+## Effects (66)
 
 | Menu | Effects |
 |---|---|
 | Effects | Invert, Reverse, Silence |
-| Amplitude and Compression | Amplify, Normalize, Fade In, Fade Out, Dynamics Processing, Hard Limiter, Single-band Compressor, Tube-modeled Compressor, Multiband Compressor, DeEsser, DC Offset Correction, Match Loudness, Noise Gate, Speech Volume Leveler |
+| Amplitude and Compression | Amplify, Normalize, Fade In, Fade Out, Fade Envelope, Gain Envelope, Dynamics Processing, Hard Limiter, Single-band Compressor, Tube-modeled Compressor, Multiband Compressor, DeEsser, DC Offset Correction, Match Loudness, Noise Gate, Speech Volume Leveler |
 | Delay and Echo | Delay, Echo (with ping-pong), Analog Delay (tape / tube / BBD), Multitap Delay |
-| Filter and EQ | Parametric Equalizer (5 bands + cut filters), Graphic Equalizer (10, 20 and 30 bands), Notch Filter, Scientific Filter (Butterworth LP/HP/BP/BS, up to 8-pole) |
+| Filter and EQ | Parametric Equalizer (5 bands + cut filters), Graphic Equalizer (10, 20 and 30 bands), Notch Filter, Scientific Filter (Butterworth LP/HP/BP/BS, up to 8-pole), FFT Filter (drawn curve) |
 | Modulation | Chorus, Flanger, Chorus/Flanger, Phaser |
-| Noise Reduction / Restoration | Capture Noise Print, Noise Reduction (process), Adaptive Noise Reduction, DeHummer (50/60 Hz + harmonics), Click/Pop Eliminator, DeClipper, Hiss Reduction, Delete Silence |
+| Noise Reduction / Restoration | Capture Noise Print, Noise Reduction (process), Adaptive Noise Reduction, DeHummer (50/60 Hz + harmonics), Click/Pop Eliminator, DeClipper, Hiss Reduction, Delete Silence, Learn Sound Model, Sound Remover |
 | Reverb | Studio Reverb (algorithmic), Full Reverb (convolution with a synthesised impulse response) |
-| Special | Distortion (soft/hard/tube/foldback/bit-crush), Doppler Shifter, Guitar Suite, Mastering, Vocal Enhancer |
-| Stereo Imagery | Channel Mixer, Stereo Expander, Centre Channel Extractor, Automatic Phase Correction, Pan |
-| Time and Pitch | Stretch and Pitch (phase vocoder with phase locking), Pitch Shifter, Varispeed |
+| Special | Distortion (soft/hard/tube/foldback/bit-crush), Doppler Shifter, Guitar Suite, Mastering, Vocal Enhancer, Frequency Band Splitter |
+| Stereo Imagery | Channel Mixer, Stereo Expander, Centre Channel Extractor, Automatic Phase Correction, Pan, Graphic Phase Shifter |
+| Time and Pitch | Stretch and Pitch (phase vocoder with phase locking), Pitch Shifter, Varispeed, Pitch Bender, Automatic Pitch Correction, Manual Pitch Correction (PSOLA) |
 | Generate | Tones (sine/square/triangle/saw, sweeps), Noise (white/pink/brown), DTMF Tones, Silence |
 
 All processing is 32-bit float. Effects run on a background thread, so the window stays responsive on long files.
@@ -93,8 +101,10 @@ All processing is 32-bit float. Effects run on a background thread, so the windo
 | Show automation (Multitrack) | A on the track header |
 | Add / delete automation point | double-click the line / double-click the point |
 | Shape a fade | drag the fade handle up (fast rise) or down (slow rise); hold Ctrl (⌘) for a cosine S-curve |
+| Punch in | Ctrl+Shift+Space |
+| Group / ungroup clips (Multitrack) | Ctrl+G / Ctrl+Shift+G |
 
-On macOS use ⌘ instead of Ctrl.
+On macOS use ⌘ instead of Ctrl. Every shortcut can be changed in Edit > Keyboard Shortcuts.
 
 ## Building from source
 
@@ -171,6 +181,16 @@ src/
   export/        WAV, FLAC (own encoder), MP3 (LAME) and M4A (FDK AAC) writers; tags
   plugin/        VST3 host (interfaces written from the MIT-licensed SDK headers), Audio Units
                  (macOS), plug-in windows, scanning, the Plug-In Manager's registry
+  markers_ui.rs  Markers and Playlist panels, zero crossings, marker CSV
+  shortcuts.rs   command table, keymap and the Keyboard Shortcuts editor
+  essential.rs   Essential Sound panel, auto-ducking, Remix
+  cd.rs          CD Layout window, CUE sheets
+  interchange.rs Final Cut Pro XML export of sessions
+  control_surface.rs  Mackie Control over MIDI (midir)
+  dsp/pitch.rs   YIN pitch tracking and PSOLA
+  dsp/remix.rs   beat analysis and re-joining for Remix
+  dsp/effects/drawn.rs  curve-driven effects (envelopes, Pitch Bender, FFT Filter,
+                 phase shifter), pitch correction, band splitter, Sound Remover
   theme.rs       palette and hand-drawn transport icons
 assets/          app icon, macOS Info.plist, Linux .desktop file, WiX installer source
 scripts/         macOS and Linux packaging scripts
@@ -190,6 +210,10 @@ preview are generated from that definition.
 3. Multitrack sessions: ~~tracks, clips, Mixer, mixdown, recording~~ (0.6), ~~automation, crossfades, track meters, latency compensation~~ (0.6.5), ~~track/bus/master effects racks, bus tracks, sends~~ (0.7) — done
 4. ~~Spectral selection/healing tools, Diagnostics panel, batch processing~~ (0.8)
 5. ~~MP3/FLAC/AAC export, metadata~~ (0.9), ~~VST3 and Audio Unit plug-in hosting~~ (0.10)
+6. ~~Preferences, ASIO and JACK~~ (1.1–1.2)
+7. ~~Range markers and Playlist, zero crossings, punch-in, shortcut editor; envelope, pitch, FFT, phase, band-splitter and Sound Remover effects; pitch correction; clip groups, clip effects, stretch/loop/lock, bounce, sidechain, parameter automation; Essential Sound and Remix; 5.1/7.1, tempo grid and metronome, video audio import, CD Layout, FCP XML export, control surfaces~~ (1.5)
+
+Not yet: OMF export, a video panel, surround multitrack sessions (sessions mix in stereo), control-surface protocols other than Mackie Control, and direct disc burning.
 
 ## Third-party code
 
