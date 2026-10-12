@@ -753,6 +753,8 @@ pub struct App {
     pub surface: Option<crate::control_surface::Surface>,
     /// A check for updates in progress.
     pub update_check: Option<crate::update::Check>,
+    /// An update being downloaded, or ready to install.
+    pub updater: Option<crate::update::Install>,
 }
 
 /// The pitch display's track, worked out in the background.
@@ -855,6 +857,7 @@ impl App {
             cd: Default::default(),
             surface: None,
             update_check: None,
+            updater: None,
         };
         let opened_files = !open.is_empty();
         if opened_files {
@@ -863,6 +866,7 @@ impl App {
         app.apply_runtime_prefs(&cc.egui_ctx);
         app.rebuild_keymap();
         app.apply_control_surface();
+        crate::update::cleanup();
         if app.prefs.check_updates {
             app.check_for_updates(false);
         }

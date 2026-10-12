@@ -44,7 +44,7 @@ The interface uses Adobe's open-source Source Sans 3 and Source Code Pro typefac
 - **File and Edit menus** with Open Append, Open Recent, Close All, Save Selection As, Save All, Copy to New, Mix Paste (insert / overlap / overwrite / modulate) and Repeat Previous Command.
 - **Effect windows** with presets, live looping preview (Space) and bypass, plus a draggable frequency-response curve for the EQs and filters.
 - **Favorites** menu for one-click common jobs.
-- **Check for Updates** (Help menu, and at startup unless switched off in Preferences > General): asks GitHub for the latest release and, when it's newer, shows what's new with Download, Skip This Version and Later.
+- **Check for Updates** (Help menu, and at startup unless switched off in Preferences > General): asks GitHub for the latest release and, when it's newer, shows what's new. **Install and Restart** downloads the package for how Audemo is installed (the .msi or portable .zip on Windows, the .zip on macOS, the AppImage, tarball or .deb on Linux), checks its SHA-256 against GitHub's, swaps it in and restarts, offering to save unsaved work first; a .deb is handed to the system's software installer. Download, Skip This Version and Later are there too.
 
 ## Effects (66)
 

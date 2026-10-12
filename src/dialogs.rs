@@ -407,6 +407,22 @@ impl App {
                 }
             }
             Dialog::Update(r) => {
+                #[derive(Clone, Copy, PartialEq)]
+                enum Act {
+                    Install,
+                    Cancel,
+                    Restart,
+                    SaveRestart,
+                    Download,
+                    Skip,
+                    Later,
+                    Hide,
+                }
+                use crate::update::{InstallKind, InstallState, Plan};
+                let installer = crate::update::install_kind().and_then(|k| crate::update::pick_asset(&k, &r.assets).map(|a| (k, a.clone())));
+                let unsaved = self.docs.iter().filter(|d| d.dirty).count() + self.sessions.iter().filter(|s| s.dirty).count();
+                let mb = |b: u64| b as f64 / 1_048_576.0;
+                let mut act: Option<Act> = None;
                 let mut open = true;
                 centered(ctx, egui::Window::new("Update Available").open(&mut open)).show(ctx, |ui| {
                     ui.set_max_width(480.0);
@@ -416,36 +432,162 @@ impl App {
                         ui.add_space(6.0);
                         ui.label(RichText::new("What's new").strong());
                         egui::Frame::none().fill(BG_LIST()).inner_margin(egui::Margin::same(6.0)).show(ui, |ui| {
-                            egui::ScrollArea::vertical().max_height(220.0).auto_shrink([false, true]).show(ui, |ui| {
+                            egui::ScrollArea::vertical().max_height(200.0).auto_shrink([false, true]).show(ui, |ui| {
                                 ui.label(RichText::new(r.notes.trim()).size(12.0));
                             });
                         });
                     }
+                    ui.add_space(8.0);
+                    let state = self.updater.as_ref().filter(|u| u.version == r.version);
+                    match state.map(|u| (&u.state, u.done.load(std::sync::atomic::Ordering::Relaxed), u.total)) {
+                        None => {
+                            if let Some((kind, asset)) = &installer {
+                                ui.label(RichText::new(format!("Downloads {} ({:.1} MB) and checks it against GitHub's checksum.", asset.name, mb(asset.size))).color(TEXT_DIM()).size(11.0));
+                                ui.add_space(4.0);
+                                ui.horizontal(|ui| {
+                                    let label = if *kind == InstallKind::LinuxDeb { "Download and Install…" } else { "Install and Restart" };
+                                    if ui.add(egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(ACCENT())).clicked() {
+                                        act = Some(Act::Install);
+                                    }
+                                    if ui.button("Download…").on_hover_text("Open the release page instead").clicked() {
+                                        act = Some(Act::Download);
+                                    }
+                                    if ui.button("Skip This Version").on_hover_text("Don't mention this version at startup again").clicked() {
+                                        act = Some(Act::Skip);
+                                    }
+                                    if ui.button("Later").clicked() {
+                                        act = Some(Act::Later);
+                                    }
+                                });
+                            } else {
+                                ui.horizontal(|ui| {
+                                    if ui.add(egui::Button::new(RichText::new("Download…").color(Color32::WHITE)).fill(ACCENT())).on_hover_text("Open the release page to download the installer").clicked() {
+                                        act = Some(Act::Download);
+                                    }
+                                    if ui.button("Skip This Version").on_hover_text("Don't mention this version at startup again").clicked() {
+                                        act = Some(Act::Skip);
+                                    }
+                                    if ui.button("Later").clicked() {
+                                        act = Some(Act::Later);
+                                    }
+                                });
+                            }
+                        }
+                        Some((InstallState::Downloading, done, total)) => {
+                            let frac = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+                            ui.add(egui::ProgressBar::new(frac).text(format!("Downloading… {:.1} of {:.1} MB", mb(done), mb(total))));
+                            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("Cancel").clicked() {
+                                    act = Some(Act::Cancel);
+                                }
+                                if ui.button("Hide").on_hover_text("Keep downloading in the background").clicked() {
+                                    act = Some(Act::Hide);
+                                }
+                            });
+                        }
+                        Some((InstallState::Ready(plan), _, _)) => {
+                            if let Plan::Open { .. } = plan {
+                                ui.label("The package is downloaded and checked.");
+                                ui.add_space(4.0);
+                                ui.horizontal(|ui| {
+                                    if ui.add(egui::Button::new(RichText::new("Open Installer").color(Color32::WHITE)).fill(ACCENT())).clicked() {
+                                        act = Some(Act::Restart);
+                                    }
+                                    if ui.button("Later").clicked() {
+                                        act = Some(Act::Hide);
+                                    }
+                                });
+                            } else {
+                                ui.label(format!("Audemo {} is downloaded, checked and ready.", r.version));
+                                if let Plan::Msi { .. } = plan {
+                                    ui.label(RichText::new("Audemo closes, Windows asks for permission to install, then the new version starts.").color(TEXT_DIM()).size(11.0));
+                                }
+                                if unsaved > 0 {
+                                    ui.label(RichText::new(format!("{unsaved} file(s) or session(s) have unsaved changes.")).color(WARN()));
+                                }
+                                ui.add_space(4.0);
+                                ui.horizontal(|ui| {
+                                    if unsaved > 0 {
+                                        if ui.add(egui::Button::new(RichText::new("Save All and Restart").color(Color32::WHITE)).fill(ACCENT())).clicked() {
+                                            act = Some(Act::SaveRestart);
+                                        }
+                                        if ui.button("Restart Without Saving").clicked() {
+                                            act = Some(Act::Restart);
+                                        }
+                                    } else if ui.add(egui::Button::new(RichText::new("Restart Now").color(Color32::WHITE)).fill(ACCENT())).clicked() {
+                                        act = Some(Act::Restart);
+                                    }
+                                    if ui.button("Later").on_hover_text("Help > Check for Updates brings this back").clicked() {
+                                        act = Some(Act::Hide);
+                                    }
+                                });
+                            }
+                        }
+                        Some((InstallState::Failed(e), _, _)) => {
+                            ui.label(RichText::new(e.as_str()).color(WARN()));
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                if installer.is_some() && ui.add(egui::Button::new(RichText::new("Try Again").color(Color32::WHITE)).fill(ACCENT())).clicked() {
+                                    act = Some(Act::Install);
+                                }
+                                if ui.button("Download…").clicked() {
+                                    act = Some(Act::Download);
+                                }
+                                if ui.button("Later").clicked() {
+                                    act = Some(Act::Later);
+                                }
+                            });
+                        }
+                    }
                     ui.add_space(6.0);
                     ui.checkbox(&mut self.prefs.check_updates, "Check for updates at startup");
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        if ui.add(egui::Button::new(RichText::new("Download…").color(Color32::WHITE)).fill(ACCENT())).on_hover_text("Open the release page to download the installer").clicked() {
-                            if let Err(e) = crate::update::open_url(&r.page) {
-                                self.set_status(e);
-                            }
-                            keep = false;
-                        }
-                        if ui.button("Skip This Version").on_hover_text("Don't mention this version at startup again").clicked() {
-                            self.prefs.skip_version = r.version.clone();
-                            keep = false;
-                        }
-                        if ui.button("Later").clicked() {
-                            keep = false;
-                        }
-                    });
                 });
+                match act {
+                    Some(Act::Install) => self.start_install(&r),
+                    Some(Act::Cancel) => self.cancel_install(),
+                    Some(Act::Restart) => {
+                        self.restart_into_update(ctx);
+                        if self.updater.as_ref().map(|u| matches!(u.state, InstallState::Failed(_))).unwrap_or(false) {
+                            // Stay open to show what went wrong.
+                        } else {
+                            keep = false;
+                        }
+                    }
+                    Some(Act::SaveRestart) => {
+                        if self.save_everything() {
+                            self.restart_into_update(ctx);
+                            keep = false;
+                        } else {
+                            self.set_status("Some files weren't saved, so the update waits. Save them, then choose Restart Now.");
+                        }
+                    }
+                    Some(Act::Download) => {
+                        if let Err(e) = crate::update::open_url(&r.page) {
+                            self.set_status(e);
+                        }
+                        keep = false;
+                    }
+                    Some(Act::Skip) => {
+                        self.prefs.skip_version = r.version.clone();
+                        keep = false;
+                    }
+                    Some(Act::Later) => {
+                        if !matches!(self.updater.as_ref().map(|u| &u.state), Some(InstallState::Ready(_)) | Some(InstallState::Downloading)) {
+                            self.updater = None;
+                        }
+                        keep = false;
+                    }
+                    Some(Act::Hide) => keep = false,
+                    None => {}
+                }
                 if !open {
                     keep = false;
                 }
                 if !keep {
                     self.prefs.save();
-                } else {
+                } else if self.dialog.is_none() {
                     next = Some(Dialog::Update(r));
                 }
             }
