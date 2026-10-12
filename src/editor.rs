@@ -173,6 +173,13 @@ impl App {
         let wheel_base = self.wheel_base();
         let (snap_markers, snap_zero) = (self.prefs.snap_markers, self.prefs.snap_zero);
         let pitch_track = if self.show_pitch && show_spec { self.pitch_track(di) } else { None };
+        // A take being recorded into this file: (where it starts, input
+        // frames per file sample), for drawing it in the overview.
+        let rec_into = self
+            .rec_target
+            .as_ref()
+            .filter(|t| t.doc_id == self.docs[di].id)
+            .and_then(|t| self.engine.recording_format().map(|(rate, _)| (t.range.0, rate as f64 / self.docs[di].sample_rate.max(1) as f64)));
         let doc = &mut self.docs[di];
         let len = doc.len();
         let n_ch = doc.n_ch().max(1);
@@ -192,13 +199,24 @@ impl App {
             for px in 0..cols {
                 let a = (px as f64 / cols as f64 * total) as usize;
                 let b = (((px + 1) as f64 / cols as f64 * total) as usize).max(a + 1);
-                if a >= len {
-                    break;
-                }
                 let mut amp = 0.0f32;
-                for c in 0..doc.n_ch() {
-                    let (lo, hi) = doc.peaks.min_max(&doc.audio, c, a, b);
-                    amp = amp.max(hi.abs()).max(lo.abs());
+                // The part being recorded comes from the live take (it only
+                // joins the file when recording stops).
+                let rec = rec_into.zip(self.engine.rec_view()).filter(|((start, _), _)| a < start + doc.pending && b > *start);
+                if let Some(((start, ratio), rv)) = rec {
+                    let f0 = ((a.max(start) - start) as f64 * ratio) as usize;
+                    let f1 = (((b.min(start + doc.pending) - start) as f64 * ratio).ceil() as usize).max(f0 + 1);
+                    for c in 0..rv.chans.len().min(2) {
+                        let (lo, hi) = rv.min_max(c, f0, f1);
+                        amp = amp.max(hi.abs()).max(lo.abs());
+                    }
+                } else if a < len {
+                    for c in 0..doc.n_ch() {
+                        let (lo, hi) = doc.peaks.min_max(&doc.audio, c, a, b);
+                        amp = amp.max(hi.abs()).max(lo.abs());
+                    }
+                } else {
+                    continue;
                 }
                 let x = overview.left() + px as f32 + 0.5;
                 shapes.push(Shape::line_segment([pos2(x, mid - amp * h), pos2(x, mid + amp * h + 1.0)], Stroke::new(1.0_f32, OVERVIEW_WAVE())));
