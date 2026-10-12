@@ -514,75 +514,178 @@ impl App {
         let mut switch_session = None;
         let mut select = None;
         let mut insert: Option<u64> = None;
+        let mut close_doc: Option<usize> = None;
+        let mut new_action: Option<Action> = None;
+
+        // One row per session and file; every row is a single strip that
+        // clicks (select), double-clicks (open) and drags (into a track).
+        struct Row {
+            session: Option<usize>,
+            doc: Option<(usize, u64)>,
+            icon: Icon,
+            icon_col: Color32,
+            name: String,
+            active: bool,
+            cols: [String; 6],
+        }
+        let mut rows: Vec<Row> = Vec::new();
+        for (i, s) in self.sessions.iter().enumerate() {
+            let active = Some(i) == self.active_session && self.mode == Mode::Multitrack;
+            rows.push(Row {
+                session: Some(i),
+                doc: None,
+                icon: Icon::Multitrack,
+                icon_col: if active { HOT() } else { Color32::from_rgb(0x4d, 0xa3, 0xff) },
+                name: s.name.clone(),
+                active,
+                cols: [
+                    if s.dirty { "*".into() } else { String::new() },
+                    format_time(s.end() as f64, s.sample_rate),
+                    format!("{} Hz", s.sample_rate),
+                    format!("{} tracks", s.tracks.len()),
+                    String::new(),
+                    "Session".into(),
+                ],
+            });
+        }
+        for (i, d) in self.docs.iter().enumerate() {
+            let active = Some(i) == self.active;
+            rows.push(Row {
+                session: None,
+                doc: Some((i, d.id)),
+                icon: Icon::Waveform,
+                icon_col: if active { HOT() } else { WAVE() },
+                name: d.name.clone(),
+                active,
+                cols: [
+                    if d.dirty { "*".into() } else { String::new() },
+                    format_time(d.len() as f64, d.sample_rate),
+                    format!("{} Hz", d.sample_rate),
+                    match d.n_ch() {
+                        1 => "Mono".to_string(),
+                        2 => "Stereo".to_string(),
+                        6 => "5.1".to_string(),
+                        8 => "7.1".to_string(),
+                        n => format!("{n} ch"),
+                    },
+                    d.source_bits.map(|b| format!("{b}")).unwrap_or_else(|| "32 (float)".into()),
+                    d.path.as_ref().and_then(|p| p.extension()).map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default(),
+                ],
+            });
+        }
+        let font = FontId::proportional(13.0);
+        let head_font = FontId::proportional(11.5);
+        const HEADS: [&str; 7] = ["Name", "Status", "Duration", "Sample Rate", "Channels", "Bit Depth", "Source Format"];
+        const COL_W: [f32; 6] = [52.0, 78.0, 92.0, 74.0, 78.0, 96.0];
+        const GAP: f32 = 12.0;
+        const ROW_H: f32 = 24.0;
+        const HEAD_H: f32 = 22.0;
+        let name_w = rows
+            .iter()
+            .map(|r| ui.fonts(|f| f.layout_no_wrap(r.name.clone(), font.clone(), TEXT()).size().x))
+            .fold(60.0_f32, f32::max)
+            + 30.0;
+        let mut col_x = vec![8.0_f32];
+        let mut x = 8.0 + name_w + GAP;
+        for w in COL_W {
+            col_x.push(x);
+            x += w + GAP;
+        }
+        let total_w = x;
         egui::Frame::none().fill(BG_LIST()).show(ui, |ui| {
             ui.set_min_height(ui.available_height());
+            let view_h = ui.available_height();
             egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-                egui::Grid::new("files_table").num_columns(7).striped(true).spacing([12.0, 2.0]).show(ui, |ui| {
-                    for h in ["Name", "Status", "Duration", "Sample Rate", "Channels", "Bit Depth", "Source Format"] {
-                        ui.label(RichText::new(h).color(TEXT_DIM()).size(11.5));
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let full_w = ui.available_width().max(total_w);
+                // Header.
+                let (hr, _) = ui.allocate_exact_size(vec2(full_w, HEAD_H), Sense::hover());
+                for (k, h) in HEADS.iter().enumerate() {
+                    ui.painter().text(pos2(hr.left() + col_x[k], hr.center().y), Align2::LEFT_CENTER, *h, head_font.clone(), TEXT_DIM());
+                }
+                for (k, row) in rows.iter().enumerate() {
+                    let sense = if row.doc.is_some() { Sense::click_and_drag() } else { Sense::click() };
+                    let (r, resp) = ui.allocate_exact_size(vec2(full_w, ROW_H), sense);
+                    let painter = ui.painter();
+                    if row.active {
+                        painter.rect_filled(r, 2.0, BG_RAISED());
+                    } else if resp.hovered() {
+                        painter.rect_filled(r, 2.0, Color32::from_white_alpha(14));
+                    } else if k % 2 == 1 {
+                        painter.rect_filled(r, 0.0, Color32::from_white_alpha(5));
                     }
-                    ui.end_row();
-                    for (i, s) in self.sessions.iter().enumerate() {
-                        let active = Some(i) == self.active_session && self.mode == Mode::Multitrack;
-                        ui.horizontal(|ui| {
-                            let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-                            draw_icon(ui.painter(), r.shrink(1.0), Icon::Multitrack, if active { HOT() } else { Color32::from_rgb(0x4d, 0xa3, 0xff) });
-                            let name = RichText::new(&s.name).color(if active { HOT() } else { TEXT() });
-                            if ui.selectable_label(active, if active { name.strong() } else { name }).clicked() {
+                    let icon = Rect::from_center_size(pos2(r.left() + col_x[0] + 7.0, r.center().y), vec2(13.0, 13.0));
+                    draw_icon(painter, icon, row.icon, row.icon_col);
+                    let name_col = if row.active { HOT() } else { TEXT() };
+                    painter.text(pos2(r.left() + col_x[0] + 22.0, r.center().y), Align2::LEFT_CENTER, &row.name, font.clone(), name_col);
+                    for (c, text) in row.cols.iter().enumerate() {
+                        painter.text(pos2(r.left() + col_x[c + 1], r.center().y), Align2::LEFT_CENTER, text, font.clone(), if row.active { TEXT() } else { TEXT_DIM() });
+                    }
+                    if let Some(i) = row.session {
+                        if resp.clicked() || resp.double_clicked() {
+                            switch_session = Some(i);
+                        }
+                        resp.context_menu(|ui| {
+                            if ui.button("Open in Multitrack Editor").clicked() {
                                 switch_session = Some(i);
+                                ui.close_menu();
                             }
                         });
-                        ui.label(if s.dirty { "*" } else { "" });
-                        ui.label(format_time(s.end() as f64, s.sample_rate));
-                        ui.label(format!("{} Hz", s.sample_rate));
-                        ui.label(format!("{} tracks", s.tracks.len()));
-                        ui.label("");
-                        ui.label("Session");
-                        ui.end_row();
                     }
-                    for (i, d) in self.docs.iter().enumerate() {
-                        let active = Some(i) == self.active;
-                        ui.horizontal(|ui| {
-                            let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-                            draw_icon(ui.painter(), r.shrink(1.0), Icon::Waveform, if active { HOT() } else { WAVE() });
-                            let name = RichText::new(&d.name).color(if active { HOT() } else { TEXT() });
-                            let id = d.id;
-                            // One widget that both clicks (select) and drags (onto a
-                            // multitrack track). A separate drag layer on top would
-                            // take the clicks.
-                            let resp = ui.selectable_label(active, if active { name.strong() } else { name }).interact(Sense::click_and_drag());
-                            resp.dnd_set_drag_payload(crate::mt_ui::DocDrag(id));
-                            if resp.dragged() {
-                                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                            }
-                            if resp.clicked() {
-                                select = Some(i);
-                            }
-                            if resp.double_clicked() {
+                    if let Some((i, id)) = row.doc {
+                        resp.dnd_set_drag_payload(crate::mt_ui::DocDrag(id));
+                        if resp.dragged() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                        }
+                        if resp.clicked() {
+                            select = Some(i);
+                        }
+                        if resp.double_clicked() {
+                            switch = Some(i);
+                        }
+                        resp.context_menu(|ui| {
+                            if ui.button("Open in Waveform Editor").clicked() {
                                 switch = Some(i);
+                                ui.close_menu();
                             }
-                            resp.context_menu(|ui| {
-                                if ui.button("Insert into Multitrack at Cursor").clicked() {
-                                    insert = Some(id);
-                                    ui.close_menu();
-                                }
-                                if ui.button("Open in Waveform Editor").clicked() {
-                                    switch = Some(i);
-                                    ui.close_menu();
-                                }
-                            });
+                            if ui.button("Insert into Multitrack at Cursor").clicked() {
+                                insert = Some(id);
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            if ui.button("Close File").clicked() {
+                                close_doc = Some(i);
+                                ui.close_menu();
+                            }
                         });
-                        ui.label(if d.dirty { "*" } else { "" });
-                        ui.label(format_time(d.len() as f64, d.sample_rate));
-                        ui.label(format!("{} Hz", d.sample_rate));
-                        ui.label(match d.n_ch() { 1 => "Mono".to_string(), 2 => "Stereo".to_string(), 6 => "5.1".to_string(), 8 => "7.1".to_string(), n => format!("{n} ch") });
-                        ui.label(d.source_bits.map(|b| format!("{b}")).unwrap_or_else(|| "32 (float)".into()));
-                        ui.label(d.path.as_ref().and_then(|p| p.extension()).map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default());
-                        ui.end_row();
+                    }
+                }
+                // The empty space below: right-click for new files.
+                let used = HEAD_H + rows.len() as f32 * ROW_H;
+                let (_, empty) = ui.allocate_exact_size(vec2(full_w, (view_h - used - 4.0).max(32.0)), Sense::click());
+                empty.context_menu(|ui| {
+                    if ui.button("New Audio File…").clicked() {
+                        new_action = Some(Action::New);
+                        ui.close_menu();
+                    }
+                    if ui.button("New Multitrack Session…").clicked() {
+                        new_action = Some(Action::NewSession);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Open File…").clicked() {
+                        new_action = Some(Action::Open);
+                        ui.close_menu();
                     }
                 });
             });
         });
+        if let Some(a) = new_action {
+            self.actions.push(a);
+        }
+        if let Some(i) = close_doc {
+            self.actions.push(Action::Close(i));
+        }
         if let Some(i) = select {
             // A single click selects; it only changes the view in the Waveform editor.
             self.active = Some(i);
