@@ -501,10 +501,15 @@ pub enum Dialog {
     Message { title: String, text: String },
     ConfirmClose { doc: usize },
     ConfirmQuit,
+    /// An effect that needs the whole selection in memory, on a long selection.
+    ConfirmLargeEffect { idx: Option<usize>, params: Params, minutes: f64, gb: f64 },
     NewSession { name: String, rate: u32, tracks: usize },
     ConfirmCloseSession { session: usize },
     AmplitudeStats { title: String, rx: Option<Receiver<crate::dsp::analysis::AmplitudeStats>>, stats: Option<crate::dsp::analysis::AmplitudeStats> },
 }
+
+/// Effects that need the whole selection at once ask first above this.
+pub const LARGE_EFFECT_MINUTES: f64 = 30.0;
 
 pub enum JobKind {
     /// Replace `range` of a document with the result.
@@ -536,8 +541,15 @@ pub struct SaveJob {
     pub started: Instant,
 }
 
+/// What a background job hands back: plain channels, or chunked audio
+/// (from effects that ran block by block).
+pub enum JobOut {
+    Chans(Vec<Vec<f32>>),
+    Audio(Audio),
+}
+
 pub struct Job {
-    pub rx: Receiver<Result<Vec<Vec<f32>>, String>>,
+    pub rx: Receiver<Result<JobOut, String>>,
     pub kind: JobKind,
     pub label: String,
     pub started: Instant,
@@ -883,6 +895,8 @@ impl App {
     /// rules …) from the preferences. Called at start-up and after OK.
     pub fn apply_runtime_prefs(&mut self, ctx: &egui::Context) {
         let p = &self.prefs;
+        crate::audio::set_budget(p.memory_mb as usize * (1 << 20));
+        crate::audio::set_work_dir(p.temp_dir.clone());
         crate::theme::set_look(ctx, p);
         crate::dsp::util::set_time_style(time_style_for(p));
         crate::dsp::resample::set_quality(match p.src_quality {
@@ -1423,6 +1437,10 @@ impl App {
     // ---------------------------------------------------------------- jobs
 
     pub(crate) fn spawn_job(&mut self, label: String, kind: JobKind, f: impl FnOnce() -> Result<Vec<Vec<f32>>, String> + Send + 'static) {
+        self.spawn_job_out(label, kind, move || f().map(JobOut::Chans));
+    }
+
+    pub(crate) fn spawn_job_out(&mut self, label: String, kind: JobKind, f: impl FnOnce() -> Result<JobOut, String> + Send + 'static) {
         let (tx, rx) = channel();
         std::thread::spawn(move || {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
@@ -1442,6 +1460,20 @@ impl App {
             None => return,
         };
         let job = self.job.take().unwrap();
+        // Only document edits take chunked audio as it is.
+        let res = match (res, &job.kind) {
+            (Ok(JobOut::Audio(au)), JobKind::Edit { doc_id, range, select, new_rate: None, .. }) => {
+                let (doc_id, range, select) = (*doc_id, *range, *select);
+                if let Some(doc) = self.docs.iter_mut().find(|d| d.id == doc_id) {
+                    apply_edit_audio(doc, &job.label, range, &au, select);
+                    self.set_status(format!("{} applied in {:.2} s", job.label, job.started.elapsed().as_secs_f32()));
+                }
+                return;
+            }
+            (Ok(JobOut::Audio(au)), _) => Ok(au.to_vec()),
+            (Ok(JobOut::Chans(c)), _) => Ok(c),
+            (Err(e), _) => Err(e),
+        };
         match job.kind {
             JobKind::Preview { params } => {
                 if let Some(Dialog::Effect(d)) = &mut self.dialog {
@@ -1642,6 +1674,10 @@ impl App {
     }
 
     pub fn apply_rack(&mut self) {
+        self.apply_rack_ex(false);
+    }
+
+    pub fn apply_rack_ex(&mut self, confirmed: bool) {
         if self.busy() {
             return;
         }
@@ -1655,6 +1691,12 @@ impl App {
         }
         if b <= a {
             self.set_status("The file is empty.");
+            return;
+        }
+        let minutes = (b - a) as f64 / sr.max(1) as f64 / 60.0;
+        if !confirmed && minutes > LARGE_EFFECT_MINUTES {
+            let gb = (b - a) as f64 * n_ch as f64 * 4.0 * 2.0 / 1e9;
+            self.dialog = Some(Dialog::ConfirmLargeEffect { idx: None, params: Params::default(), minutes, gb });
             return;
         }
         self.rack_on = false;
@@ -1731,6 +1773,11 @@ impl App {
 
     /// Run an effect on the selection (or the whole file) in the background.
     pub fn run_effect(&mut self, idx: usize, params: Params) {
+        self.run_effect_ex(idx, params, false);
+    }
+
+    /// `confirmed`: the user has already agreed to load a very long selection.
+    pub fn run_effect_ex(&mut self, idx: usize, params: Params, confirmed: bool) {
         if self.busy() {
             return;
         }
@@ -1767,6 +1814,21 @@ impl App {
                 title: def.name.into(),
                 text: format!("{} needs a stereo file. Use Edit > Convert Sample Type to make this file stereo first.", def.name),
             });
+            return;
+        }
+        // Sample-by-sample effects run straight from the chunked audio.
+        if spec.is_none() && !def.generator && crate::dsp::blockwise::supports(def.id) {
+            let (src, active, doc_id, id) = (doc.audio.clone(), doc.active_ch.clone(), doc.id, def.id);
+            self.last_effect = Some((idx, params.clone()));
+            let kind = JobKind::Edit { doc_id, range: (a, b), active: active.clone(), new_rate: None, select: true };
+            self.spawn_job_out(def.name.to_string(), kind, move || crate::dsp::blockwise::run(id, &params, &src, a, b, &active).map(JobOut::Audio));
+            return;
+        }
+        // Everything else loads the selection; check before loading hours of it.
+        let minutes = (b - a) as f64 / doc.sample_rate.max(1) as f64 / 60.0;
+        if !def.generator && !confirmed && minutes > LARGE_EFFECT_MINUTES {
+            let gb = (b - a) as f64 * doc.n_ch() as f64 * 4.0 * 2.0 / 1e9;
+            self.dialog = Some(Dialog::ConfirmLargeEffect { idx: Some(idx), params, minutes, gb });
             return;
         }
         let input = if def.generator { vec![Vec::new(); doc.n_ch()] } else { doc.audio.slice(a, b) };

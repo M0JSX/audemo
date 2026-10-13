@@ -174,6 +174,14 @@ pub fn set_budget(bytes: usize) {
     drop(hold);
 }
 
+static WORK_DIR: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+
+/// Folder for the working file (None = the system's temporary folder).
+/// Takes effect when the working file is first needed.
+pub fn set_work_dir(dir: Option<std::path::PathBuf>) {
+    *WORK_DIR.lock().unwrap() = dir;
+}
+
 /// (bytes of audio in memory, bytes in the working file, budget).
 pub fn usage() -> (usize, u64, usize) {
     let g = store().inner.lock().unwrap();
@@ -275,7 +283,7 @@ impl Store {
 
     fn file(g: &mut Inner) -> Option<&File> {
         if g.file.is_none() {
-            let dir = std::env::temp_dir();
+            let dir = WORK_DIR.lock().unwrap().clone().filter(|d| d.is_dir()).unwrap_or_else(std::env::temp_dir);
             let path = dir.join(format!("audemo-work-{}-{}.bin", std::process::id(), NEXT_ID.fetch_add(1, Ordering::Relaxed)));
             let mut o = std::fs::OpenOptions::new();
             o.read(true).write(true).create_new(true);

@@ -198,7 +198,7 @@ fn normalize(i: &[Vec<f32>], _: &Ctx, p: &Params) -> Res {
     Ok(out)
 }
 
-fn fade_curve(t: f32, shape: usize) -> f32 {
+pub fn fade_curve(t: f32, shape: usize) -> f32 {
     let t = t.clamp(0.0, 1.0);
     match shape {
         1 => 1.0 - (1.0 - t) * (1.0 - t),

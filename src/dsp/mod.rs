@@ -14,6 +14,7 @@
 
 pub mod analysis;
 pub mod biquad;
+pub mod blockwise;
 pub mod effects;
 pub mod fft;
 pub mod loudness;

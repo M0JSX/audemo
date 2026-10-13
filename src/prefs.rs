@@ -230,6 +230,9 @@ prefs! {
     // Media & Disk Cache: temporary folder (None = the system's).
     temp_dir: Option<PathBuf> = None,
     undo_levels: u32 = 60,
+    /// Audio kept in memory before the rest goes to the working file on
+    /// disk, in MB; 0 = automatic (a quarter of installed RAM).
+    memory_mb: u32 = 0,
     // Multitrack
     pan_law: PanLaw = PanLaw::LrCut,
     // Multitrack clips

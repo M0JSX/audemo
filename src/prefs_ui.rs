@@ -711,15 +711,37 @@ impl App {
                 note(ui, "Plug-ins, the plug-in scanner and the system's audio and file services write their temporary files to the primary folder. Audemo itself keeps open audio and undo history in memory and builds peak data as files open, so it needs no cache on disk.");
             }
             Page::Memory => {
+                let (resident, disk, budget) = crate::audio::usage();
                 group(ui, |ui| {
                     row(ui, "Installed RAM", |ui| {
                         ui.label(d.total_ram.map(gb).unwrap_or_else(|| "Unknown".into()));
                     });
-                    let used: usize = self.docs.iter().map(|doc| doc.n_ch() * doc.len() * 4 * (1 + doc.undo.len().min(1))).sum();
-                    row(ui, "Open audio", |ui| {
-                        ui.label(format!("{} in {} file(s), plus undo history", gb(used as u64), self.docs.len()));
+                    row(ui, "Audio in memory", |ui| {
+                        ui.label(format!("{} of {} allowed", gb(resident as u64), gb(budget as u64)));
+                    });
+                    row(ui, "Audio on disk", |ui| {
+                        ui.label(gb(disk));
                     });
                 });
+                section(ui, "Memory Budget");
+                group(ui, |ui| {
+                    let mut auto = p.memory_mb == 0;
+                    row(ui, "Budget", |ui| {
+                        if ui.checkbox(&mut auto, "Automatic").on_hover_text("A quarter of installed RAM, between 0.5 and 8 GB").changed() {
+                            p.memory_mb = if auto { 0 } else { (crate::audio::default_budget() >> 20) as u32 };
+                        }
+                        if auto {
+                            ui.label(RichText::new(gb(crate::audio::default_budget() as u64)).color(TEXT_DIM()));
+                        } else {
+                            let max_mb = d.total_ram.map(|r| (r >> 20) as u32 * 3 / 4).unwrap_or(65536).max(1024);
+                            let mut g = p.memory_mb as f32 / 1024.0;
+                            if ui.add(egui::DragValue::new(&mut g).range(0.25..=max_mb as f32 / 1024.0).speed(0.05).fixed_decimals(2).suffix(" GB")).changed() {
+                                p.memory_mb = ((g * 1024.0).round() as u32).max(256);
+                            }
+                        }
+                    });
+                });
+                note(ui, "Audio beyond the budget is kept in a working file in the temporary folder (Media & Disk Cache) and read back as needed, so files and recordings can be longer than your memory. A bigger budget means less disk reading; a smaller one leaves more memory for other programs.");
                 section(ui, "Undo");
                 group(ui, |ui| {
                     row(ui, "Undo levels", |ui| {
@@ -727,7 +749,7 @@ impl App {
                         ui.label(RichText::new("per audio file (sessions keep 100)").color(TEXT_DIM()).size(11.0));
                     });
                 });
-                note(ui, "Each undo step of a destructive edit keeps a copy of the audio it replaced. Fewer levels use less memory.");
+                note(ui, "Each undo step keeps the audio its edit replaced (only the parts that changed). Fewer levels use less memory and disk.");
             }
             Page::Markers => {
                 group(ui, |ui| {

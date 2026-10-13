@@ -669,6 +669,40 @@ impl App {
                     next = Some(Dialog::ConfirmQuit);
                 }
             }
+            Dialog::ConfirmLargeEffect { idx, params, minutes, gb } => {
+                let name = match idx {
+                    Some(i) => self.effects.get(i).map(|d| d.name).unwrap_or("Effect"),
+                    None => "Effects Rack",
+                };
+                let mut go = false;
+                centered(ctx, egui::Window::new(format!("{name}: long selection"))).show(ctx, |ui| {
+                    ui.set_max_width(440.0);
+                    let len = if minutes >= 90.0 { format!("{:.1} hours", minutes / 60.0) } else { format!("{minutes:.0} minutes") };
+                    ui.label(format!(
+                        "{name} works on the whole selection at once, so the {len} you've selected has to be loaded into memory \
+                         (about {gb:.1} GB while it runs). It may take a while, and your computer may slow down if memory runs short."
+                    ));
+                    ui.label(RichText::new("To process a long recording in pieces, select a part of it at a time.").weak());
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Apply Anyway").clicked() {
+                            go = true;
+                            keep = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                });
+                if go {
+                    match idx {
+                        Some(i) => self.run_effect_ex(i, params, true),
+                        None => self.apply_rack_ex(true),
+                    }
+                } else if keep {
+                    next = Some(Dialog::ConfirmLargeEffect { idx, params, minutes, gb });
+                }
+            }
             Dialog::NewSession { mut name, mut rate, mut tracks } => {
                 let mut open = true;
                 let mut create = false;
