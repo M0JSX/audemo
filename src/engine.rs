@@ -920,11 +920,7 @@ impl Engine {
         v.taken = i;
         // Input chunks already copied are freed (the take lives in `view`).
         let consumed = i / s.chunk_len;
-        for c in s.chunks.iter_mut().take(consumed) {
-            if c.capacity() > 0 {
-                *c = Vec::new();
-            }
-        }
+        free_consumed(&mut s.chunks, consumed);
     }
 
     /// The recording so far, for live drawing.
@@ -1195,6 +1191,20 @@ where
         .map_err(|e| e.to_string())
 }
 
+/// Free the input chunks the take has copied, never the last one: the input
+/// callback keeps writing into the last chunk until it's full, so freeing it
+/// (when the UI had caught up exactly to its end) would make new samples land
+/// in a chunk that was already copied, and the next poll would read past the
+/// end of the list.
+fn free_consumed(chunks: &mut [Vec<f32>], consumed: usize) {
+    let n = consumed.min(chunks.len().saturating_sub(1));
+    for c in chunks.iter_mut().take(n) {
+        if c.capacity() > 0 {
+            *c = Vec::new();
+        }
+    }
+}
+
 fn build_input<T>(
     device: &cpal::Device,
     cfg: &cpal::StreamConfig,
@@ -1239,6 +1249,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn freeing_recorded_chunks_keeps_the_one_being_written() {
+        let len = 4;
+        let mut chunks: Vec<Vec<f32>> = vec![vec![0.0; len], vec![0.0; len]];
+        // The UI has copied everything: both chunks are full and consumed.
+        free_consumed(&mut chunks, 2);
+        assert_eq!(chunks[0].capacity(), 0);
+        assert_eq!(chunks[1].len(), len, "the last chunk stays, so the input starts a new one");
+        // What the input callback does next: the last chunk is full, so it adds one.
+        assert!(chunks.last().map(|c| c.len() >= len).unwrap());
+    }
 
     #[test]
     fn rec_view_min_max_matches_scan() {

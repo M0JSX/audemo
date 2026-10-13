@@ -873,6 +873,12 @@ impl App {
         app.rebuild_keymap();
         app.apply_control_surface();
         crate::update::cleanup();
+        if let Some(p) = crate::new_crash_report() {
+            app.dialog = Some(Dialog::Message {
+                title: "Audemo closed unexpectedly".into(),
+                text: format!("Audemo crashed last time it ran. A report was saved to:\n\n{}\n\nPlease send that file in with what you were doing at the time.", p.display()),
+            });
+        }
         if app.prefs.check_updates {
             app.check_for_updates(false);
         }
