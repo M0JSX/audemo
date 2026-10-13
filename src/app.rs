@@ -9,9 +9,9 @@ use eframe::egui;
 
 use crate::dsp::effects::{self, Ctx, EffectDef, NoiseProfile};
 use crate::dsp::params::Params;
-use crate::dsp::peaks::PeakCache;
+use crate::audio::Audio;
 use crate::dsp::resample::{remap_channels, resample_channels};
-use crate::dsp::util::{db_to_lin, format_time, slice_range};
+use crate::dsp::util::{db_to_lin, format_time};
 use crate::engine::{Buffer, Engine, StreamBuf, BROWSER_TAG, PREVIEW_TAG};
 use crate::liverack::{LiveRack, RackSettings};
 use crate::export::{self, Container, ExportSettings};
@@ -50,8 +50,7 @@ pub use crate::export::{Marker, MarkerKind};
 #[derive(Clone)]
 pub struct Snapshot {
     pub label: String,
-    pub audio: Buffer,
-    pub peaks: Arc<PeakCache>,
+    pub audio: Audio,
     pub sample_rate: u32,
     pub sel: Option<(usize, usize)>,
     pub cursor: usize,
@@ -69,8 +68,8 @@ pub struct Document {
     pub name: String,
     pub path: Option<PathBuf>,
     pub origin: String,
-    pub audio: Buffer,
-    pub peaks: Arc<PeakCache>,
+    /// The samples: chunked, shared with undo steps, partly on disk when large.
+    pub audio: Audio,
     pub sample_rate: u32,
     pub source_bits: Option<u32>,
     pub version: u64,
@@ -99,18 +98,16 @@ pub struct Document {
 }
 
 impl Document {
-    pub fn new(id: u64, name: String, path: Option<PathBuf>, audio: Vec<Vec<f32>>, sample_rate: u32, bits: Option<u32>, origin: &str) -> Self {
-        let n_ch = audio.len().max(1);
-        let audio = if audio.is_empty() { vec![Vec::new()] } else { audio };
-        let peaks = Arc::new(PeakCache::build(&audio));
-        let len = audio[0].len();
+    pub fn new(id: u64, name: String, path: Option<PathBuf>, audio: impl Into<Audio>, sample_rate: u32, bits: Option<u32>, origin: &str) -> Self {
+        let audio: Audio = audio.into();
+        let n_ch = audio.n_ch();
+        let len = audio.len();
         Document {
             id,
             name,
             path,
             origin: origin.to_string(),
-            audio: Arc::new(audio),
-            peaks,
+            audio,
             sample_rate,
             source_bits: bits,
             version: 1,
@@ -173,11 +170,11 @@ impl Document {
     }
 
     pub fn len(&self) -> usize {
-        self.audio.first().map(|c| c.len()).unwrap_or(0)
+        self.audio.len()
     }
 
     pub fn n_ch(&self) -> usize {
-        self.audio.len()
+        self.audio.n_ch()
     }
 
     pub fn sel_range(&self) -> Option<(usize, usize)> {
@@ -193,7 +190,6 @@ impl Document {
         Snapshot {
             label,
             audio: self.audio.clone(),
-            peaks: self.peaks.clone(),
             sample_rate: self.sample_rate,
             sel: self.sel,
             cursor: self.cursor,
@@ -204,7 +200,6 @@ impl Document {
     fn restore(&mut self, s: Snapshot) {
         self.spec_sel = None;
         self.audio = s.audio;
-        self.peaks = s.peaks;
         self.sample_rate = s.sample_rate;
         self.sel = s.sel;
         self.cursor = s.cursor;
@@ -241,9 +236,8 @@ impl Document {
         Some(label)
     }
 
-    pub fn set_audio(&mut self, audio: Vec<Vec<f32>>) {
-        self.peaks = Arc::new(PeakCache::build(&audio));
-        self.audio = Arc::new(audio);
+    pub fn set_audio(&mut self, audio: impl Into<Audio>) {
+        self.audio = audio.into();
         self.version += 1;
         self.dirty = true;
         self.fix_channels();
@@ -1541,7 +1535,7 @@ impl App {
             None => doc.target_range(),
         };
         let b = b.min(a + doc.sample_rate as usize * 20);
-        let input = slice_range(&doc.audio, a, b);
+        let input = doc.audio.slice(a, b);
         let sr = doc.sample_rate;
         let n_ch = doc.n_ch();
         let np = self.noise_print.clone();
@@ -1602,7 +1596,7 @@ impl App {
             return;
         };
         let stale = match &self.live {
-            Some(l) => l.doc_id != id || !Arc::ptr_eq(&l.audio, &audio),
+            Some(l) => l.doc_id != id || !l.audio.ptr_eq(&audio),
             None => true,
         };
         if stale {
@@ -1659,7 +1653,7 @@ impl App {
             self.job = None;
         }
         let doc = self.doc().unwrap();
-        let input = slice_range(&doc.audio, a, b);
+        let input = doc.audio.slice(a, b);
         let (doc_id, active) = (doc.id, doc.active_ch.clone());
         let (effects, np) = (self.effects.clone(), self.noise_print.clone());
         let (mix, gi, go) = (self.rack_mix, self.rack_in_db, self.rack_out_db);
@@ -1697,7 +1691,7 @@ impl App {
             }
             _ => {
                 let end = (at + clen).min(d.len());
-                let existing = slice_range(&d.audio, at, end);
+                let existing = d.audio.slice(at, end);
                 let out: Vec<Vec<f32>> = (0..d.n_ch())
                     .map(|c| {
                         (0..clen)
@@ -1765,7 +1759,7 @@ impl App {
             });
             return;
         }
-        let input = if def.generator { vec![Vec::new(); doc.n_ch()] } else { slice_range(&doc.audio, a, b) };
+        let input = if def.generator { vec![Vec::new(); doc.n_ch()] } else { doc.audio.slice(a, b) };
         let sr = doc.sample_rate;
         let n_ch = doc.n_ch();
         let active = doc.active_ch.clone();
@@ -1824,7 +1818,7 @@ impl App {
         if b <= a {
             return;
         }
-        let input = slice_range(&doc.audio, a, b);
+        let input = doc.audio.slice(a, b);
         let (sr, doc_id, active) = (doc.sample_rate, doc.id, doc.active_ch.clone());
         let rel = shape.shifted(-(a as f64));
         self.engine.stop();
@@ -2067,11 +2061,11 @@ impl App {
     }
 
     /// The audio, markers and tags to write for the active document.
-    fn save_payload(doc: &Document, selection: bool) -> (Buffer, Vec<Marker>) {
+    fn save_payload(doc: &Document, selection: bool) -> (Audio, Vec<Marker>) {
         if selection {
             let (a, b) = doc.target_range();
             let markers = doc.markers.iter().filter_map(|m| m.within(a, b)).collect();
-            (Arc::new(slice_range(&doc.audio, a, b)), markers)
+            (doc.audio.crop(a, b), markers)
         } else {
             (doc.audio.clone(), doc.markers.clone())
         }
@@ -2093,7 +2087,7 @@ impl App {
         let (tx, rx) = channel();
         let (p2, path2) = (progress.clone(), path.clone());
         std::thread::spawn(move || {
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| export::save(&path2, &audio, rate, &settings, &meta, &markers, &p2)))
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| export::save_audio(&path2, &audio, rate, &settings, &meta, &markers, &p2)))
                 .unwrap_or_else(|_| Err("The encoder failed unexpectedly.".into()));
             let _ = tx.send(r);
         });
@@ -2165,7 +2159,7 @@ impl App {
     fn save_doc_now(&mut self, i: usize, path: PathBuf, settings: ExportSettings) -> bool {
         let d = &self.docs[i];
         let (audio, markers) = Self::save_payload(d, false);
-        let res = export::save(&path, &audio, d.sample_rate, &settings, &d.meta, &markers, &export::Progress::default());
+        let res = export::save_audio(&path, &audio, d.sample_rate, &settings, &d.meta, &markers, &export::Progress::default());
         let job = SaveJob {
             rx: channel().1,
             progress: export::Progress::default(),
@@ -2326,7 +2320,7 @@ impl App {
                 }
             }
             Action::Copy => {
-                let res = self.doc().map(|d| d.sel_range().map(|(a, b)| (slice_range(&d.audio, a, b), d.sample_rate, b - a)));
+                let res = self.doc().map(|d| d.sel_range().map(|(a, b)| (d.audio.slice(a, b), d.sample_rate, b - a)));
                 match res {
                     Some(Some((clip, sr, n))) => {
                         self.clipboard = Some((clip, sr));
@@ -2376,7 +2370,8 @@ impl App {
                 if let Some(d) = self.doc_mut() {
                     if let Some((a, b)) = d.sel_range() {
                         d.push_undo("Crop");
-                        let audio = slice_range(&d.audio, a, b);
+                        // Shares the chunks inside the selection.
+                        let audio = d.audio.crop(a, b);
                         d.markers = d.markers.iter().filter_map(|m| m.within(a, b)).collect();
                         d.set_audio(audio);
                         d.sel = None;
@@ -2482,7 +2477,7 @@ impl App {
                         return;
                     }
                     let (a, b) = if fade_in { (0, len) } else { (total - len, total) };
-                    let seg = slice_range(&d.audio, a, b);
+                    let seg = d.audio.slice(a, b);
                     let out = effects::fade_shaped(&seg, fade_in, curve, cosine);
                     let active = d.active_ch.clone();
                     let (sel, cur) = (d.sel, d.cursor);
@@ -2504,7 +2499,7 @@ impl App {
                     self.set_status("Select a noise-only region first, then capture the noise print (Shift+P).");
                     return;
                 };
-                match effects::capture_noise_print(&slice_range(&d.audio, a, b), d.sample_rate) {
+                match effects::capture_noise_print(&d.audio.slice(a, b), d.sample_rate) {
                     Ok(np) => {
                         let secs = (b - a) as f64 / d.sample_rate as f64;
                         self.noise_print = Some(np);
@@ -2519,7 +2514,7 @@ impl App {
                     self.set_status("Select a passage containing only the sound to remove, then Learn Sound Model.");
                     return;
                 };
-                match effects::capture_noise_print(&slice_range(&d.audio, a, b), d.sample_rate) {
+                match effects::capture_noise_print(&d.audio.slice(a, b), d.sample_rate) {
                     Ok(m) => {
                         let secs = (b - a) as f64 / d.sample_rate as f64;
                         self.sound_model = Some(m);
@@ -2536,7 +2531,7 @@ impl App {
                 let kind = JobKind::Edit { doc_id: d.id, range: (0, len), active: vec![true; d.n_ch()], new_rate: Some(rate), select: false };
                 self.engine.stop();
                 self.spawn_job("Convert Sample Type".into(), kind, move || {
-                    let mut out = remap_channels(&audio, channels);
+                    let mut out = remap_channels(&audio.to_vec(), channels);
                     if rate != old {
                         out = resample_channels(&out, rate as f64 / old as f64);
                     }
@@ -2712,7 +2707,7 @@ impl App {
                     } else {
                         Vec::new()
                     };
-                    (slice_range(&d.audio, a, b), d.sample_rate, markers, if with_meta { d.meta.clone() } else { Default::default() })
+                    (d.audio.slice(a, b), d.sample_rate, markers, if with_meta { d.meta.clone() } else { Default::default() })
                 });
                 if let Some((audio, sr, markers, meta)) = res {
                     let id = self.new_id();
@@ -2870,19 +2865,19 @@ pub fn run_rack(
 /// Replace `range` with `out`, record undo, keep markers and selection sane.
 /// Deleting [a, b) with a crossfade of `n` frames across the join: the
 /// range to replace and what replaces it. None if there isn't room.
-pub fn smooth_join(audio: &[Vec<f32>], a: usize, b: usize, n: usize) -> Option<((usize, usize), Vec<Vec<f32>>)> {
-    let len = audio.first().map(|c| c.len()).unwrap_or(0);
+pub fn smooth_join(audio: &Audio, a: usize, b: usize, n: usize) -> Option<((usize, usize), Vec<Vec<f32>>)> {
+    let len = audio.len();
     let n = n.min(b - a).min(len - b);
     if n < 2 {
         return None;
     }
-    let xf = audio
-        .iter()
+    let xf = (0..audio.n_ch())
         .map(|c| {
+            let (x, y) = (audio.channel_range(c, a, a + n), audio.channel_range(c, b, b + n));
             (0..n)
                 .map(|i| {
                     let t = (i as f32 + 0.5) / n as f32;
-                    c[a + i] * (1.0 - t) + c[b + i] * t
+                    x[i] * (1.0 - t) + y[i] * t
                 })
                 .collect()
         })
@@ -2892,28 +2887,32 @@ pub fn smooth_join(audio: &[Vec<f32>], a: usize, b: usize, n: usize) -> Option<(
 
 /// Blend the first and last `n` frames of `clip` (replacing [a, b)) with the
 /// audio around it, so the paste doesn't click.
-pub fn smooth_insert(audio: &[Vec<f32>], (a, b): (usize, usize), clip: &mut [Vec<f32>], n: usize) {
-    let len = audio.first().map(|c| c.len()).unwrap_or(0);
+pub fn smooth_insert(audio: &Audio, (a, b): (usize, usize), clip: &mut [Vec<f32>], n: usize) {
+    let len = audio.len();
     let clen = clip.first().map(|c| c.len()).unwrap_or(0);
     let n = n.min(clen / 2);
     if n < 2 {
         return;
     }
     for (c, ch) in clip.iter_mut().enumerate() {
-        let Some(src) = audio.get(c) else { continue };
+        if c >= audio.n_ch() {
+            continue;
+        }
         // In: from what was playing at `a` into the clip.
         if a + n <= len {
+            let src = audio.channel_range(c, a, a + n);
             for i in 0..n {
                 let t = (i as f32 + 0.5) / n as f32;
-                ch[i] = src[a + i] * (1.0 - t) + ch[i] * t;
+                ch[i] = src[i] * (1.0 - t) + ch[i] * t;
             }
         }
         // Out: from the clip into what plays after `b`.
         if b >= n {
+            let src = audio.channel_range(c, b - n, b);
             for i in 0..n {
                 let t = (i as f32 + 0.5) / n as f32;
                 let k = clen - n + i;
-                ch[k] = ch[k] * (1.0 - t) + src[b - n + i] * t;
+                ch[k] = ch[k] * (1.0 - t) + src[i] * t;
             }
         }
     }
@@ -2952,18 +2951,11 @@ pub fn apply_edit(
         return;
     }
     let same_len = out_len == b - a;
-    let mut audio: Vec<Vec<f32>> = (*doc.audio).clone();
-    for (c, ch) in audio.iter_mut().enumerate() {
-        if same_len && !active.get(c).copied().unwrap_or(true) {
-            continue;
-        }
-        // A stereo result on a surround file leaves the other channels alone.
-        if same_len && c >= out.len() && out.len() > 1 {
-            continue;
-        }
-        let src = &out[c.min(out.len().saturating_sub(1))];
-        ch.splice(a..b, src.iter().copied());
-    }
+    // Only the chunks the edit touches are rebuilt; the rest are shared with
+    // the undo step. Inactive channels (and, for a stereo result on a
+    // surround file, the other channels) are left alone.
+    let keep: Vec<bool> = (0..doc.n_ch()).map(|c| !active.get(c).copied().unwrap_or(true)).collect();
+    let audio = doc.audio.replace(a, b, &out, &keep);
     // Same-length edits (effects, repairs) leave markers where they are;
     // inserts and deletes move the ones after the edit.
     if !same_len {
@@ -2989,7 +2981,7 @@ mod tests {
         let all = vec![true, true];
         apply_edit(&mut d, "Delete", (10, 20), &all, vec![vec![], vec![]], None, false);
         assert_eq!(d.len(), 90);
-        assert_eq!(d.audio[0][10], 20.0);
+        assert_eq!(d.audio.sample(0, 10), 20.0);
         apply_edit(&mut d, "Paste", (5, 5), &all, vec![vec![-1.0; 3], vec![-1.0; 3]], None, true);
         assert_eq!(d.len(), 93);
         assert_eq!(d.sel, Some((5, 8)));
@@ -2998,7 +2990,7 @@ mod tests {
         assert_eq!(d.len(), 90);
         d.undo();
         assert_eq!(d.len(), 100);
-        assert_eq!(d.audio[0][15], 15.0);
+        assert_eq!(d.audio.sample(0, 15), 15.0);
         d.redo();
         assert_eq!(d.len(), 90);
         assert_eq!(d.redo.len(), 1);
@@ -3008,8 +3000,8 @@ mod tests {
     fn inactive_channel_untouched_for_same_length_edits() {
         let mut d = doc(50);
         apply_edit(&mut d, "Silence", (0, 50), &[true, false], vec![vec![0.0; 50], vec![0.0; 50]], None, true);
-        assert_eq!(d.audio[0][30], 0.0);
-        assert_eq!(d.audio[1][30], 30.0);
+        assert_eq!(d.audio.sample(0, 30), 0.0);
+        assert_eq!(d.audio.sample(1, 30), 30.0);
     }
 
     #[test]
@@ -3027,7 +3019,7 @@ mod tests {
     #[test]
     fn convert_replaces_whole_file() {
         let mut d = doc(1000);
-        let mono = remap_channels(&d.audio, 1);
+        let mono = remap_channels(&d.audio.to_vec(), 1);
         let out = resample_channels(&mono, 2.0);
         apply_edit(&mut d, "Convert Sample Type", (0, 1000), &[true, true], out, Some(2000), false);
         assert_eq!(d.n_ch(), 1);

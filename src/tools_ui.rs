@@ -13,7 +13,7 @@ use crate::dsp::effects::diagnose::{self, Finding};
 use crate::dsp::effects::Ctx;
 use crate::dsp::params::{Params, Value};
 use crate::dsp::resample::resample_channels;
-use crate::dsp::util::{format_time, slice_range};
+use crate::dsp::util::format_time;
 use crate::export::{self, Container, ExportSettings, WavFormat};
 use crate::io;
 use crate::theme::*;
@@ -150,7 +150,7 @@ impl App {
         if b <= a {
             return;
         }
-        let input = slice_range(&doc.audio, a, b);
+        let input = doc.audio.slice(a, b);
         let (sr, doc_id, version) = (doc.sample_rate, doc.id, doc.version);
         let d = &self.diag;
         let (kind, sens, max_ms, clip_db, sil_db, sil_ms, aud_db, aud_ms) = (d.kind, d.sensitivity, d.max_ms, d.clip_db, d.silence_db, d.silence_ms, d.audio_db, d.audio_ms);
@@ -190,7 +190,7 @@ impl App {
         let all = vec![true; doc.n_ch()];
         match kind {
             0 | 1 => {
-                let mut audio = (*doc.audio).clone();
+                let mut audio = doc.audio.to_vec();
                 if kind == 0 {
                     diagnose::repair_clicks(&mut audio, &items);
                 } else {
@@ -206,7 +206,7 @@ impl App {
                 self.set_status(format!("Repaired {n} {}", if kind == 0 { "click(s)" } else { "clipped section(s)" }));
             }
             2 => {
-                let audio = diagnose::delete_regions(&doc.audio, &items);
+                let audio = diagnose::delete_regions(&doc.audio.to_vec(), &items);
                 // Move markers back by the silence removed before them.
                 let mut regions: Vec<(usize, usize)> = items.iter().map(|f| (f.start, f.end())).collect();
                 regions.sort_unstable();

@@ -13,7 +13,8 @@ use std::time::Duration;
 use crate::app::run_rack;
 use crate::dsp::effects::{EffectDef, NoiseProfile};
 use crate::dsp::params::Params;
-use crate::engine::{Buffer, StreamBuf, STREAM_BLOCK};
+use crate::audio::Audio;
+use crate::engine::{StreamBuf, STREAM_BLOCK};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RackSettings {
@@ -25,7 +26,7 @@ pub struct RackSettings {
 
 pub struct LiveRack {
     pub doc_id: u64,
-    pub audio: Buffer,
+    pub audio: Audio,
     pub sb: Arc<StreamBuf>,
     pub settings: RackSettings,
     shared: Arc<Mutex<(u64, RackSettings)>>,
@@ -51,20 +52,20 @@ impl LiveRack {
     #[allow(clippy::too_many_arguments)]
     pub fn start(
         effects: Arc<Vec<EffectDef>>,
-        audio: Buffer,
+        audio: Audio,
         sample_rate: u32,
         noise_print: Option<NoiseProfile>,
         settings: RackSettings,
         doc_id: u64,
         cursor: usize,
     ) -> LiveRack {
-        let len = audio.first().map(|c| c.len()).unwrap_or(0);
-        let sb = StreamBuf::new(len, audio.len(), cursor.min(len));
+        let len = audio.len();
+        let sb = StreamBuf::new(len, audio.n_ch(), cursor.min(len));
         let shared = Arc::new(Mutex::new((1u64, settings.clone())));
         let cancel = Arc::new(AtomicBool::new(false));
         let error = Arc::new(Mutex::new(None));
         let src = audio.clone();
-        let n_ch = audio.len();
+        let n_ch = audio.n_ch();
         let job = StreamRenderer {
             sb: sb.clone(),
             shared: shared.clone(),
@@ -74,7 +75,7 @@ impl LiveRack {
             preroll: sample_rate as usize * 3 / 2,
             xfade: (sample_rate as usize / 200).max(16), // 5 ms
             render: Box::new(move |set: &RackSettings, a, b| {
-                let input: Vec<Vec<f32>> = src.iter().map(|c| c[a..b].to_vec()).collect();
+                let input: Vec<Vec<f32>> = src.slice(a, b);
                 run_rack(&effects, &set.slots, input, sample_rate, n_ch, noise_print.as_ref(), set.mix, set.in_db, set.out_db)
             }),
         };
@@ -132,7 +133,9 @@ impl<S: Clone> StreamRenderer<S> {
         let first_chunk = align_up(sr / 5);
         let max_chunk = align_up(sr * 2);
         let lead = align_up(sr / 10);
-        let max_ahead = sr * 30;
+        // Ahead of the playhead, within what the stream's ring holds.
+        let ring = self.sb.capacity();
+        let max_ahead = (sr * 30).min(ring * 3 / 5);
 
         let mut version = 0u64;
         let mut settings: Option<S> = None;
@@ -188,7 +191,9 @@ impl<S: Clone> StreamRenderer<S> {
             }
 
             let ahead = if next >= pos { next - pos } else { next + cycle - pos };
-            if done >= cycle || (ahead > max_ahead && self.sb.is_ready(pos)) {
+            // A cycle that fits the ring stays rendered; a longer one is
+            // rendered ahead of the playhead as it goes.
+            if (done >= cycle && cycle <= ring) || (ahead > max_ahead && self.sb.is_ready(pos)) {
                 std::thread::sleep(Duration::from_millis(15));
                 continue;
             }
@@ -259,7 +264,7 @@ mod tests {
         let sr = 8000u32;
         let n = 3 * sr as usize + 123;
         let x: Vec<f32> = (0..n).map(|i| ((i as f32) * 0.01).sin() * 0.5).collect();
-        let audio: Buffer = Arc::new(vec![x.clone()]);
+        let audio = Audio::from_vec(&[x.clone()]);
         let set = RackSettings { slots: vec![(amp, p)], mix: 100.0, in_db: 0.0, out_db: 0.0 };
         let lr = LiveRack::start(effects, audio, sr, None, set, 1, 0);
         let t0 = std::time::Instant::now();

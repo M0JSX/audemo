@@ -7,7 +7,7 @@ use eframe::egui::{self, Align, Color32, Layout, RichText, Ui};
 
 use crate::app::{Action, App, Dialog, EffectDialog, RackSlot, FAVORITES, RACK_SLOTS};
 use crate::dsp::effects::Category;
-use crate::dsp::util::{format_time, lin_to_db, peak_ch, rms_ch};
+use crate::dsp::util::{format_time, lin_to_db};
 use crate::engine::BROWSER_TAG;
 use crate::io::OPEN_EXTENSIONS;
 use crate::theme::*;
@@ -401,8 +401,9 @@ impl App {
         let (pk, rms) = match stats {
             Some(s) => s,
             None => {
-                let pk = doc.audio.iter().map(|c| peak_ch(c)).fold(0.0, f32::max);
-                let rms = doc.audio.iter().map(|c| rms_ch(c)).fold(0.0, f32::max);
+                // From the chunk summaries: instant even for long files.
+                let pk = (0..doc.n_ch()).map(|c| doc.audio.peak(c)).fold(0.0, f32::max);
+                let rms = (0..doc.n_ch()).map(|c| doc.audio.rms(c)).fold(0.0, f32::max);
                 ui.data_mut(|d| d.insert_temp(id, (pk, rms)));
                 (pk, rms)
             }

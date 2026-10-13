@@ -300,10 +300,12 @@ fn draw_meter(p: &egui::Painter, r: Rect, db: [f32; 2]) {
 
 /// Session-rate, at most stereo audio for a document (shared when possible).
 fn source_audio(doc: &Document, rate: u32) -> (Buffer, Arc<PeakCache>) {
+    let full = doc.audio.to_vec();
     if doc.sample_rate == rate && doc.n_ch() <= 2 {
-        return (doc.audio.clone(), doc.peaks.clone());
+        let peaks = Arc::new(PeakCache::build(&full));
+        return (Arc::new(full), peaks);
     }
-    let mut a = remap_channels(&doc.audio, doc.n_ch().clamp(1, 2));
+    let mut a = remap_channels(&full, doc.n_ch().clamp(1, 2));
     if doc.sample_rate != rate {
         a = resample_channels(&a, rate as f64 / doc.sample_rate as f64);
     }

@@ -5,7 +5,7 @@ use eframe::egui::{self, pos2, vec2, Align2, Color32, CursorIcon, FontId, Pos2, 
 
 use crate::app::{Action, App, SpecTex, Tool};
 use crate::dsp::spectral::SpecShape;
-use crate::dsp::spectrogram::{heat_colour, spectrogram_range};
+use crate::dsp::spectrogram::heat_colour;
 use crate::dsp::util::format_time;
 use crate::theme::*;
 
@@ -131,6 +131,7 @@ impl App {
             let (audio, sr) = (d.audio.clone(), d.sample_rate);
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
+                let audio = audio.to_vec();
                 let k = 1.0 / audio.len().max(1) as f32;
                 let mono: Vec<f32> = (0..audio[0].len()).map(|i| audio.iter().map(|c| c[i]).sum::<f32>() * k).collect();
                 let _ = tx.send((key, crate::dsp::pitch::track(&mono, sr, 60.0, 1200.0, 0.2)));
@@ -212,7 +213,7 @@ impl App {
                     }
                 } else if a < len {
                     for c in 0..doc.n_ch() {
-                        let (lo, hi) = doc.peaks.min_max(&doc.audio, c, a, b);
+                        let (lo, hi) = doc.audio.min_max(c, a, b);
                         amp = amp.max(hi.abs()).max(lo.abs());
                     }
                 } else {
@@ -319,7 +320,7 @@ impl App {
                 }
             }
             draw_grid(&painter, r, doc.amp_zoom);
-            draw_wave(&painter, r, &doc.audio[c], &doc.peaks, c, &v, sel, active, doc.amp_zoom);
+            draw_wave(&painter, r, &doc.audio, c, &v, sel, active, doc.amp_zoom);
             // Beyond end of file.
             let xe = v.x(len as f64);
             if xe < r.right() {
@@ -356,7 +357,7 @@ impl App {
                 let stale = doc.spec[c].as_ref().map(|t| t.key != key).unwrap_or(true);
                 if stale {
                     let bins = ss.fft / 2;
-                    let data = spectrogram_range(&doc.audio[c], v.start, v.end, cols, ss.fft, ss.window);
+                    let data = crate::dsp::spectrogram::spectrogram_audio(&doc.audio, c, v.start, v.end, cols, ss.fft, ss.window);
                     let mut rgba = vec![0u8; cols * bins * 4];
                     // Texture rows top to bottom, each showing the bin at its frequency.
                     let row_bin: Vec<usize> = (0..bins)
@@ -574,7 +575,7 @@ impl App {
         }
         if let Some((mi, is_end, mut s)) = marker_drag {
             if snap_zero {
-                s = crate::markers_ui::zero_crossing(&doc.audio, &doc.active_ch, s, 0, doc.sample_rate);
+                s = crate::markers_ui::zero_crossing_audio(&doc.audio, &doc.active_ch, s, 0, doc.sample_rate);
             }
             let m = &mut doc.markers[mi];
             if !m.is_range() {
@@ -729,7 +730,7 @@ impl App {
             } else {
                 let mut s0 = to_sample(origin.x);
                 if snap_zero {
-                    s0 = crate::markers_ui::zero_crossing(&doc.audio, &doc.active_ch, s0, 0, doc.sample_rate);
+                    s0 = crate::markers_ui::zero_crossing_audio(&doc.audio, &doc.active_ch, s0, 0, doc.sample_rate);
                 }
                 let anchor = if mods.shift {
                     match doc.sel_range() {
@@ -781,7 +782,7 @@ impl App {
                     if let Some(ms) = near_marker {
                         s = ms;
                     } else if snap_zero {
-                        s = crate::markers_ui::zero_crossing(&doc.audio, &doc.active_ch, s, 0, doc.sample_rate);
+                        s = crate::markers_ui::zero_crossing_audio(&doc.audio, &doc.active_ch, s, 0, doc.sample_rate);
                     }
                     doc.sel = if s != anchor { Some((anchor.min(s), anchor.max(s))) } else { None };
                     doc.cursor = anchor.min(s);
@@ -1079,8 +1080,7 @@ fn draw_grid(p: &egui::Painter, r: Rect, amp_zoom: f32) {
 fn draw_wave(
     p: &egui::Painter,
     r: Rect,
-    ch: &[f32],
-    peaks: &crate::dsp::peaks::PeakCache,
+    audio: &crate::audio::Audio,
     c: usize,
     v: &View,
     sel: Option<(usize, usize)>,
@@ -1090,15 +1090,14 @@ fn draw_wave(
     let mid = r.center().y;
     let amp = (r.height() * 0.5 - 1.0) * amp_zoom;
     let (col, col_sel) = if active { (WAVE(), WAVE_SEL()) } else { (WAVE_DIM(), WAVE_DIM()) };
-    let len = ch.len();
+    let len = audio.len();
     if len == 0 {
         return;
     }
     let y = |val: f32| (mid - val * amp).clamp(r.top(), r.bottom());
     let spp = v.spp();
-    // `peaks.min_max` wants the full channel list; build a one-channel view.
-    let single = PeakView { ch, peaks, c };
     if spp >= 1.0 {
+        // One min/max column per pixel, from the chunk summaries.
         let cols = r.width().ceil() as usize;
         let mut shapes = Vec::with_capacity(cols);
         for i in 0..cols {
@@ -1110,7 +1109,7 @@ fn draw_wave(
             }
             let a = s0.max(0.0) as usize;
             let b = (s1.ceil() as usize).min(len).max(a + 1);
-            let (lo, hi) = single.min_max(a, b);
+            let (lo, hi) = audio.min_max(c, a, b);
             let in_sel = sel.map(|(sa, sb)| a >= sa && a < sb).unwrap_or(false);
             let y0 = y(hi);
             let y1 = y(lo).max(y0 + 1.0);
@@ -1121,7 +1120,8 @@ fn draw_wave(
         let a = v.start.floor().max(0.0) as usize;
         let b = ((v.end.ceil() as usize) + 1).min(len);
         if b > a {
-            let pts: Vec<Pos2> = (a..b).map(|i| pos2(v.x(i as f64), y(ch[i]))).collect();
+            let ch = audio.channel_range(c, a, b);
+            let pts: Vec<Pos2> = (a..b).map(|i| pos2(v.x(i as f64), y(ch[i - a]))).collect();
             if spp < 0.12 {
                 for pt in &pts {
                     p.line_segment([pos2(pt.x, mid), *pt], Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(47, 212, 140, 60)));
@@ -1130,28 +1130,6 @@ fn draw_wave(
             }
             p.add(Shape::line(pts, Stroke::new(1.3_f32, col)));
         }
-    }
-}
-
-struct PeakView<'a> {
-    ch: &'a [f32],
-    peaks: &'a crate::dsp::peaks::PeakCache,
-    c: usize,
-}
-
-impl PeakView<'_> {
-    fn min_max(&self, a: usize, b: usize) -> (f32, f32) {
-        let span = b - a;
-        if let Some(level) = self.peaks.levels.iter().rev().find(|l| l.block * 2 <= span) {
-            if let Some(d) = level.data.get(self.c) {
-                let i0 = a / level.block;
-                let i1 = ((b + level.block - 1) / level.block).min(d.len());
-                if i1 > i0 {
-                    return d[i0..i1].iter().fold((f32::MAX, f32::MIN), |(lo, hi), &(x, y)| (lo.min(x), hi.max(y)));
-                }
-            }
-        }
-        self.ch[a..b].iter().fold((f32::MAX, f32::MIN), |(lo, hi), &s| (lo.min(s), hi.max(s)))
     }
 }
 

@@ -301,5 +301,10 @@ pub fn save(
     }
 }
 
+/// `save` for a file's (chunked) audio.
+pub fn save_audio(path: &Path, audio: &crate::audio::Audio, sample_rate: u32, s: &ExportSettings, meta: &Metadata, markers: &[Marker], progress: &Progress) -> Result<(), String> {
+    save(path, &audio.to_vec(), sample_rate, s, meta, markers, progress)
+}
+
 #[cfg(all(test, not(audemo_std_test)))]
 mod tests;

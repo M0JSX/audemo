@@ -3,6 +3,7 @@
 
 mod analysis_ui;
 mod app;
+mod audio;
 mod autosave;
 mod cd;
 mod control_surface;

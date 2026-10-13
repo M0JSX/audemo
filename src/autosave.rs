@@ -48,7 +48,7 @@ fn stamp() -> String {
 
 enum Item {
     Text { path: PathBuf, text: String },
-    Audio { path: PathBuf, audio: crate::engine::Buffer, rate: u32, meta: export::Metadata, markers: Vec<crate::export::Marker> },
+    Audio { path: PathBuf, audio: crate::audio::Audio, rate: u32, meta: export::Metadata, markers: Vec<crate::export::Marker> },
     /// Keep the newest `keep` backups in `dir` whose names start with `prefix`.
     Prune { dir: PathBuf, prefix: String, keep: usize },
 }
@@ -144,7 +144,7 @@ impl App {
                     None if src.len() > 0 => {
                         // Unsaved audio goes beside the backup.
                         let p = files_dir.join(format!("{} {id}.wav", crate::mt_ui::safe_file_name(&src.name)));
-                        items.push(Item::Audio { path: p.clone(), audio: src.audio.clone(), rate: s.sample_rate, meta: Default::default(), markers: Vec::new() });
+                        items.push(Item::Audio { path: p.clone(), audio: crate::audio::Audio::from(src.audio.clone()), rate: s.sample_rate, meta: Default::default(), markers: Vec::new() });
                         paths.insert(*id, p);
                     }
                     None => {
@@ -180,7 +180,7 @@ impl App {
                 let r = match it {
                     Item::Text { path, text } => path.parent().map(std::fs::create_dir_all).unwrap_or(Ok(())).and_then(|_| std::fs::write(&path, text)).map_err(|e| format!("{}: {e}", path.display())),
                     Item::Audio { path, audio, rate, meta, markers } => match path.parent().map(std::fs::create_dir_all).unwrap_or(Ok(())) {
-                        Ok(()) => export::save(&path, &audio, rate, &float, &meta, &markers, &export::Progress::default()),
+                        Ok(()) => export::save_audio(&path, &audio, rate, &float, &meta, &markers, &export::Progress::default()),
                         Err(e) => Err(format!("{}: {e}", path.display())),
                     },
                     Item::Prune { dir, prefix, keep } => {

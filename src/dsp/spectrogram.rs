@@ -41,9 +41,49 @@ pub fn spectrogram_range(
     fft_size: usize,
     kind: Window,
 ) -> Vec<f32> {
+    spectrogram_by(
+        |s0, buf| {
+            for (i, v) in buf.iter_mut().enumerate() {
+                let idx = s0 + i as i64;
+                *v = if idx >= 0 && (idx as usize) < x.len() { x[idx as usize] } else { 0.0 };
+            }
+        },
+        x.len(),
+        start,
+        end,
+        cols,
+        fft_size,
+        kind,
+    )
+}
+
+/// `spectrogram_range` for channel `ch` of a file's audio: only the analysed
+/// windows are read.
+pub fn spectrogram_audio(audio: &crate::audio::Audio, ch: usize, start: f64, end: f64, cols: usize, fft_size: usize, kind: Window) -> Vec<f32> {
+    spectrogram_by(
+        |s0, buf| {
+            buf.iter_mut().for_each(|v| *v = 0.0);
+            let st = s0.max(0) as usize;
+            let off = (st as i64 - s0) as usize;
+            if off < buf.len() {
+                audio.read(ch, st, &mut buf[off..]);
+            }
+        },
+        audio.len(),
+        start,
+        end,
+        cols,
+        fft_size,
+        kind,
+    )
+}
+
+/// The spectrogram core: `read(first, buf)` fills `buf` from sample `first`
+/// (zeros outside the audio).
+fn spectrogram_by(read: impl Fn(i64, &mut [f32]), len: usize, start: f64, end: f64, cols: usize, fft_size: usize, kind: Window) -> Vec<f32> {
     let bins = fft_size / 2;
     let mut out = vec![-160.0f32; cols * bins];
-    if x.is_empty() || cols == 0 || end <= start {
+    if len == 0 || cols == 0 || end <= start {
         return out;
     }
     let w = window(kind, fft_size);
@@ -51,15 +91,16 @@ pub fn spectrogram_range(
     let norm = 2.0 / wsum;
     let fft = Fft::new(fft_size);
     let mut buf = vec![Complex::ZERO; fft_size];
+    let mut samples = vec![0.0f32; fft_size];
     let step = (end - start) / cols as f64;
     let half = (fft_size / 2) as i64;
     for col in 0..cols {
         let centre = (start + (col as f64 + 0.5) * step) as i64;
         let s0 = centre - half;
+        read(s0, &mut samples);
         let mut energy = 0.0f32;
         for i in 0..fft_size {
-            let idx = s0 + i as i64;
-            let v = if idx >= 0 && (idx as usize) < x.len() { x[idx as usize] } else { 0.0 };
+            let v = samples[i];
             energy += v.abs();
             buf[i] = Complex::new(v * w[i], 0.0);
         }

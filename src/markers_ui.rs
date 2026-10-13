@@ -9,7 +9,7 @@ use std::sync::Arc;
 use eframe::egui::{self, RichText, Ui};
 
 use crate::app::{Action, App, Marker, MarkerKind};
-use crate::dsp::util::{format_time, format_time_as, parse_time_as, slice_range, TimeStyle};
+use crate::dsp::util::{format_time, format_time_as, parse_time_as, TimeStyle};
 use crate::theme::*;
 
 /// Playback tag of the playlist (not a document id).
@@ -32,6 +32,17 @@ pub struct MarkerState {
 }
 
 // ------------------------------------------------------------------ zero crossings
+
+/// `zero_crossing` on a file's audio: only the samples around `pos` are read.
+pub fn zero_crossing_audio(audio: &crate::audio::Audio, active: &[bool], pos: usize, dir: i32, sr: u32) -> usize {
+    let len = audio.len();
+    let win = (sr as usize / 4).max(64) + 2;
+    let a = pos.min(len).saturating_sub(win);
+    let b = (pos + win).min(len);
+    let part = audio.slice(a, b);
+    let found = zero_crossing(&part, active, pos.min(len) - a, dir, sr);
+    (a + found).min(len)
+}
 
 /// The zero crossing nearest `pos`: searching left (`dir` < 0), right
 /// (`dir` > 0) or either way (0), within a quarter of a second. The sum of
@@ -389,7 +400,7 @@ impl App {
         let mut out: Vec<Vec<f32>> = vec![Vec::new(); doc.n_ch()];
         for it in &doc.playlist {
             let Some(m) = doc.markers.iter().find(|m| m.is_range() && m.name == it.name) else { continue };
-            let part = slice_range(&doc.audio, m.pos, m.end().min(doc.len()));
+            let part = doc.audio.slice(m.pos, m.end().min(doc.len()));
             for _ in 0..it.loops.max(1) {
                 for (o, p) in out.iter_mut().zip(&part) {
                     o.extend_from_slice(p);
@@ -559,7 +570,7 @@ impl App {
         std::thread::spawn(move || {
             let mut errs = Vec::new();
             for (path, m) in jobs {
-                let part = slice_range(&audio, m.pos, m.end().min(audio[0].len()));
+                let part = audio.slice(m.pos, m.end().min(audio.len()));
                 let markers: Vec<Marker> = if copy_markers { all_markers.iter().filter(|x| x != &&m).filter_map(|x| x.within(m.pos, m.end())).collect() } else { Vec::new() };
                 if let Err(e) = crate::export::save(&path, &part, sr, &settings, &meta, &markers, &crate::export::Progress::default()) {
                     errs.push(format!("{}: {e}", path.display()));
@@ -588,14 +599,14 @@ impl App {
         let (dl, dr) = mode.dirs();
         match d.sel_range() {
             Some((a, b)) => {
-                let a2 = if dl != 0 { zero_crossing(&d.audio, &d.active_ch, a, dl, sr) } else { a };
-                let b2 = if dr != 0 { zero_crossing(&d.audio, &d.active_ch, b, dr, sr) } else { b };
+                let a2 = if dl != 0 { zero_crossing_audio(&d.audio, &d.active_ch, a, dl, sr) } else { a };
+                let b2 = if dr != 0 { zero_crossing_audio(&d.audio, &d.active_ch, b, dr, sr) } else { b };
                 d.sel = (b2 > a2).then_some((a2, b2));
                 d.cursor = a2;
             }
             None => {
                 let dir = if dl != 0 { dl } else { dr };
-                d.cursor = zero_crossing(&d.audio, &d.active_ch, d.cursor, dir, sr);
+                d.cursor = zero_crossing_audio(&d.audio, &d.active_ch, d.cursor, dir, sr);
             }
         }
     }

@@ -133,10 +133,11 @@ fn loudness_range(st: &[f64]) -> Option<f64> {
 }
 
 /// 4× oversampled peak (8-tap windowed-sinc interpolation), in dBTP.
-pub fn true_peak_db(chs: &[Vec<f32>]) -> f64 {
-    const TAPS: i64 = 8;
-    // Precompute kernels for the three in-between phases.
-    let kernels: Vec<Vec<f64>> = (1..4)
+const TAPS: i64 = 8;
+
+/// Interpolation kernels for the three in-between phases (4× oversampling).
+fn tp_kernels() -> Vec<Vec<f64>> {
+    (1..4)
         .map(|ph| {
             let frac = ph as f64 / 4.0;
             (-TAPS + 1..=TAPS)
@@ -152,27 +153,78 @@ pub fn true_peak_db(chs: &[Vec<f32>]) -> f64 {
             let sum: f64 = k.iter().sum();
             k.into_iter().map(|v| v / sum).collect()
         })
-        .collect();
+        .collect()
+}
+
+/// True peak of samples [from, to) of a channel `n` long, given `x` holding
+/// samples [offset, offset + x.len()) (with TAPS of context either side).
+fn tp_range(x: &[f32], offset: i64, n: i64, from: i64, to: i64, kernels: &[Vec<f64>]) -> f64 {
     let mut peak = 0.0f64;
-    for c in chs {
-        let n = c.len() as i64;
-        for i in 0..n {
-            peak = peak.max(c[i as usize].abs() as f64);
-            if i + TAPS >= n || i - TAPS + 1 < 0 {
-                continue;
+    let at = |g: i64| x[(g - offset) as usize] as f64;
+    for i in from..to {
+        peak = peak.max(at(i).abs());
+        if i + TAPS >= n || i - TAPS + 1 < 0 {
+            continue;
+        }
+        for k in kernels {
+            let mut acc = 0.0;
+            for (t, j) in (-TAPS + 1..=TAPS).enumerate() {
+                acc += at(i + j) * k[t];
             }
-            for k in &kernels {
-                let mut acc = 0.0;
-                for (t, j) in (-TAPS + 1..=TAPS).enumerate() {
-                    acc += c[(i + j) as usize] as f64 * k[t];
-                }
-                peak = peak.max(acc.abs());
-            }
+            peak = peak.max(acc.abs());
         }
     }
+    peak
+}
+
+fn db(peak: f64) -> f64 {
     if peak <= 1e-12 {
         -200.0
     } else {
         20.0 * peak.log10()
     }
+}
+
+pub fn true_peak_db(chs: &[Vec<f32>]) -> f64 {
+    let kernels = tp_kernels();
+    let peak = chs.iter().map(|c| tp_range(c, 0, c.len() as i64, 0, c.len() as i64, &kernels)).fold(0.0, f64::max);
+    db(peak)
+}
+
+/// `measure` for a file's audio, read a block at a time (never all at once).
+pub fn measure_audio(audio: &crate::audio::Audio, sr: u32) -> Loudness {
+    const BLOCK: usize = 1 << 16;
+    let step = (sr as usize / 10).max(1);
+    let len = audio.len();
+    let n_steps = len / step;
+    let mut acc = vec![0.0f64; n_steps];
+    let kernels = tp_kernels();
+    let mut peak = 0.0f64;
+    let t = TAPS as usize;
+    for c in 0..audio.n_ch() {
+        let [mut f1, mut f2] = k_weighting(sr as f64);
+        let mut pos = 0usize;
+        while pos < len {
+            let end = (pos + BLOCK).min(len);
+            let ctx0 = pos.saturating_sub(t);
+            let ctx1 = (end + t).min(len);
+            let x = audio.channel_range(c, ctx0, ctx1);
+            for i in pos..end.min(n_steps * step) {
+                let y = f2.process(f1.process(x[i - ctx0])) as f64;
+                acc[i / step] += y * y;
+            }
+            peak = peak.max(tp_range(&x, ctx0 as i64, len as i64, pos as i64, end as i64, &kernels));
+            pos = end;
+        }
+    }
+    for e in acc.iter_mut() {
+        *e /= step as f64;
+    }
+    let blocks = windows(&acc, 4);
+    let integrated = gated_integrated(&blocks);
+    let st = windows(&acc, 30);
+    let range = loudness_range(&st);
+    let max_momentary = blocks.iter().copied().map(lufs).filter(|v| v.is_finite()).fold(None, |m: Option<f64>, v| Some(m.map_or(v, |m| m.max(v))));
+    let max_short_term = st.iter().copied().map(lufs).filter(|v| v.is_finite()).fold(None, |m: Option<f64>, v| Some(m.map_or(v, |m| m.max(v))));
+    Loudness { integrated, range, max_momentary, max_short_term, true_peak_db: db(peak) }
 }

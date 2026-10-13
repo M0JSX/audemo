@@ -8,7 +8,6 @@ use eframe::egui::{self, RichText};
 
 use crate::app::App;
 use crate::dsp::resample::{remap_channels, resample_channels};
-use crate::dsp::util::slice_range;
 use crate::theme::*;
 
 /// CD audio: 44.1 kHz; positions in frames of 1/75 s (588 samples).
@@ -239,8 +238,8 @@ impl App {
                     ch.resize(aligned + pad, 0.0);
                 }
                 let start = out[0].len();
-                let (a, b) = t.range.unwrap_or((0, audio[0].len()));
-                let mut seg = remap_channels(&slice_range(&audio, a, b), 2);
+                let (a, b) = t.range.unwrap_or((0, audio.len()));
+                let mut seg = remap_channels(&audio.slice(a, b), 2);
                 if sr != CD_RATE {
                     seg = resample_channels(&seg, CD_RATE as f64 / sr as f64);
                 }

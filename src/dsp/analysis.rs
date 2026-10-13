@@ -123,6 +123,28 @@ pub fn spectrum_at(x: &[f32], centre: usize, n: usize) -> Vec<f32> {
 
 /// Average power spectrum over [a, b) using hops of n/2.
 pub fn spectrum_average(x: &[f32], a: usize, b: usize, n: usize) -> Vec<f32> {
+    spectrum_average_by(|c| spectrum_at(x, c, n), a, b, n)
+}
+
+/// `n` samples of channel `ch` centred on `centre` (zeros outside the audio).
+pub fn window_at(audio: &crate::audio::Audio, ch: usize, centre: usize, n: usize) -> Vec<f32> {
+    let start = centre as i64 - n as i64 / 2;
+    let mut w = vec![0.0f32; n];
+    let st = start.max(0) as usize;
+    let off = (st as i64 - start) as usize;
+    if off < n {
+        audio.read(ch, st, &mut w[off..]);
+    }
+    w
+}
+
+/// `spectrum_average` for a file's audio: only the analysed windows are read.
+pub fn spectrum_average_audio(audio: &crate::audio::Audio, ch: usize, a: usize, b: usize, n: usize) -> Vec<f32> {
+    spectrum_average_by(|c| spectrum_at(&window_at(audio, ch, c, n), n / 2, n), a, b, n)
+}
+
+/// Average power spectrum over [a, b), from `spec(centre)` per frame.
+fn spectrum_average_by(spec: impl Fn(usize) -> Vec<f32>, a: usize, b: usize, n: usize) -> Vec<f32> {
     let bins = n / 2 + 1;
     let mut acc = vec![0.0f64; bins];
     let mut count = 0usize;
@@ -130,7 +152,7 @@ pub fn spectrum_average(x: &[f32], a: usize, b: usize, n: usize) -> Vec<f32> {
     let max_frames = 400;
     let hop = ((b.saturating_sub(a)) / max_frames).max(n / 2);
     while c + n / 2 <= b.max(a + n) && count < max_frames {
-        for (k, v) in spectrum_at(x, c, n).into_iter().enumerate() {
+        for (k, v) in spec(c).into_iter().enumerate() {
             acc[k] += 10f64.powf(v as f64 / 10.0);
         }
         count += 1;

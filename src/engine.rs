@@ -24,14 +24,22 @@ pub const REC_BLOCK: usize = 64;
 /// Frames per readiness block of a [`StreamBuf`].
 pub const STREAM_BLOCK: usize = 1024;
 
+/// Frames held by a [`StreamBuf`]'s ring (about 43 s at 48 kHz).
+pub const STREAM_RING: usize = 1 << 21;
+
 /// Audio rendered on the fly (the real-time Effects Rack). A renderer thread
 /// writes whole blocks and flags them ready; the audio callback reads them
 /// without locking and holds its position if it reaches an unready block.
+/// The frames live in a ring covering the playhead and what's just ahead of
+/// it, so a long file doesn't need a buffer of its whole length.
 pub struct StreamBuf {
     pub len: usize,
     pub n_ch: usize,
+    /// Ring size in frames (a whole number of blocks).
+    cap: usize,
     data: Vec<Vec<AtomicU32>>,
-    ready: Vec<AtomicBool>,
+    /// Per ring block: 1 + the file block it holds (0 = nothing).
+    ready: Vec<AtomicUsize>,
     play_pos: AtomicU64,
     region: [AtomicUsize; 2],
     looping: AtomicBool,
@@ -40,11 +48,13 @@ pub struct StreamBuf {
 impl StreamBuf {
     pub fn new(len: usize, n_ch: usize, pos: usize) -> Arc<Self> {
         let n_ch = n_ch.max(1);
+        let cap = len.min(STREAM_RING).div_ceil(STREAM_BLOCK).max(1) * STREAM_BLOCK;
         Arc::new(StreamBuf {
             len,
             n_ch,
-            data: (0..n_ch).map(|_| (0..len).map(|_| AtomicU32::new(0)).collect()).collect(),
-            ready: (0..len.div_ceil(STREAM_BLOCK)).map(|_| AtomicBool::new(false)).collect(),
+            cap,
+            data: (0..n_ch).map(|_| (0..cap).map(|_| AtomicU32::new(0)).collect()).collect(),
+            ready: (0..cap / STREAM_BLOCK).map(|_| AtomicUsize::new(0)).collect(),
             play_pos: AtomicU64::new((pos as f64).to_bits()),
             region: [AtomicUsize::new(0), AtomicUsize::new(len)],
             looping: AtomicBool::new(false),
@@ -55,10 +65,17 @@ impl StreamBuf {
     /// blocks it fully covers (or that end at the buffer's end) ready.
     pub fn write(&self, start: usize, chans: &[Vec<f32>]) {
         let n = chans.first().map(|c| c.len()).unwrap_or(0).min(self.len.saturating_sub(start));
+        let nb = self.ready.len();
+        // The blocks about to be overwritten stop being ready first.
+        let mut b = start / STREAM_BLOCK;
+        while b * STREAM_BLOCK < start + n {
+            self.ready[b % nb].store(0, Ordering::Release);
+            b += 1;
+        }
         for (c, dst) in self.data.iter().enumerate() {
             let src = &chans[c.min(chans.len() - 1)];
             for i in 0..n {
-                dst[start + i].store(src[i].to_bits(), Ordering::Relaxed);
+                dst[(start + i) % self.cap].store(src[i].to_bits(), Ordering::Relaxed);
             }
         }
         let end = start + n;
@@ -66,19 +83,25 @@ impl StreamBuf {
         while b * STREAM_BLOCK < end {
             let block_end = ((b + 1) * STREAM_BLOCK).min(self.len);
             if b * STREAM_BLOCK >= start && block_end <= end {
-                self.ready[b].store(true, Ordering::Release);
+                self.ready[b % nb].store(b + 1, Ordering::Release);
             }
             b += 1;
         }
     }
 
     pub fn is_ready(&self, frame: usize) -> bool {
-        frame < self.len && self.ready[frame / STREAM_BLOCK].load(Ordering::Acquire)
+        let b = frame / STREAM_BLOCK;
+        frame < self.len && self.ready[b % self.ready.len()].load(Ordering::Acquire) == b + 1
+    }
+
+    /// Frames the ring holds.
+    pub fn capacity(&self) -> usize {
+        self.cap
     }
 
     #[inline]
     fn sample(&self, c: usize, i: usize) -> f32 {
-        f32::from_bits(self.data[c.min(self.n_ch - 1)][i].load(Ordering::Relaxed))
+        f32::from_bits(self.data[c.min(self.n_ch - 1)][i % self.cap].load(Ordering::Relaxed))
     }
 
     #[cfg(test)]
@@ -108,7 +131,9 @@ impl StreamBuf {
 }
 
 pub struct Shared {
-    buffer: Buffer,
+    buffer: crate::audio::Audio,
+    /// Bumped whenever `buffer` is replaced, so the callback refills its window.
+    buffer_gen: u64,
     stream: Option<Arc<StreamBuf>>,
     /// A multitrack session, mixed live in the callback.
     mix: Option<Arc<crate::session::MixState>>,
@@ -498,7 +523,8 @@ fn find_input(host_name: Option<&str>, name: Option<&str>) -> Option<cpal::Devic
 impl Engine {
     pub fn new(config: AudioConfig) -> Self {
         let shared = Arc::new(Mutex::new(Shared {
-            buffer: Arc::new(Vec::new()),
+            buffer: crate::audio::Audio::empty(1),
+            buffer_gen: 0,
             stream: None,
             mix: None,
             mix_gen: 0,
@@ -531,6 +557,7 @@ impl Engine {
         if let Err(e) = engine.open_output() {
             engine.error = Some(e);
         }
+        spawn_prefetch(Arc::downgrade(&engine.shared));
         engine
     }
 
@@ -660,15 +687,18 @@ impl Engine {
         }
     }
 
-    pub fn play(&self, buffer: Buffer, rate: u32, start: f64, end: f64, looping: bool, tag: u64) {
+    pub fn play(&self, buffer: impl Into<crate::audio::Audio>, rate: u32, start: f64, end: f64, looping: bool, tag: u64) {
         self.play_ex(buffer, None, rate, start, end, looping, tag);
     }
 
     /// Play `buffer`, or — when `stream` is given — the stream rendered from it.
     #[allow(clippy::too_many_arguments)]
-    pub fn play_ex(&self, buffer: Buffer, stream: Option<Arc<StreamBuf>>, rate: u32, start: f64, end: f64, looping: bool, tag: u64) {
+    pub fn play_ex(&self, buffer: impl Into<crate::audio::Audio>, stream: Option<Arc<StreamBuf>>, rate: u32, start: f64, end: f64, looping: bool, tag: u64) {
+        let buffer: crate::audio::Audio = buffer.into();
+        // Have the start in memory before the callback needs it.
+        buffer.prefetch(start.max(0.0) as usize, (start.max(0.0) as usize).saturating_add(rate as usize * 4));
         if let Ok(mut s) = self.shared.lock() {
-            let len = buffer.first().map(|c| c.len()).unwrap_or(0) as f64;
+            let len = buffer.len() as f64;
             if let Some(sb) = &stream {
                 sb.set_region(start, end, looping);
                 sb.set_pos(start);
@@ -676,6 +706,7 @@ impl Engine {
             s.stream = stream;
             s.mix = None;
             s.buffer = buffer;
+            s.buffer_gen += 1;
             s.src_rate = rate as f64;
             s.start = start.clamp(0.0, len);
             s.end = end.clamp(s.start, len);
@@ -763,12 +794,14 @@ impl Engine {
     }
 
     /// Swap in new audio (e.g. a re-rendered preview) without restarting.
-    pub fn replace_buffer(&self, buffer: Buffer, rate: u32, start: f64, end: f64) {
+    pub fn replace_buffer(&self, buffer: impl Into<crate::audio::Audio>, rate: u32, start: f64, end: f64) {
+        let buffer: crate::audio::Audio = buffer.into();
         if let Ok(mut s) = self.shared.lock() {
-            let len = buffer.first().map(|c| c.len()).unwrap_or(0) as f64;
+            let len = buffer.len() as f64;
             s.stream = None;
             s.mix = None;
             s.buffer = buffer;
+            s.buffer_gen += 1;
             s.src_rate = rate as f64;
             s.start = start.clamp(0.0, len);
             s.end = end.clamp(s.start, len);
@@ -960,6 +993,28 @@ impl Engine {
     }
 }
 
+/// Keeps the audio just ahead of the playhead in memory, so the callback
+/// (which never waits) doesn't find it on disk.
+fn spawn_prefetch(shared: std::sync::Weak<Mutex<Shared>>) {
+    std::thread::Builder::new()
+        .name("audemo-prefetch".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let Some(sh) = shared.upgrade() else { return };
+            let job = sh.lock().ok().and_then(|s| (s.playing && s.mix.is_none() && s.stream.is_none()).then(|| (s.buffer.clone(), s.pos, s.src_rate, s.start, s.looping)));
+            drop(sh);
+            if let Some((audio, pos, rate, start, looping)) = job {
+                let a = pos.max(0.0) as usize;
+                audio.prefetch(a, a.saturating_add(rate as usize * 8));
+                if looping {
+                    let s0 = start.max(0.0) as usize;
+                    audio.prefetch(s0, s0.saturating_add(rate as usize * 2));
+                }
+            }
+        })
+        .ok();
+}
+
 fn build_output<T>(
     device: &cpal::Device,
     cfg: &cpal::StreamConfig,
@@ -976,6 +1031,10 @@ where
     let mut win_version = u64::MAX;
     // Last frame of the previous block, for interpolating across the join.
     let mut prev_last = [0.0f32; 2];
+    // Frames of the file being played, copied out ahead of time (the file's
+    // audio is chunked and may be partly on disk).
+    let mut window = crate::audio::RtWindow::new(8, 32768);
+    let mut window_gen = u64::MAX;
     device
         .build_output_stream(
             cfg,
@@ -996,10 +1055,14 @@ where
                     win = (0, 0);
                     win_version = st.mix_gen;
                 }
+                if st.buffer_gen != window_gen {
+                    window.len = 0;
+                    window_gen = st.buffer_gen;
+                }
                 let n_src = match (&stream, &st.mix) {
                     (Some(sb), _) => sb.n_ch,
                     (None, Some(_)) => 2,
-                    (None, None) => st.buffer.len(),
+                    (None, None) => st.buffer.n_ch(),
                 };
                 for frame in data.chunks_mut(channels) {
                     if st.playing && n_src > 0 {
@@ -1046,9 +1109,16 @@ where
                                     }
                                 }
                                 None => {
-                                    let ch = &st.buffer[c.min(n_src - 1)];
-                                    let a = ch.get(i0).copied().unwrap_or(0.0);
-                                    (a, ch.get(i0 + 1).copied().unwrap_or(a))
+                                    if !window.contains(i0) || (!window.contains(i0 + 1) && i0 + 1 < st.buffer.len()) {
+                                        window.fill(&st.buffer, i0);
+                                    }
+                                    let ch = &window.data[c.min(n_src - 1).min(window.data.len() - 1)];
+                                    if window.contains(i0) {
+                                        let a = ch[i0 - window.start];
+                                        (a, if window.contains(i0 + 1) { ch[i0 + 1 - window.start] } else { a })
+                                    } else {
+                                        (0.0, 0.0)
+                                    }
                                 }
                             };
                             *out = (a + (b - a) * fr) * st.volume;

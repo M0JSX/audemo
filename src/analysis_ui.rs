@@ -10,7 +10,7 @@ use crate::app::{App, Dialog, JobKind};
 use crate::dsp::analysis::{self, AmplitudeStats};
 use crate::dsp::loudness::{self, Loudness};
 use crate::dsp::params::Value;
-use crate::dsp::util::{format_time, slice_range};
+use crate::dsp::util::format_time;
 use crate::theme::*;
 
 pub const FFT_SIZES: [usize; 6] = [1024, 2048, 4096, 8192, 16384, 32768];
@@ -114,7 +114,7 @@ impl App {
         params.set("target", Value::F(self.analysis.ml_target));
         params.set("ceiling", Value::F(self.analysis.ml_tp));
         params.set("limit", Value::B(true));
-        let input = (*doc.audio).clone();
+        let input = doc.audio.to_vec();
         let (sr, n_ch, len) = (doc.sample_rate, doc.n_ch(), doc.len());
         let done = self.analysis.ml_total - self.analysis.ml_queue.len();
         let label = format!("Match Loudness ({done} of {})", self.analysis.ml_total);
@@ -163,7 +163,7 @@ impl App {
             let label = if sel.is_some() { "Selection average".to_string() } else { "File average".to_string() };
             let (tx, rx) = channel();
             std::thread::spawn(move || {
-                let spectra = audio.iter().map(|c| analysis::spectrum_average(c, a, b, n)).collect();
+                let spectra = (0..audio.n_ch()).map(|c| analysis::spectrum_average_audio(&audio, c, a, b, n)).collect();
                 let _ = tx.send(FaScan { doc_id, version, n, label, spectra });
             });
             self.analysis.scan_rx = Some(rx);
@@ -171,7 +171,7 @@ impl App {
 
         // Live spectrum at the playhead / cursor.
         let doc = self.doc().unwrap();
-        let live: Vec<Vec<f32>> = if doc.len() == 0 { Vec::new() } else { doc.audio.iter().map(|c| analysis::spectrum_at(c, pos, n)).collect() };
+        let live: Vec<Vec<f32>> = if doc.len() == 0 { Vec::new() } else { (0..doc.n_ch()).map(|c| analysis::spectrum_at(&analysis::window_at(&doc.audio, c, pos, n), n / 2, n)).collect() };
         let sm = &mut self.analysis.smooth;
         if sm.len() != live.len() || sm.first().map(|v| v.len()) != live.first().map(|v| v.len()) || !playing {
             *sm = live.clone();
@@ -285,17 +285,17 @@ impl App {
             return;
         }
         let p = ui.painter_at(rect);
-        if audio.len() < 2 {
+        if audio.n_ch() < 2 {
             p.text(rect.center(), Align2::CENTER_CENTER, "Mono file — phase metering needs two channels", FontId::proportional(12.0), TEXT_DIM());
             return;
         }
         let pos = self.display_pos() as usize;
         let n = 2048usize;
-        let len = audio[0].len();
+        let len = audio.len();
         let a = pos.saturating_sub(n / 2).min(len.saturating_sub(n));
         let b = (a + n).min(len);
-        let (l, r) = (&audio[0][a..b], &audio[1][a..b]);
-        let c = analysis::correlation(l, r);
+        let (l, r) = (audio.channel_range(0, a, b), audio.channel_range(1, a, b));
+        let c = analysis::correlation(&l, &r);
         let playing = self.engine.status().playing;
         self.analysis.corr = if playing { self.analysis.corr * 0.8 + c * 0.2 } else { c };
         let corr = self.analysis.corr;
@@ -313,11 +313,11 @@ impl App {
         }
         p.line_segment([pos2(cen.x, gr.top() + 2.0), pos2(cen.x, gr.bottom() - 2.0)], Stroke::new(1.0_f32, LANE_GRID()));
         p.line_segment([pos2(gr.left() + 2.0, cen.y), pos2(gr.right() - 2.0, cen.y)], Stroke::new(1.0_f32, LANE_GRID()));
-        let pk = l.iter().chain(r).fold(0.0f32, |m, v| m.max(v.abs())).max(0.05);
+        let pk = l.iter().chain(&r).fold(0.0f32, |m, v| m.max(v.abs())).max(0.05);
         let scale = half / (pk * 1.414);
         let dots: Vec<Shape> = l
             .iter()
-            .zip(r)
+            .zip(&r)
             .step_by(2)
             .map(|(&lv, &rv)| {
                 let x = (rv - lv) * 0.7071 * scale;
@@ -450,7 +450,7 @@ impl App {
                 self.analysis.ml_scanning.insert((id, ver));
                 let tx = tx.clone();
                 std::thread::spawn(move || {
-                    let _ = tx.send((id, ver, loudness::measure(&audio, sr)));
+                    let _ = tx.send((id, ver, loudness::measure_audio(&audio, sr)));
                 });
             }
         }
@@ -474,7 +474,7 @@ impl App {
             "Entire file".to_string()
         };
         let title = format!("{} — {scope}", doc.name);
-        let input = slice_range(&doc.audio, a, b);
+        let input = doc.audio.slice(a, b);
         let sr = doc.sample_rate;
         let (tx, rx) = channel();
         std::thread::spawn(move || {
