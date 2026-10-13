@@ -183,6 +183,11 @@ impl NativeMenu {
         let _ = multitrack.append(&item("mt_tempo", "Tempo and Metronome…", None));
         let _ = multitrack.append(&item("mt_grid", "Show/Hide Beat Grid", ka(app, "mt_grid")));
         let _ = multitrack.append(&item("mt_clip_env", "Show/Hide Clip Envelopes", ka(app, "mt_clip_env")));
+        let master = Submenu::new("Master Channels", true);
+        for (id, label) in [("mt_master_stereo", "Stereo"), ("mt_master_51", "5.1"), ("mt_master_71", "7.1")] {
+            let _ = master.append(&item(id, label, None));
+        }
+        let _ = multitrack.append(&master);
         let _ = multitrack.append(&item("mt_metronome", "Metronome On/Off", ka(app, "mt_metronome")));
         let bounce = Submenu::new("Bounce to New Track", true);
         for (id, label) in [("mt_bounce", "Selected Track"), ("mt_bounce_sel", "Time Selection in Selected Track"), ("mt_bounce_clips", "Selected Clips")] {
@@ -406,6 +411,9 @@ impl App {
             "quit" => Action::Quit,
             "new" => Action::New,
             "new_session" => Action::NewSession,
+            "mt_master_stereo" => Action::MtClip(crate::mt_ui::ClipCmd::SetMasterFormat(crate::session::MasterFormat::Stereo)),
+            "mt_master_51" => Action::MtClip(crate::mt_ui::ClipCmd::SetMasterFormat(crate::session::MasterFormat::S51)),
+            "mt_master_71" => Action::MtClip(crate::mt_ui::ClipCmd::SetMasterFormat(crate::session::MasterFormat::S71)),
             "mt_add_track" => Action::MtAddTrack,
             "mt_delete_track" => Action::MtDeleteTrack,
             "mt_add_bus" => Action::MtAddBus,

@@ -703,7 +703,7 @@ impl App {
                     next = Some(Dialog::ConfirmLargeEffect { idx, params, minutes, gb });
                 }
             }
-            Dialog::NewSession { mut name, mut rate, mut tracks } => {
+            Dialog::NewSession { mut name, mut rate, mut tracks, mut format } => {
                 let mut open = true;
                 let mut create = false;
                 centered(ctx, egui::Window::new("New Multitrack Session").open(&mut open)).show(ctx, |ui| {
@@ -723,7 +723,11 @@ impl App {
                         ui.add(egui::DragValue::new(&mut tracks).range(1..=64));
                         ui.end_row();
                         ui.label("Master:");
-                        ui.label(RichText::new("Stereo").color(TEXT_DIM()));
+                        egui::ComboBox::from_id_source("ns_master").width(120.0).selected_text(format.label()).show_ui(ui, |ui| {
+                            for f in crate::session::MasterFormat::ALL {
+                                ui.selectable_value(&mut format, f, f.label());
+                            }
+                        });
                         ui.end_row();
                     });
                     ui.add_space(8.0);
@@ -738,9 +742,9 @@ impl App {
                 });
                 if create {
                     let n = if name.trim().is_empty() { "Untitled Session".to_string() } else { name.trim().to_string() };
-                    self.create_session(n, rate, tracks);
+                    self.create_session(n, rate, tracks, format);
                 } else if keep && open {
-                    next = Some(Dialog::NewSession { name, rate, tracks });
+                    next = Some(Dialog::NewSession { name, rate, tracks, format });
                 }
             }
             Dialog::ConfirmCloseSession { session } => {

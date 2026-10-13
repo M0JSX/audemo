@@ -503,7 +503,7 @@ pub enum Dialog {
     ConfirmQuit,
     /// An effect that needs the whole selection in memory, on a long selection.
     ConfirmLargeEffect { idx: Option<usize>, params: Params, minutes: f64, gb: f64 },
-    NewSession { name: String, rate: u32, tracks: usize },
+    NewSession { name: String, rate: u32, tracks: usize, format: crate::session::MasterFormat },
     ConfirmCloseSession { session: usize },
     AmplitudeStats { title: String, rx: Option<Receiver<crate::dsp::analysis::AmplitudeStats>>, stats: Option<crate::dsp::analysis::AmplitudeStats> },
 }

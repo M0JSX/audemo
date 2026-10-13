@@ -513,14 +513,27 @@ fn clip_keys(c: &Clip, e: &Envelope, map: impl Fn(f32) -> f64) -> Option<String>
     Some(keyframes(&pts))
 }
 
-fn track_params(t: &Track, output: &str, input: &str, master: bool) -> String {
+/// Audition's name for a channel layout.
+fn chan_type(n: usize) -> &'static str {
+    match n {
+        1 => "mono",
+        6 => "5.1",
+        8 => "7.1",
+        _ => "stereo",
+    }
+}
+
+fn track_params(t: &Track, output: &str, input: &str, master: bool, channels: usize) -> String {
     let (gf, gm, gp) = if master { (GUID_MASTER_FADER, GUID_MASTER_MUTE, GUID_MASTER_PAN) } else { (GUID_TRACK_FADER, GUID_TRACK_MUTE, GUID_TRACK_PAN) };
     let vol_keys = (!t.vol_env.points.is_empty()).then(|| keyframes(&t.vol_env.points.iter().map(|(p, db)| (*p, gain_to_fader(db_to_lin(*db)))).collect::<Vec<_>>()));
     let pan_keys = (!t.pan_env.points.is_empty()).then(|| keyframes(&t.pan_env.points.iter().map(|(p, v)| (*p, ((*v as f64 / 100.0) + 1.0) / 2.0)).collect::<Vec<_>>()));
     let m = if t.mute { 1.0 } else { 0.0 };
     let mut o = format!(
-        "        <trackAudioParameters audioChannelType=\"stereo\" automationMode=\"1\" monitoring=\"false\" recordArmed=\"{}\" solo=\"{}\" soloSafe=\"{}\">\n          {output}\n          {input}\n",
-        t.arm, t.solo, master
+        "        <trackAudioParameters audioChannelType=\"{}\" automationMode=\"1\" monitoring=\"false\" recordArmed=\"{}\" solo=\"{}\" soloSafe=\"{}\">\n          {output}\n          {input}\n",
+        chan_type(channels),
+        t.arm,
+        t.solo,
+        master
     );
     o += &format!("          <component componentGuid=\"{gf}\" componentID=\"Audition.Fader\" id=\"trackFader\" name=\"volume\" powered=\"true\">\n");
     o += &param(0, "volume", db_to_lin(t.volume_db), vol_keys);
@@ -591,7 +604,9 @@ pub fn to_sesx(s: &Session, paths: &BTreeMap<u64, PathBuf>, base: &Path) -> Stri
             hue_of(t.colour),
             esc(&t.name)
         );
-        tracks += &track_params(t, &output, input, false);
+        let fmt = s.master_format;
+        let t_ch = if fmt.is_surround() && t.discrete && !t.is_bus() { fmt.channels() } else { 2 };
+        tracks += &track_params(t, &output, input, false, t_ch);
         let mut clips: Vec<&Clip> = t.clips.iter().collect();
         clips.sort_by_key(|c| c.start);
         for (z, c) in clips.iter().enumerate() {
@@ -627,7 +642,7 @@ pub fn to_sesx(s: &Session, paths: &BTreeMap<u64, PathBuf>, base: &Path) -> Stri
             tracks += &format!("          <fadeIn crossFadeLinkType=\"linkedAsymmetric\" endPoint=\"{}\" shape=\"{fi_s}\" startPoint=\"0\" type=\"{fi_t}\"/>\n", c.fade_in.min(c.len));
             tracks += &format!("          <fadeOut crossFadeLinkType=\"linkedAsymmetric\" endPoint=\"{}\" shape=\"{fo_s}\" startPoint=\"{}\" type=\"{fo_t}\"/>\n", c.len, c.len - c.fade_out.min(c.len));
             tracks += "          <channelMap>";
-            for ch in 0..2usize {
+            for ch in 0..t_ch {
                 tracks += &format!("<channel index=\"{ch}\" sourceIndex=\"{}\"/>", ch.min(src_ch - 1));
             }
             tracks += "</channelMap>\n        </audioClip>\n";
@@ -641,14 +656,15 @@ pub fn to_sesx(s: &Session, paths: &BTreeMap<u64, PathBuf>, base: &Path) -> Stri
         "      <masterTrack automationLaneOpenState=\"false\" id=\"{MASTER_ID}\" index=\"{}\" select=\"false\" visible=\"true\">\n        <trackParameters trackHeight=\"134\" trackHue=\"-1\" trackMinimized=\"false\">\n          <name>Mix</name>\n        </trackParameters>\n",
         s.tracks.len() + 1
     );
-    tracks += &track_params(&master, "<trackOutput outputID=\"1\" type=\"hardwareOutput\"/>", "<trackInput inputID=\"-1\"/>", true);
+    tracks += &track_params(&master, "<trackOutput outputID=\"1\" type=\"hardwareOutput\"/>", "<trackInput inputID=\"-1\"/>", true, s.master_format.channels());
     tracks += "      </masterTrack>\n";
 
     let linked = (s.tempo - 120.0).abs() < 1e-9 && s.beats_per_bar == 4;
     let native = session::to_text(s, paths, Some(base));
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>\n<!DOCTYPE sesx>\n<sesx version=\"1.9\">\n  <session appBuild=\"Audemo\" appVersion=\"{ver}\" audioChannelType=\"stereo\" bitDepth=\"32\" duration=\"{duration}\" sampleRate=\"{rate}\">\n    <tracks>\n{tracks}    </tracks>\n    <sessionState ctiPosition=\"{cti}\" smpteStart=\"0\">\n      <timeFormatState beatsPerBar=\"{bpb}\" beatsPerMinute=\"{bpm}\" customFrameRate=\"12\" linkToDefaultTimeSettings=\"{linked}\" noteLength=\"4\" subdivisions=\"16\" timeCodeDropFrame=\"false\" timeCodeFrameRate=\"30\" timeCodeNTSC=\"false\" timeFormat=\"timeFormatDecimal\"/>\n      <mixingOptionState defaultPanModeLogarithmic=\"true\" panPower=\"-3\" playOverlappingClips=\"false\"/>\n    </sessionState>\n{xmp}  </session>\n  <files>\n{files}  </files>\n  <!-- {EMBED_TAG} (Audemo's complete copy of this session; Audition ignores it)\n{embed}\n  -->\n</sesx>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>\n<!DOCTYPE sesx>\n<sesx version=\"1.9\">\n  <session appBuild=\"Audemo\" appVersion=\"{ver}\" audioChannelType=\"{chans}\" bitDepth=\"32\" duration=\"{duration}\" sampleRate=\"{rate}\">\n    <tracks>\n{tracks}    </tracks>\n    <sessionState ctiPosition=\"{cti}\" smpteStart=\"0\">\n      <timeFormatState beatsPerBar=\"{bpb}\" beatsPerMinute=\"{bpm}\" customFrameRate=\"12\" linkToDefaultTimeSettings=\"{linked}\" noteLength=\"4\" subdivisions=\"16\" timeCodeDropFrame=\"false\" timeCodeFrameRate=\"30\" timeCodeNTSC=\"false\" timeFormat=\"timeFormatDecimal\"/>\n      <mixingOptionState defaultPanModeLogarithmic=\"true\" panPower=\"-3\" playOverlappingClips=\"false\"/>\n    </sessionState>\n{xmp}  </session>\n  <files>\n{files}  </files>\n  <!-- {EMBED_TAG} (Audemo's complete copy of this session; Audition ignores it)\n{embed}\n  -->\n</sesx>\n",
         ver = env!("CARGO_PKG_VERSION"),
+        chans = chan_type(s.master_format.channels()),
         rate = s.sample_rate,
         cti = s.cursor,
         bpb = s.beats_per_bar,
@@ -732,6 +748,7 @@ pub fn from_sesx(id: u64, text: &str, base: Option<&Path>, effects: &[EffectDef]
     let ses = root.child("session").ok_or("The .sesx file has no <session>.")?;
     let rate = ses.num("sampleRate").unwrap_or(48000.0).clamp(8000.0, 768000.0) as u32;
     let mut s = Session::new(id, "Untitled Session".into(), rate, 0);
+    s.master_format = session::MasterFormat::from_label(ses.attr("audioChannelType").unwrap_or("stereo"));
     if let Some(tf) = ses.child("sessionState").and_then(|st| st.child("timeFormatState")) {
         s.tempo = tf.num("beatsPerMinute").unwrap_or(120.0).clamp(20.0, 400.0);
         s.beats_per_bar = tf.num("beatsPerBar").unwrap_or(4.0).clamp(1.0, 32.0) as u32;
@@ -779,6 +796,7 @@ pub fn from_sesx(id: u64, text: &str, base: Option<&Path>, effects: &[EffectDef]
         }
         t.show_env = el.flag("automationLaneOpenState");
         if let Some(ap) = el.child("trackAudioParameters") {
+            t.discrete = s.master_format.is_surround() && matches!(ap.attr("audioChannelType"), Some("5.1") | Some("7.1"));
             t.solo = ap.flag("solo");
             t.arm = ap.flag("recordArmed");
             if let Some(o) = ap.child("trackOutput") {
@@ -1077,5 +1095,21 @@ mod tests {
         assert_eq!((c2.pan_env.points[0].0, c2.pan_env.points[1].0), (500, 20500));
         assert!((c2.pan_env.points[0].1 - (-100.0 + 150.0 * 500.0 / 20500.0)).abs() < 0.1);
         assert!((c2.pan_env.points[1].1 - 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn surround_sessions_are_marked() {
+        let mut s = Session::new(1, "Sur".into(), 48000, 2);
+        s.master_format = session::MasterFormat::S51;
+        s.tracks[0].discrete = true;
+        let xml = to_sesx(&s, &BTreeMap::new(), Path::new("/x"));
+        assert!(xml.contains("<session appBuild=\"Audemo\"") && xml.contains("audioChannelType=\"5.1\" bitDepth"));
+        // Strip Audemo's own copy so the XML is what's read.
+        let start = xml.find("<!-- audemo-session").unwrap();
+        let end = xml[start..].find("-->").unwrap() + start + 3;
+        let plain = format!("{}{}", &xml[..start], &xml[end..]);
+        let back = from_sesx(2, &plain, None, &[]).unwrap().session;
+        assert_eq!(back.master_format, session::MasterFormat::S51);
+        assert!(back.tracks[0].discrete && !back.tracks[1].discrete);
     }
 }

@@ -218,6 +218,17 @@ impl App {
                         let (grid, metro) = self.session().map(|s| (s.show_grid, s.metronome_on)).unwrap_or((false, false));
                         if item(ui, if grid { "✓ Show Beat Grid" } else { "Show Beat Grid" }, &km.label("mt_grid"), has_session) { self.actions.push(Action::MtClip(crate::mt_ui::ClipCmd::ToggleGrid)); }
                         if item(ui, if metro { "✓ Metronome" } else { "Metronome" }, &km.label("mt_metronome"), has_session) { self.actions.push(Action::MtClip(crate::mt_ui::ClipCmd::ToggleMetronome)); }
+                        let fmt = self.session().map(|s| s.master_format);
+                        ui.add_enabled_ui(has_session, |ui| {
+                            ui.menu_button("Master Channels", |ui| {
+                                for f in crate::session::MasterFormat::ALL {
+                                    let on = fmt == Some(f);
+                                    if item(ui, &format!("{}{}", if on { "✓ " } else { "" }, f.label()), "", true) {
+                                        self.actions.push(Action::MtClip(crate::mt_ui::ClipCmd::SetMasterFormat(f)));
+                                    }
+                                }
+                            });
+                        });
                         let cenv = self.prefs.mt_clip_env;
                         if item(ui, if cenv { "✓ Show Clip Envelopes" } else { "Show Clip Envelopes" }, &km.label("mt_clip_env"), has_session) { self.actions.push(Action::MtClip(crate::mt_ui::ClipCmd::ToggleClipEnv)); }
                         ui.menu_button("Bounce to New Track", |ui| {

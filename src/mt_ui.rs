@@ -75,6 +75,7 @@ enum LaneOp {
     Add(session::AutoTarget, f32, f32, bool, String),
     Delete(usize),
     Group(u8),
+    Discrete(bool),
 }
 
 /// Clip and track commands.
@@ -100,6 +101,8 @@ pub enum ClipCmd {
     ToggleClipEnv,
     /// Clear the selected clips' volume (true) or pan (false) envelope.
     ClearClipEnv(bool),
+    /// The session's master channels.
+    SetMasterFormat(session::MasterFormat),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,6 +145,8 @@ pub struct MtState {
     meter_at: Option<std::time::Instant>,
     /// Selected session markers (indices).
     pub marker_sel: std::collections::BTreeSet<usize>,
+    /// Surround master meter: per-channel levels (dB), decayed.
+    pub ch_meter: [f32; 8],
 }
 
 /// Each marker type's colour on the multitrack timeline.
@@ -348,6 +353,61 @@ fn env_label(t: &Track, key: EnvKey, val: f32) -> String {
     }
 }
 
+/// The surround panner: a top view of the room with the speakers around it
+/// and the track as a puck (its left and right channels either side).
+/// Drag the puck; double-click to put it back at the front.
+fn surround_panner(ui: &mut Ui, sp: &mut session::SurroundPan, fmt: session::MasterFormat, id: egui::Id) -> bool {
+    let size = 100.0;
+    let (r, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click_and_drag());
+    let resp = resp.on_hover_text("Surround panner: drag the track around the room (front at the top). Double-click to reset.");
+    let _ = id;
+    let p = ui.painter_at(r);
+    let c = r.center();
+    let rad = size / 2.0 - 10.0;
+    p.rect_filled(r, 3.0, Color32::from_rgb(0x16, 0x18, 0x1d));
+    p.circle_stroke(c, rad, Stroke::new(1.0_f32, Color32::from_gray(70)));
+    p.line_segment([pos2(c.x, c.y - rad), pos2(c.x, c.y + rad)], Stroke::new(0.5_f32, Color32::from_gray(50)));
+    p.line_segment([pos2(c.x - rad, c.y), pos2(c.x + rad, c.y)], Stroke::new(0.5_f32, Color32::from_gray(50)));
+    let at = |az: f32, d: f32| pos2(c.x + az.to_radians().sin() * rad * d, c.y - az.to_radians().cos() * rad * d);
+    let names = crate::dsp::resample::channel_names(fmt.channels());
+    for &(ch, az) in fmt.speakers() {
+        let q = at(az, 1.0);
+        p.circle_filled(q, 3.0, Color32::from_gray(150));
+        let lq = at(az, 1.0 + 7.0 / rad);
+        p.text(lq, Align2::CENTER_CENTER, names.get(ch).copied().unwrap_or(""), FontId::proportional(8.0), Color32::from_gray(140));
+    }
+    let mut changed = false;
+    if resp.double_clicked() {
+        let d = session::SurroundPan::default();
+        sp.x = d.x;
+        sp.y = d.y;
+        changed = true;
+    } else if resp.dragged() || resp.clicked() {
+        if let Some(m) = resp.interact_pointer_pos() {
+            let mut x = (m.x - c.x) / rad * 100.0;
+            let mut y = -(m.y - c.y) / rad * 100.0;
+            let h = x.hypot(y);
+            if h > 100.0 {
+                x *= 100.0 / h;
+                y *= 100.0 / h;
+            }
+            sp.x = x.round();
+            sp.y = y.round();
+            changed = true;
+        }
+    }
+    let (az, d) = sp.polar();
+    let puck = pos2(c.x + sp.x / 100.0 * rad, c.y - sp.y / 100.0 * rad);
+    for (k, col) in [(-1.0f32, Color32::from_rgb(0x4d, 0xa3, 0xff)), (1.0, Color32::from_rgb(0xe8, 0x6a, 0x5a))] {
+        let q = at(az + k * sp.spread / 2.0 * az.to_radians().cos(), d);
+        p.line_segment([puck, q], Stroke::new(1.0_f32, col.linear_multiply(0.7)));
+        p.circle_filled(q, 2.5, col);
+    }
+    p.circle_filled(puck, 5.0, HOT());
+    p.circle_stroke(puck, 5.0, Stroke::new(1.0_f32, Color32::BLACK));
+    changed
+}
+
 fn draw_meter(p: &egui::Painter, r: Rect, db: [f32; 2]) {
     p.rect_filled(r, 1.0, Color32::from_rgb(0x0c, 0x0e, 0x12));
     let w = (r.width() - 1.0) / 2.0;
@@ -363,14 +423,32 @@ fn draw_meter(p: &egui::Painter, r: Rect, db: [f32; 2]) {
     }
 }
 
-/// Session-rate, at most stereo audio for a document (shared when possible).
+/// A meter with one bar per channel (surround master).
+fn draw_meter_n(p: &egui::Painter, r: Rect, db: &[f32]) {
+    p.rect_filled(r, 1.0, Color32::from_rgb(0x0c, 0x0e, 0x12));
+    let n = db.len().max(1) as f32;
+    let w = (r.width() - (n - 1.0)) / n;
+    for (c, d) in db.iter().enumerate() {
+        let frac = ((d + 60.0) / 60.0).clamp(0.0, 1.0);
+        if frac <= 0.0 {
+            continue;
+        }
+        let x0 = r.left() + c as f32 * (w + 1.0);
+        let top = r.bottom() - frac * r.height();
+        let col = if *d > -0.1 { RECORD() } else if *d > -6.0 { Color32::from_rgb(0xe8, 0xd2, 0x3a) } else { Color32::from_rgb(0x2f, 0xd4, 0x8c) };
+        p.rect_filled(Rect::from_min_max(pos2(x0, top), pos2(x0 + w, r.bottom())), 0.0, col);
+    }
+}
+
+/// Session-rate audio for a document, up to 7.1 (a stereo track mixes
+/// surround files down to stereo; a surround track plays every channel).
 fn source_audio(doc: &Document, rate: u32) -> (Buffer, Arc<PeakCache>) {
     let full = doc.audio.to_vec();
-    if doc.sample_rate == rate && doc.n_ch() <= 2 {
+    if doc.sample_rate == rate && doc.n_ch() <= 8 {
         let peaks = Arc::new(PeakCache::build(&full));
         return (Arc::new(full), peaks);
     }
-    let mut a = remap_channels(&full, doc.n_ch().clamp(1, 2));
+    let mut a = remap_channels(&full, doc.n_ch().clamp(1, 8));
     if doc.sample_rate != rate {
         a = resample_channels(&a, rate as f64 / doc.sample_rate as f64);
     }
@@ -442,9 +520,10 @@ impl App {
 
     // ------------------------------------------------------------ sessions
 
-    pub fn create_session(&mut self, name: String, rate: u32, tracks: usize) {
+    pub fn create_session(&mut self, name: String, rate: u32, tracks: usize, format: crate::session::MasterFormat) {
         let id = self.new_id();
-        let s = Session::new(id, name.clone(), rate, tracks.clamp(1, 64));
+        let mut s = Session::new(id, name.clone(), rate, tracks.clamp(1, 64));
+        s.master_format = format;
         self.sessions.push(s);
         self.active_session = Some(self.sessions.len() - 1);
         self.mode = Mode::Multitrack;
@@ -493,6 +572,10 @@ impl App {
             s.add_track();
         }
         let track = s.audio_track_at_or_after(track);
+        // A surround file on an empty track of a surround session makes it a surround track.
+        if s.master_format.is_surround() && s.tracks[track].clips.is_empty() && s.sources.get(&src_id).map(|x| x.audio.len() > 2).unwrap_or(false) {
+            s.tracks[track].discrete = true;
+        }
         let clip = s.insert_clip(track, src_id, at);
         if clip.is_some() {
             s.selected_track = track;
@@ -974,7 +1057,7 @@ impl App {
 
     fn mt_clip_cmd(&mut self, si: usize, cmd: ClipCmd) {
         let sel: Vec<u64> = self.sessions[si].selected_clips.iter().copied().collect();
-        let need_clips = !matches!(cmd, ClipCmd::Bounce(BounceKind::Track) | ClipCmd::Bounce(BounceKind::TimeSelection) | ClipCmd::ShowEssential | ClipCmd::TempoDialog | ClipCmd::ExportXml | ClipCmd::SetTempo { .. } | ClipCmd::ToggleMetronome | ClipCmd::ToggleGrid | ClipCmd::ToggleClipEnv);
+        let need_clips = !matches!(cmd, ClipCmd::Bounce(BounceKind::Track) | ClipCmd::Bounce(BounceKind::TimeSelection) | ClipCmd::ShowEssential | ClipCmd::TempoDialog | ClipCmd::ExportXml | ClipCmd::SetTempo { .. } | ClipCmd::ToggleMetronome | ClipCmd::ToggleGrid | ClipCmd::ToggleClipEnv | ClipCmd::SetMasterFormat(_));
         if need_clips && sel.is_empty() {
             self.set_status("Select one or more clips first.");
             return;
@@ -1083,6 +1166,20 @@ impl App {
                 let s = &mut self.sessions[si];
                 s.show_grid = !s.show_grid;
                 s.dirty = true;
+            }
+            ClipCmd::SetMasterFormat(f) => {
+                let s = &mut self.sessions[si];
+                if s.master_format != f {
+                    s.push_undo("Master Channels");
+                    s.master_format = f;
+                    s.touch();
+                    let note = if f.is_surround() {
+                        format!("Master is now {}: place tracks with the surround panners in the Mixer. The master effects rack is stereo, so it's bypassed.", f.label())
+                    } else {
+                        "Master is now stereo.".to_string()
+                    };
+                    self.set_status(note);
+                }
             }
             ClipCmd::ToggleClipEnv => {
                 self.prefs.mt_clip_env = !self.prefs.mt_clip_env;
@@ -1327,7 +1424,7 @@ impl App {
             Action::NewSession => {
                 let n = self.sessions.len() + 1;
                 let rate = self.doc().map(|d| d.sample_rate).unwrap_or(48000);
-                self.dialog = Some(Dialog::NewSession { name: format!("Untitled Session {n}"), rate, tracks: 6 });
+                self.dialog = Some(Dialog::NewSession { name: format!("Untitled Session {n}"), rate, tracks: 6, format: crate::session::MasterFormat::Stereo });
                 return None;
             }
             Action::MtCloseSession(i) => {
@@ -2937,6 +3034,7 @@ impl App {
         let mut toggles: Vec<(usize, bool)> = Vec::new(); // (track, true = mute / false = solo)
         let mut view_changed = false;
         let buses: Vec<(u64, String)> = s.tracks.iter().filter(|t| t.is_bus()).map(|t| (t.id, t.name.clone())).collect();
+        let hdr_fmt = s.master_format;
         let mut route: Vec<(usize, Option<u64>)> = Vec::new();
         let mut show_rack: Option<usize> = None;
         let mut lane_op: Option<(usize, LaneOp)> = None;
@@ -2958,6 +3056,7 @@ impl App {
                 s.selected_track = ti;
             }
             let tr = &s.tracks[ti];
+            let sur_fmt = s.master_format;
             hresp.context_menu(|ui| {
                 ui.menu_button("Automation", |ui| {
                     if ui.selectable_label(tr.lane_view == 0, "Volume and Pan").clicked() {
@@ -3013,6 +3112,13 @@ impl App {
                 })
                 .response
                 .on_hover_text("Tracks in a group share mute, solo, arm and volume changes");
+                if sur_fmt.is_surround() && !tr.is_bus() {
+                    let mut d = tr.discrete;
+                    if ui.checkbox(&mut d, format!("{} Surround Track", sur_fmt.label())).on_hover_text("Each channel of the track's clips plays on the same master channel (for surround files). Off: the track is stereo and placed with its surround panner.").changed() {
+                        lane_op = Some((ti, LaneOp::Discrete(d)));
+                        ui.close_menu();
+                    }
+                }
                 ui.separator();
                 if ui.button("Add Audio Track").clicked() {
                     add_track = true;
@@ -3079,6 +3185,14 @@ impl App {
                     } else {
                         ui.label(RichText::new("Auto").color(VOL_ENV_COL).size(11.5)).on_hover_text(auto_tip);
                     }
+                    if hdr_fmt.is_surround() {
+                        let (txt, tip) = if t.discrete && !t.is_bus() {
+                            (hdr_fmt.label(), "A surround track: its clips' channels play on the same master channels")
+                        } else {
+                            ("Surround", "Placed with its surround panner in the Mixer (Window > Mixer)")
+                        };
+                        ui.label(RichText::new(txt).color(PAN_ENV_COL).size(11.0)).on_hover_text(tip);
+                    } else {
                     ui.label(RichText::new("Pan").color(TEXT_DIM()).size(11.0));
                     if t.pan_env.is_empty() {
                         let r = hot_drag(ui, egui::DragValue::new(&mut t.pan).speed(0.5).range(-100.0..=100.0).fixed_decimals(0));
@@ -3090,6 +3204,7 @@ impl App {
                         }
                     } else {
                         ui.label(RichText::new("Auto").color(PAN_ENV_COL).size(11.5)).on_hover_text(auto_tip);
+                    }
                     }
                 });
             }
@@ -3190,6 +3305,11 @@ impl App {
                 }
                 LaneOp::Group(g) => {
                     t.group = g;
+                    s.touch();
+                }
+                LaneOp::Discrete(on) => {
+                    s.push_undo(if on { "Surround Track" } else { "Stereo Track" });
+                    s.tracks[ti].discrete = on;
                     s.touch();
                 }
                 LaneOp::Delete(i) => {
@@ -3410,6 +3530,16 @@ impl App {
         ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(0x2b, 0x2b, 0x2b));
         let master_meter = self.meter_db;
         let meters = self.mt.meters.clone();
+        let fmt = self.sessions[si].master_format;
+        if fmt.is_surround() {
+            let dt = ui.ctx().input(|i| i.stable_dt).min(0.1);
+            let (pk, _) = self.engine.take_channel_peaks();
+            for (m, p) in self.mt.ch_meter.iter_mut().zip(pk) {
+                let db = crate::dsp::util::lin_to_db(p).max(-120.0);
+                *m = db.max(*m - 24.0 * dt).max(-120.0);
+            }
+        }
+        let ch_meter = self.mt.ch_meter;
         let s = &mut self.sessions[si];
         let buses: Vec<(u64, String)> = s.tracks.iter().filter(|t| t.is_bus()).map(|t| (t.id, t.name.clone())).collect();
         // Routing and send edits are undoable: keep the state from before this frame.
@@ -3506,6 +3636,27 @@ impl App {
                                 }
                                 ui.separator();
                                 // Pan.
+                                if fmt.is_surround() && t.discrete && !t.is_bus() {
+                                    ui.label(RichText::new(format!("{} surround track", fmt.label())).color(TEXT_DIM()).size(10.5));
+                                    ui.label(RichText::new("channels play as recorded").color(TEXT_DIM()).size(9.5));
+                                } else if fmt.is_surround() {
+                                    if surround_panner(ui, &mut t.sur, fmt, ui.id().with(("sp", t.id))) {
+                                        changed = true;
+                                    }
+                                    egui::Grid::new(("sp_grid", t.id)).num_columns(2).spacing([4.0, 1.0]).show(ui, |ui| {
+                                        ui.label(RichText::new("Spread").size(10.0).color(TEXT_DIM()));
+                                        changed |= hot_drag(ui, egui::DragValue::new(&mut t.sur.spread).speed(1.0).range(0.0..=180.0).fixed_decimals(0).suffix("°")).on_hover_text("Angle between the track's left and right channels").changed();
+                                        ui.end_row();
+                                        ui.label(RichText::new("Centre").size(10.0).color(TEXT_DIM()));
+                                        changed |= hot_drag(ui, egui::DragValue::new(&mut t.sur.center).speed(1.0).range(0.0..=100.0).fixed_decimals(0).suffix("%")).on_hover_text("How much the centre speaker is used (0 % = phantom centre from L and R)").changed();
+                                        ui.end_row();
+                                        ui.label(RichText::new("LFE").size(10.0).color(TEXT_DIM()));
+                                        let lfe = &mut t.sur.lfe_db;
+                                        let r = hot_drag(ui, egui::DragValue::new(lfe).speed(0.3).range(VOL_ENV_MIN..=12.0).fixed_decimals(1).custom_formatter(|v, _| if v <= VOL_ENV_MIN as f64 { "off".into() } else { format!("{v:+.1} dB") }));
+                                        changed |= r.on_hover_text("Level sent to the LFE (subwoofer) channel").changed();
+                                        ui.end_row();
+                                    });
+                                } else {
                                 ui.label(RichText::new("Pan").color(TEXT_DIM()).size(10.5));
                                 if t.pan_env.is_empty() {
                                     let r = hot_drag(ui, egui::DragValue::new(&mut t.pan).speed(0.5).range(-100.0..=100.0).fixed_decimals(0));
@@ -3515,6 +3666,7 @@ impl App {
                                     changed |= r.changed() || r.double_clicked();
                                 } else {
                                     ui.label(RichText::new("Auto").color(PAN_ENV_COL));
+                                }
                                 }
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 2.0;
@@ -3572,7 +3724,21 @@ impl App {
                             }
                             ui.add_space(fader_h.min(10.0));
                             ui.separator();
-                            ui.add_space(70.0);
+                            if fmt.is_surround() {
+                                ui.label(RichText::new(format!("{} master", fmt.label())).size(11.0).color(Color32::WHITE));
+                                if !s.master_fx.is_empty() {
+                                    ui.label(RichText::new("rack bypassed (stereo only)").size(9.5).color(TEXT_DIM()));
+                                }
+                                let names = crate::dsp::resample::channel_names(fmt.channels());
+                                let (r, _) = ui.allocate_exact_size(vec2(104.0, 60.0), Sense::hover());
+                                draw_meter_n(ui.painter(), Rect::from_min_max(r.min, pos2(r.right(), r.bottom() - 10.0)), &ch_meter[..fmt.channels()]);
+                                let w = r.width() / fmt.channels() as f32;
+                                for (k, nm) in names.iter().enumerate() {
+                                    ui.painter().text(pos2(r.left() + (k as f32 + 0.5) * w, r.bottom() - 4.0), Align2::CENTER_CENTER, *nm, FontId::proportional(7.5), TEXT_DIM());
+                                }
+                            } else {
+                                ui.add_space(70.0);
+                            }
                             fader(ui, &mut s.master_db, false, master_meter, &mut changed);
                         });
                     });

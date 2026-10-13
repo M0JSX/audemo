@@ -152,6 +152,8 @@ pub struct Shared {
     tag: u64,
     volume: f32,
     peaks: [f32; 2],
+    /// Per-channel peaks of what's playing (up to 7.1), and how many channels.
+    ch_peaks: ([f32; 8], usize),
     /// Device output channels that Audemo's left and right play on.
     out_map: [usize; 2],
 }
@@ -534,6 +536,7 @@ impl Engine {
             tag: 0,
             volume: 1.0,
             peaks: [0.0; 2],
+            ch_peaks: ([0.0; 8], 2),
             out_map: config.out_map,
         }));
         let mut engine = Engine {
@@ -861,6 +864,19 @@ impl Engine {
         }
     }
 
+    /// Per-channel output peaks since the last call, and the channel count
+    /// of what's playing.
+    pub fn take_channel_peaks(&self) -> ([f32; 8], usize) {
+        match self.shared.lock() {
+            Ok(mut s) => {
+                let v = s.ch_peaks;
+                s.ch_peaks.0 = [0.0; 8];
+                v
+            }
+            Err(_) => ([0.0; 8], 2),
+        }
+    }
+
     pub fn is_recording(&self) -> bool {
         self.rec.is_some()
     }
@@ -1021,11 +1037,12 @@ where
     let channels = cfg.channels as usize;
     let out_rate = cfg.sample_rate.0 as f64;
     // Mix window for multitrack playback: frames [win.0, win.1) of the session.
-    let mut scratch: Vec<Vec<f32>> = vec![Vec::with_capacity(8192), Vec::with_capacity(8192)];
+    // Up to 7.1 (surround sessions).
+    let mut scratch: Vec<Vec<f32>> = (0..8).map(|_| Vec::with_capacity(8192)).collect();
     let mut win = (0usize, 0usize);
     let mut win_version = u64::MAX;
     // Last frame of the previous block, for interpolating across the join.
-    let mut prev_last = [0.0f32; 2];
+    let mut prev_last = [0.0f32; 8];
     // Frames of the file being played, copied out ahead of time (the file's
     // audio is chunked and may be partly on disk).
     let mut window = crate::audio::RtWindow::new(8, 32768);
@@ -1056,7 +1073,7 @@ where
                 }
                 let n_src = match (&stream, &st.mix) {
                     (Some(sb), _) => sb.n_ch,
-                    (None, Some(_)) => 2,
+                    (None, Some(m)) => m.master_format.channels(),
                     (None, None) => st.buffer.n_ch(),
                 };
                 for frame in data.chunks_mut(channels) {
@@ -1079,7 +1096,12 @@ where
                                 // a loop, a new session) starts afresh at the playhead.
                                 let contiguous = win.1 > win.0 && i0 + 1 >= win.1 && i0 <= win.1;
                                 let start = if contiguous { win.1 } else { i0 };
-                                prev_last = if contiguous { [scratch[0][win.1 - win.0 - 1], scratch[1][win.1 - win.0 - 1]] } else { [0.0; 2] };
+                                prev_last = [0.0; 8];
+                                if contiguous {
+                                    for (c, p) in prev_last.iter_mut().enumerate().take(m.master_format.channels()) {
+                                        *p = scratch[c][win.1 - win.0 - 1];
+                                    }
+                                }
                                 crate::session::mix_into(m, start, start + MIX_BLOCK, &mut scratch, &mut st.track_peaks, &mut st.mix_scratch);
                                 win = (start, start + MIX_BLOCK);
                             }
@@ -1087,7 +1109,7 @@ where
                         // Each source channel (up to 7.1), then Audemo's left and right
                         // (surround mixed down) onto the mapped device channels, or
                         // surround straight to a device with enough channels.
-                        let n_read = if stream.is_none() && st.mix.is_some() { 2 } else { n_src.clamp(1, 8) };
+                        let n_read = n_src.clamp(1, 8);
                         let mut vals = [0.0f32; 8];
                         for (c, out) in vals.iter_mut().enumerate().take(n_read) {
                             let (a, b) = match &stream {
@@ -1096,9 +1118,9 @@ where
                                     (a, if sb.is_ready(i0 + 1) { sb.sample(c, i0 + 1) } else { a })
                                 }
                                 None if st.mix.is_some() => {
-                                    let ch = &scratch[c.min(1)];
+                                    let ch = &scratch[c];
                                     if i0 < win.0 {
-                                        (prev_last[c.min(1)], ch[0])
+                                        (prev_last[c], ch[0])
                                     } else {
                                         (ch[i0 - win.0], ch[i0 + 1 - win.0])
                                     }
@@ -1125,6 +1147,10 @@ where
                         };
                         pk[0] = pk[0].max(lr[0].abs());
                         pk[1] = pk[1].max(lr[1].abs());
+                        st.ch_peaks.1 = n_read;
+                        for (p, v) in st.ch_peaks.0.iter_mut().zip(&vals[..n_read]) {
+                            *p = p.max(v.abs());
+                        }
                         frame.iter_mut().for_each(|s| *s = silence);
                         if n_read > 2 && channels >= n_read {
                             for (c, v) in vals.iter().enumerate().take(n_read) {

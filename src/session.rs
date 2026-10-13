@@ -308,6 +308,160 @@ pub fn balance_gains(pan: f32) -> (f32, f32) {
     }
 }
 
+/// The master bus's channel layout. Channels are in WAV order:
+/// 5.1 = L R C LFE Ls Rs; 7.1 = L R C LFE Lb Rb Ls Rs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum MasterFormat {
+    #[default]
+    Stereo,
+    S51,
+    S71,
+}
+
+impl MasterFormat {
+    pub const ALL: [MasterFormat; 3] = [MasterFormat::Stereo, MasterFormat::S51, MasterFormat::S71];
+
+    pub fn channels(self) -> usize {
+        match self {
+            MasterFormat::Stereo => 2,
+            MasterFormat::S51 => 6,
+            MasterFormat::S71 => 8,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MasterFormat::Stereo => "Stereo",
+            MasterFormat::S51 => "5.1",
+            MasterFormat::S71 => "7.1",
+        }
+    }
+
+    pub fn is_surround(self) -> bool {
+        self != MasterFormat::Stereo
+    }
+
+    pub fn from_label(s: &str) -> MasterFormat {
+        match s {
+            "5.1" => MasterFormat::S51,
+            "7.1" => MasterFormat::S71,
+            _ => MasterFormat::Stereo,
+        }
+    }
+
+    /// The speakers other than the LFE: (channel, azimuth in degrees, 0 =
+    /// front, negative = left).
+    pub fn speakers(self) -> &'static [(usize, f32)] {
+        match self {
+            MasterFormat::Stereo => &[(0, -30.0), (1, 30.0)],
+            MasterFormat::S51 => &[(0, -30.0), (1, 30.0), (2, 0.0), (4, -110.0), (5, 110.0)],
+            MasterFormat::S71 => &[(0, -30.0), (1, 30.0), (2, 0.0), (4, -150.0), (5, 150.0), (6, -90.0), (7, 90.0)],
+        }
+    }
+
+    pub const LFE: usize = 3;
+}
+
+/// A track's surround panner (used when the master is 5.1 or 7.1).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SurroundPan {
+    /// Puck position: x −100 (left) … 100 (right), y −100 (back) … 100 (front).
+    pub x: f32,
+    pub y: f32,
+    /// Angle between the track's left and right channels, in degrees.
+    pub spread: f32,
+    /// How much the centre speaker is used for sound near the front (0–100 %).
+    pub center: f32,
+    /// Level sent to the LFE channel (dB; VOL_ENV_MIN = none).
+    pub lfe_db: f32,
+}
+
+impl Default for SurroundPan {
+    fn default() -> Self {
+        SurroundPan { x: 0.0, y: 100.0, spread: 60.0, center: 100.0, lfe_db: VOL_ENV_MIN }
+    }
+}
+
+impl SurroundPan {
+    pub fn is_default(&self) -> bool {
+        *self == SurroundPan::default()
+    }
+
+    pub fn to_text(&self) -> String {
+        format!("{}\t{}\t{}\t{}\t{}", self.x, self.y, self.spread, self.center, self.lfe_db)
+    }
+
+    /// Azimuth (degrees) and distance (0–1) of the puck.
+    pub fn polar(&self) -> (f32, f32) {
+        (self.x.atan2(self.y).to_degrees(), (self.x.hypot(self.y) / 100.0).min(1.0))
+    }
+
+    /// Gains from the track's (left, right) channels to each master channel.
+    pub fn gains(&self, fmt: MasterFormat) -> [[f32; 8]; 2] {
+        let mut g = [[0.0f32; 8]; 2];
+        if !fmt.is_surround() {
+            g[0][0] = 1.0;
+            g[1][1] = 1.0;
+            return g;
+        }
+        let (az, r) = self.polar();
+        let all = fmt.speakers();
+        let c = (self.center / 100.0).clamp(0.0, 1.0);
+        let lfe = env_gain(self.lfe_db);
+        for (k, gk) in g.iter_mut().enumerate() {
+            // The pair keeps left on the listener's left wherever the puck is:
+            // full width at the front and back, narrowing to nothing at the sides.
+            let half = self.spread / 2.0 * az.to_radians().cos();
+            let a = az + if k == 0 { -half } else { half };
+            let with = place(all, None, a, r);
+            let without = place(all, Some(2), a, r);
+            for ch in 0..8 {
+                gk[ch] = (c * with[ch] * with[ch] + (1.0 - c) * without[ch] * without[ch]).sqrt();
+            }
+            gk[MasterFormat::LFE] = 0.5 * lfe;
+        }
+        g
+    }
+}
+
+/// Constant-power gains for a sound at azimuth `az` and distance `r` (1 = on
+/// the speaker ring, 0 = everywhere at once) over `spk`.
+/// `skip`: a channel to leave out (the centre). Doesn't allocate (it runs in
+/// the audio callback).
+fn place(spk: &[(usize, f32)], skip: Option<usize>, az: f32, r: f32) -> [f32; 8] {
+    let mut buf = [(0usize, 0.0f32); 8];
+    let mut n = 0;
+    for &sp in spk.iter().filter(|s| Some(s.0) != skip).take(8) {
+        buf[n] = sp;
+        n += 1;
+    }
+    let sorted = &mut buf[..n];
+    sorted.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
+    let wrap = |x: f32| (x + 180.0).rem_euclid(360.0) - 180.0;
+    let az = wrap(az);
+    let mut pair = [0.0f32; 8];
+    for i in 0..n {
+        let (ca, aa) = sorted[i];
+        let (cb, ab) = sorted[(i + 1) % n];
+        // Width of the gap from a to b going clockwise (wrapping at the back).
+        let gap = (ab - aa).rem_euclid(360.0);
+        let off = (az - aa).rem_euclid(360.0);
+        if off <= gap && gap > 0.0 {
+            let t = off / gap;
+            pair[ca] += (t * std::f32::consts::FRAC_PI_2).cos();
+            pair[cb] += (t * std::f32::consts::FRAC_PI_2).sin();
+            break;
+        }
+    }
+    let d2 = 1.0 / n as f32;
+    let r2 = r * r;
+    let mut out = [0.0f32; 8];
+    for &(ch, _) in sorted.iter() {
+        out[ch] = (r2 * pair[ch] * pair[ch] + (1.0 - r2) * d2).sqrt();
+    }
+    out
+}
+
 /// Linear gain for an automation volume in dB (silence at the bottom).
 pub fn env_gain(db: f32) -> f32 {
     if db <= VOL_ENV_MIN {
@@ -554,6 +708,12 @@ pub struct Track {
     pub lane_view: usize,
     /// Tracks in the same group (1–8) share mute, solo, arm and volume changes.
     pub group: u8,
+    /// Surround panner (5.1/7.1 sessions).
+    pub sur: SurroundPan,
+    /// A surround track: each of its clips' channels goes straight to the
+    /// same master channel (in a 5.1/7.1 session). No effects rack, sends
+    /// or bus routing.
+    pub discrete: bool,
 }
 
 impl Track {
@@ -580,6 +740,8 @@ impl Track {
             lanes: Vec::new(),
             lane_view: 0,
             group: 0,
+            sur: SurroundPan::default(),
+            discrete: false,
         }
     }
 
@@ -638,12 +800,14 @@ pub struct SessionSnapshot {
     pub master_db: f32,
     pub master_fx: Vec<FxSlot>,
     pub master_fx_on: bool,
+    pub master_format: MasterFormat,
 }
 
 /// Everything the mixer needs, cheap to clone and share with a render thread.
 #[derive(Clone)]
 pub struct MixState {
     pub sample_rate: u32,
+    pub master_format: MasterFormat,
     pub tracks: Vec<Track>,
     pub sources: BTreeMap<u64, Arc<Source>>,
     pub master_db: f32,
@@ -701,6 +865,8 @@ pub struct Session {
     pub metronome_db: f32,
     /// Session markers (cue, CD track, cart timer, subclip; points or ranges).
     pub markers: Vec<crate::export::Marker>,
+    /// Master channel layout.
+    pub master_format: MasterFormat,
 }
 
 impl Session {
@@ -733,6 +899,7 @@ impl Session {
             metronome_on: false,
             metronome_db: -6.0,
             markers: Vec::new(),
+            master_format: MasterFormat::Stereo,
         };
         for _ in 0..n_tracks {
             s.add_track_silent();
@@ -814,6 +981,7 @@ impl Session {
             master_db: self.master_db,
             master_fx: self.master_fx.clone(),
             master_fx_on: self.master_fx_on,
+            master_format: self.master_format,
         });
         if self.undo.len() > MAX_SESSION_UNDO {
             self.undo.remove(0);
@@ -831,6 +999,7 @@ impl Session {
             master_db: self.master_db,
             master_fx: self.master_fx.clone(),
             master_fx_on: self.master_fx_on,
+            master_format: self.master_format,
         });
         if self.undo.len() > MAX_SESSION_UNDO {
             self.undo.remove(0);
@@ -846,9 +1015,11 @@ impl Session {
             master_db: self.master_db,
             master_fx: std::mem::replace(&mut self.master_fx, s.master_fx),
             master_fx_on: self.master_fx_on,
+            master_format: self.master_format,
         };
         self.master_db = s.master_db;
         self.master_fx_on = s.master_fx_on;
+        self.master_format = s.master_format;
         // Live effect instances are shared with the snapshot: give them back
         // the restored settings.
         for slot in self.tracks.iter().flat_map(|t| t.fx.iter()).chain(self.master_fx.iter()) {
@@ -1089,6 +1260,13 @@ impl Session {
     pub fn solo_track_state(&self, ti: usize, only_clips: Option<&HashSet<u64>>) -> MixState {
         let mut m = self.mix_state();
         let mut t = m.tracks[ti].clone();
+        // In a surround session a stereo track bounces as stereo (before its
+        // panner); a surround track keeps its channels.
+        if m.master_format.is_surround() && !t.discrete {
+            m.master_format = MasterFormat::Stereo;
+            t.pan = 0.0;
+            t.pan_env = Envelope::default();
+        }
         t.mute = false;
         t.solo = false;
         t.output = None;
@@ -1284,6 +1462,7 @@ impl Session {
             .collect();
         MixState {
             sample_rate: self.sample_rate,
+            master_format: self.master_format,
             tracks,
             sources: self.sources.clone(),
             master_db: self.master_db,
@@ -1306,8 +1485,9 @@ impl Session {
 pub fn mix_range(m: &MixState, a: usize, b: usize) -> Vec<Vec<f32>> {
     let mut fresh = m.with_fresh_fx();
     fresh.metronome = None;
-    let mut out = vec![Vec::with_capacity(b.saturating_sub(a)), Vec::with_capacity(b.saturating_sub(a))];
-    let mut tmp = vec![Vec::new(), Vec::new()];
+    let n_out = m.master_format.channels();
+    let mut out = vec![Vec::with_capacity(b.saturating_sub(a)); n_out];
+    let mut tmp = vec![Vec::new(); n_out];
     let mut scratch = MixScratch::default();
     let mut c = a;
     while c < b {
@@ -1317,8 +1497,9 @@ pub fn mix_range(m: &MixState, a: usize, b: usize) -> Vec<Vec<f32>> {
             t.apply_param_automation(c);
         }
         mix_into(&fresh, c, e, &mut tmp, &mut [], &mut scratch);
-        out[0].extend_from_slice(&tmp[0]);
-        out[1].extend_from_slice(&tmp[1]);
+        for (o, t) in out.iter_mut().zip(&tmp) {
+            o.extend_from_slice(t);
+        }
         c = e;
     }
     out
@@ -1333,6 +1514,8 @@ pub struct MixScratch {
     clip: [Vec<f32>; 2],
     /// Sidechain keys: (source track id, its clip mix).
     keys: Vec<(u64, [Vec<f32>; 2])>,
+    /// A surround track's channels.
+    sur: Vec<Vec<f32>>,
 }
 
 impl MixScratch {
@@ -1350,6 +1533,14 @@ impl MixScratch {
                 if c.capacity() < n {
                     c.reserve(n - c.len());
                 }
+            }
+        }
+        if self.sur.len() < 8 {
+            self.sur.resize_with(8, Vec::new);
+        }
+        for c in self.sur.iter_mut() {
+            if c.capacity() < n {
+                c.reserve(n - c.len());
             }
         }
     }
@@ -1410,7 +1601,9 @@ fn run_rack(fx: &[FxSlot], on: bool, l: &mut [f32], r: &mut [f32], keys: Option<
 }
 
 /// Apply a track's (or bus's) volume and pan, with automation.
-fn fader(t: &Track, a: usize, l: &mut [f32], r: &mut [f32]) {
+/// `pan`: false in a surround session, where the surround panner places the
+/// track instead.
+fn fader(t: &Track, a: usize, l: &mut [f32], r: &mut [f32], pan: bool) {
     if t.has_mute_lane() {
         for k in 0..l.len() {
             if t.auto_muted(a + k) {
@@ -1419,9 +1612,9 @@ fn fader(t: &Track, a: usize, l: &mut [f32], r: &mut [f32]) {
             }
         }
     }
-    if t.vol_env.is_empty() && t.pan_env.is_empty() {
+    if t.vol_env.is_empty() && (t.pan_env.is_empty() || !pan) {
         let g = db_to_lin(t.volume_db);
-        let (pl, pr) = t.pan_gains();
+        let (pl, pr) = if pan { t.pan_gains() } else { (1.0, 1.0) };
         l.iter_mut().for_each(|s| *s *= g * pl);
         r.iter_mut().for_each(|s| *s *= g * pr);
         return;
@@ -1429,7 +1622,7 @@ fn fader(t: &Track, a: usize, l: &mut [f32], r: &mut [f32]) {
     for k in 0..l.len() {
         let pos = a + k;
         let g = if t.vol_env.is_empty() { db_to_lin(t.volume_db) } else { env_gain(t.volume_at(pos)) };
-        let (pl, pr) = pan_gains(t.pan_at(pos));
+        let (pl, pr) = if pan { pan_gains(t.pan_at(pos)) } else { (1.0, 1.0) };
         l[k] *= g * pl;
         r[k] *= g * pr;
     }
@@ -1449,17 +1642,43 @@ fn peak_into(peaks: &mut [[f32; 2]], ti: usize, l: &[f32], r: &[f32]) {
 /// max-ed into `peaks[track]` when there is room.
 pub fn mix_into(m: &MixState, a: usize, b: usize, out: &mut [Vec<f32>], peaks: &mut [[f32; 2]], scratch: &mut MixScratch) {
     let n = b.saturating_sub(a);
+    let fmt = m.master_format;
+    let surround = fmt.is_surround();
+    let n_out = fmt.channels().min(out.len());
+    let out = &mut out[..n_out];
     for ch in out.iter_mut() {
         ch.clear();
         ch.resize(n, 0.0);
     }
+    // Into the master: straight to L/R, or through the track's surround panner.
+    let to_master = |out: &mut [Vec<f32>], t: &Track, l: &[f32], r: &[f32]| {
+        if !surround {
+            for (o, v) in out[0].iter_mut().zip(l) {
+                *o += v;
+            }
+            for (o, v) in out[1].iter_mut().zip(r) {
+                *o += v;
+            }
+            return;
+        }
+        let g = t.sur.gains(fmt);
+        for (ch, o) in out.iter_mut().enumerate() {
+            let (gl, gr) = (g[0][ch], g[1][ch]);
+            if gl == 0.0 && gr == 0.0 {
+                continue;
+            }
+            for k in 0..o.len() {
+                o[k] += l[k] * gl + r[k] * gr;
+            }
+        }
+    };
     scratch.prepare(m.tracks.len(), n);
     let any_solo = m.tracks.iter().any(|t| !t.is_bus() && t.solo);
     let bus_index = |id: u64| m.tracks.iter().position(|t| t.id == id && t.is_bus());
     let is_key = |id: u64| m.tracks.iter().any(|t| t.fx.iter().any(|f| f.on && f.sidechain == Some(id)));
     // First every audio track's clips (a sidechain may come from a later track).
     for (ti, t) in m.tracks.iter().enumerate() {
-        if t.is_bus() {
+        if t.is_bus() || (surround && t.discrete) {
             continue;
         }
         let silent = t.mute || (any_solo && !t.solo);
@@ -1478,6 +1697,8 @@ pub fn mix_into(m: &MixState, a: usize, b: usize, out: &mut [Vec<f32>], peaks: &
                 let Some(src) = m.sources.get(&c.source) else { continue };
                 let sl = &src.audio[0];
                 let sr = &src.audio[src.audio.len().min(2) - 1];
+                // A surround file on a stereo track is mixed down to stereo.
+                let multi = src.audio.len() > 2;
                 let cg = db_to_lin(c.gain_db);
                 let pan = !c.pan_env.is_empty();
                 // A clip with effects is rendered on its own, through its rack.
@@ -1494,13 +1715,23 @@ pub fn mix_into(m: &MixState, a: usize, b: usize, out: &mut [Vec<f32>], peaks: &
                     let Some(idx) = c.source_index(i, sl.len()) else { break };
                     let g = cg * c.envelope(i);
                     let k = t_pos - a;
+                    let (sl_v, sr_v) = if multi {
+                        let mut v = [0.0f32; 8];
+                        for (ch, x) in src.audio.iter().take(8).enumerate() {
+                            v[ch] = x.get(idx).copied().unwrap_or(0.0);
+                        }
+                        let lr = crate::dsp::resample::surround_downmix(&v[..src.audio.len().min(8)]);
+                        (lr[0], lr[1])
+                    } else {
+                        (sl[idx], sr[idx])
+                    };
                     if pan {
                         let (pl, pr) = c.pan_at(i);
-                        dl[k] += sl[idx] * g * pl;
-                        dr[k] += sr[idx] * g * pr;
+                        dl[k] += sl_v * g * pl;
+                        dr[k] += sr_v * g * pr;
                     } else {
-                        dl[k] += sl[idx] * g;
-                        dr[k] += sr[idx] * g;
+                        dl[k] += sl_v * g;
+                        dr[k] += sr_v * g;
                     }
                 }
                 if own {
@@ -1521,7 +1752,7 @@ pub fn mix_into(m: &MixState, a: usize, b: usize, out: &mut [Vec<f32>], peaks: &
     for t in m.tracks.iter() {
         for slot in t.fx.iter().filter(|f| f.on) {
             if let Some(src) = slot.sidechain {
-                if let Some(si) = m.tracks.iter().position(|x| x.id == src && !x.is_bus()) {
+                if let Some(si) = m.tracks.iter().position(|x| x.id == src && !x.is_bus() && !(surround && x.discrete)) {
                     if scratch.keys.len() <= n_keys {
                         scratch.keys.push((0, [Vec::new(), Vec::new()]));
                     }
@@ -1537,7 +1768,7 @@ pub fn mix_into(m: &MixState, a: usize, b: usize, out: &mut [Vec<f32>], peaks: &
         }
     }
     for (ti, t) in m.tracks.iter().enumerate() {
-        if t.is_bus() {
+        if t.is_bus() || (surround && t.discrete) {
             continue;
         }
         let silent = t.mute || (any_solo && !t.solo);
@@ -1559,7 +1790,7 @@ pub fn mix_into(m: &MixState, a: usize, b: usize, out: &mut [Vec<f32>], peaks: &
         }
         {
             let [bl, br] = &mut scratch.bufs[ti];
-            fader(t, a, bl, br);
+            fader(t, a, bl, br, !surround);
             peak_into(peaks, ti, bl, br);
         }
         for s in t.sends.iter().filter(|s| !s.pre) {
@@ -1571,12 +1802,79 @@ pub fn mix_into(m: &MixState, a: usize, b: usize, out: &mut [Vec<f32>], peaks: &
             Some(bi) => scratch.add(ti, bi, 1.0),
             None => {
                 let [bl, br] = &scratch.bufs[ti];
-                for (o, v) in out[0].iter_mut().zip(bl) {
-                    *o += v;
+                to_master(out, t, bl, br);
+            }
+        }
+    }
+    // Surround tracks: each clip channel to the same master channel.
+    if surround {
+        if scratch.sur.len() < n_out {
+            scratch.sur.resize_with(n_out, Vec::new);
+        }
+        for (ti, t) in m.tracks.iter().enumerate() {
+            if t.is_bus() || !t.discrete || t.mute || (any_solo && !t.solo) {
+                continue;
+            }
+            let sur = &mut scratch.sur[..n_out];
+            for ch in sur.iter_mut() {
+                ch.clear();
+                ch.resize(n, 0.0);
+            }
+            for c in &t.clips {
+                if c.mute || c.end() <= a || c.start >= b {
+                    continue;
                 }
-                for (o, v) in out[1].iter_mut().zip(br) {
-                    *o += v;
+                let Some(src) = m.sources.get(&c.source) else { continue };
+                let n_src = src.audio.len();
+                if n_src == 0 {
+                    continue;
                 }
+                let cg = db_to_lin(c.gain_db);
+                let src_len = src.audio[0].len();
+                for t_pos in c.start.max(a)..c.end().min(b) {
+                    let i = t_pos - c.start;
+                    let Some(idx) = c.source_index(i, src_len) else { break };
+                    let g = cg * c.envelope(i);
+                    let k = t_pos - a;
+                    if n_src <= 2 {
+                        // Mono or stereo audio on a surround track plays from the front pair.
+                        sur[0][k] += src.audio[0][idx] * g;
+                        sur[1][k] += src.audio[n_src - 1][idx] * g;
+                    } else {
+                        for (ch, x) in src.audio.iter().take(n_out).enumerate() {
+                            sur[ch][k] += x[idx] * g;
+                        }
+                    }
+                }
+            }
+            // Volume (and its automation and mute lane); no pan.
+            let mut pk = [0.0f32; 2];
+            for k in 0..n {
+                let pos = a + k;
+                let g = if t.has_mute_lane() && t.auto_muted(pos) {
+                    0.0
+                } else if t.vol_env.is_empty() {
+                    db_to_lin(t.volume_db)
+                } else {
+                    env_gain(t.volume_at(pos))
+                };
+                for (ch, x) in sur.iter_mut().enumerate() {
+                    let v = x[k] * g;
+                    x[k] = v;
+                    out[ch][k] += v;
+                    // The track meter shows left-side and right-side peaks.
+                    let side = if ch == 2 || ch == MasterFormat::LFE { 2 } else { (ch % 2) as usize };
+                    if side == 2 {
+                        pk[0] = pk[0].max(v.abs());
+                        pk[1] = pk[1].max(v.abs());
+                    } else {
+                        pk[side] = pk[side].max(v.abs());
+                    }
+                }
+            }
+            if let Some(p) = peaks.get_mut(ti) {
+                p[0] = p[0].max(pk[0]);
+                p[1] = p[1].max(pk[1]);
             }
         }
     }
@@ -1586,17 +1884,16 @@ pub fn mix_into(m: &MixState, a: usize, b: usize, out: &mut [Vec<f32>], peaks: &
         }
         let [bl, br] = &mut scratch.bufs[bi];
         run_rack(&t.fx, t.fx_on, bl, br, None);
-        fader(t, a, bl, br);
+        fader(t, a, bl, br, !surround);
         peak_into(peaks, bi, bl, br);
-        for (o, v) in out[0].iter_mut().zip(bl.iter()) {
-            *o += v;
-        }
-        for (o, v) in out[1].iter_mut().zip(br.iter()) {
-            *o += v;
-        }
+        let [bl, br] = &scratch.bufs[bi];
+        to_master(out, t, bl, br);
     }
-    if let [ol, or, ..] = out {
-        run_rack(&m.master_fx, m.master_fx_on, ol, or, None);
+    // The master rack is stereo: it runs on stereo sessions only.
+    if !surround {
+        if let [ol, or, ..] = out {
+            run_rack(&m.master_fx, m.master_fx_on, ol, or, None);
+        }
     }
     let master = db_to_lin(m.master_db);
     if master != 1.0 {
@@ -1615,7 +1912,7 @@ pub fn mix_into(m: &MixState, a: usize, b: usize, out: &mut [Vec<f32>], peaks: &
                 let f = if (index as i64).rem_euclid(per_bar as i64) == 0 { 1760.0 } else { 1320.0 };
                 let t = phase / sr;
                 let v = ((t * f * std::f64::consts::TAU).sin() * (-t / 0.006).exp()) as f32 * gain * 0.5;
-                for ch in out.iter_mut() {
+                for ch in out.iter_mut().take(2) {
                     ch[k] += v;
                 }
             }
@@ -1666,6 +1963,9 @@ pub fn to_text(s: &Session, paths: &BTreeMap<u64, PathBuf>, base: Option<&Path>)
     let mut o = String::from("AUDEMO-SESSION 1\n");
     o.push_str(&format!("name\t{}\nrate\t{}\nmaster\t{}\nmasterfx\t{}\n", clean(&s.name), s.sample_rate, s.master_db, s.master_fx_on as u8));
     o.push_str(&format!("tempo\t{}\t{}\t{}\t{}\t{}\n", s.tempo, s.beats_per_bar, s.show_grid as u8, s.metronome_on as u8, s.metronome_db));
+    if s.master_format.is_surround() {
+        o.push_str(&format!("format\t{}\n", s.master_format.label()));
+    }
     let fx_line = |key: &str, f: &FxSlot| format!("{key}\t{}\t{}\t{}\t{}\n", f.effect, f.on as u8, f.params.to_text(), f.sidechain.unwrap_or(0));
     for f in &s.master_fx {
         o.push_str(&fx_line("mfx", f));
@@ -1697,6 +1997,12 @@ pub fn to_text(s: &Session, paths: &BTreeMap<u64, PathBuf>, base: Option<&Path>)
             t.output.unwrap_or(0),
             t.group
         ));
+        if !t.sur.is_default() {
+            o.push_str(&format!("span\t{}\n", t.sur.to_text()));
+        }
+        if t.discrete {
+            o.push_str("discrete\n");
+        }
         for f in &t.fx {
             o.push_str(&fx_line("fx", f));
         }
@@ -1807,6 +2113,24 @@ pub fn from_text(id: u64, text: &str, base: Option<&Path>, effects: &[EffectDef]
                 s.metronome_db = num(5).unwrap_or(-6.0).clamp(-40.0, 6.0) as f32;
             }
             "master" => s.master_db = num(1)? as f32,
+            "format" => s.master_format = MasterFormat::from_label(f.get(1).unwrap_or(&"")),
+            "span" => {
+                if let Some(t) = s.tracks.last_mut() {
+                    let d = SurroundPan::default();
+                    t.sur = SurroundPan {
+                        x: num(1).unwrap_or(d.x as f64).clamp(-100.0, 100.0) as f32,
+                        y: num(2).unwrap_or(d.y as f64).clamp(-100.0, 100.0) as f32,
+                        spread: num(3).unwrap_or(d.spread as f64).clamp(0.0, 180.0) as f32,
+                        center: num(4).unwrap_or(d.center as f64).clamp(0.0, 100.0) as f32,
+                        lfe_db: num(5).unwrap_or(d.lfe_db as f64).clamp(VOL_ENV_MIN as f64, VOL_ENV_MAX as f64) as f32,
+                    };
+                }
+            }
+            "discrete" => {
+                if let Some(t) = s.tracks.last_mut() {
+                    t.discrete = true;
+                }
+            }
             "source" => {
                 let sid = num(1)? as u64;
                 let p = PathBuf::from(f.get(2).ok_or_else(|| bad(line))?);
@@ -2045,6 +2369,86 @@ mod tests {
         let back = from_text(2, &text, None, &[]).unwrap().session;
         assert_eq!(back.clip(c).unwrap().vol_env, s.clip(c).unwrap().vol_env);
         assert_eq!(back.clip(c).unwrap().pan_env, s.clip(c).unwrap().pan_env);
+    }
+
+    #[test]
+    fn surround_panner_places_and_keeps_power() {
+        let d = SurroundPan::default();
+        let g = d.gains(MasterFormat::S51);
+        // Front, 60° spread: the track's left on L, right on R, nothing else.
+        assert!((g[0][0] - 1.0).abs() < 1e-5 && (g[1][1] - 1.0).abs() < 1e-5);
+        for ch in 2..6 {
+            assert!(g[0][ch].abs() < 1e-5 && g[1][ch].abs() < 1e-5, "ch {ch}");
+        }
+        for fmt in [MasterFormat::S51, MasterFormat::S71] {
+            for (x, y, spread, center) in [(0.0, 100.0, 0.0, 100.0), (-70.7, -70.7, 0.0, 100.0), (30.0, 10.0, 90.0, 50.0), (0.0, 0.0, 60.0, 0.0), (100.0, 0.0, 30.0, 100.0)] {
+                let sp = SurroundPan { x, y, spread, center, lfe_db: VOL_ENV_MIN };
+                for gk in sp.gains(fmt) {
+                    let p: f32 = gk.iter().enumerate().filter(|(c, _)| *c != MasterFormat::LFE).map(|(_, v)| v * v).sum();
+                    assert!((p - 1.0).abs() < 1e-3, "{fmt:?} {x},{y}: power {p}");
+                }
+            }
+        }
+        // Straight ahead with the centre speaker: C only; without it: L and R equally.
+        let sp = SurroundPan { spread: 0.0, ..d };
+        let g = sp.gains(MasterFormat::S51);
+        assert!((g[0][2] - 1.0).abs() < 1e-5 && g[0][0].abs() < 1e-5);
+        let g = SurroundPan { spread: 0.0, center: 0.0, ..d }.gains(MasterFormat::S51);
+        assert!(g[0][2].abs() < 1e-5 && (g[0][0] - g[0][1]).abs() < 1e-5 && g[0][0] > 0.6);
+        // Back left mostly on Ls.
+        let g = SurroundPan { x: -70.7, y: -70.7, spread: 0.0, ..d }.gains(MasterFormat::S51);
+        assert!(g[0][4] > 0.9 && g[0][5] < 0.35 && g[0][0] < 0.02, "{g:?}");
+        // LFE send.
+        let g = SurroundPan { lfe_db: 0.0, ..d }.gains(MasterFormat::S51);
+        assert!((g[0][3] - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn surround_session_mixes_tracks_into_all_channels() {
+        let mut s = Session::new(1, "Test".into(), 1000, 2);
+        s.master_format = MasterFormat::S51;
+        // A 5.1 file whose channel k is the constant (k + 1) / 10.
+        let six: Vec<Vec<f32>> = (0..6).map(|k| vec![(k + 1) as f32 / 10.0; 100]).collect();
+        let src6 = s.add_source("six".into(), Arc::new(six));
+        let st = s.add_source("stereo".into(), Arc::new(vec![vec![0.5; 100], vec![0.25; 100]]));
+        let c6 = s.insert_clip(0, src6, 0).unwrap();
+        let c2 = s.insert_clip(1, st, 0).unwrap();
+        for c in [c6, c2] {
+            let k = s.clip_mut(c).unwrap();
+            k.fade_in = 0;
+            k.fade_out = 0;
+        }
+        s.tracks[0].discrete = true;
+        s.tracks[0].volume_db = -6.0206;
+        let m = mix_range(&s.mix_state(), 0, 100);
+        assert_eq!(m.len(), 6);
+        // Discrete track at half level, plus the stereo track on L and R.
+        assert!((m[0][50] - (0.05 + 0.5)).abs() < 1e-4);
+        assert!((m[1][50] - (0.1 + 0.25)).abs() < 1e-4);
+        for ch in 2..6 {
+            assert!((m[ch][50] - (ch + 1) as f32 / 20.0).abs() < 1e-4, "ch {ch}: {}", m[ch][50]);
+        }
+        // Pan the stereo track to the back: L/R lose it, Ls/Rs gain it.
+        s.tracks[1].sur = SurroundPan { x: 0.0, y: -100.0, spread: 140.0, ..SurroundPan::default() };
+        let m = mix_range(&s.mix_state(), 0, 100);
+        assert!((m[0][50] - 0.05).abs() < 1e-3);
+        assert!(m[4][50] > 0.25 + 0.3);
+        // As a stereo track, the 5.1 file is mixed down; the output stays 5.1 wide.
+        s.tracks[0].discrete = false;
+        s.tracks[1].sur = SurroundPan::default();
+        let m = mix_range(&s.mix_state(), 0, 100);
+        assert!(m[2][50].abs() < 1e-5 && m[0][50] > 0.5);
+        // Saved and reopened.
+        s.tracks[0].discrete = true;
+        s.tracks[1].sur.lfe_db = -3.0;
+        let text = to_text(&s, &Default::default(), None);
+        let back = from_text(2, &text, None, &[]).unwrap().session;
+        assert_eq!(back.master_format, MasterFormat::S51);
+        assert!(back.tracks[0].discrete && !back.tracks[1].discrete);
+        assert_eq!(back.tracks[1].sur, s.tracks[1].sur);
+        // A stereo session is unchanged by any of this.
+        s.master_format = MasterFormat::Stereo;
+        assert_eq!(mix_range(&s.mix_state(), 0, 100).len(), 2);
     }
 
     #[test]
