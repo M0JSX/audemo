@@ -133,7 +133,7 @@ impl Document {
 
     /// A document for a file just read from disk, with its tags and markers.
     pub fn from_decoded(id: u64, name: String, path: PathBuf, dec: io::Decoded) -> Self {
-        let mut d = Document::new(id, name, Some(path), dec.channels, dec.sample_rate, dec.bits, "Open");
+        let mut d = Document::new(id, name, Some(path), dec.audio, dec.sample_rate, dec.bits, "Open");
         d.meta = dec.meta;
         d.markers = dec
             .markers
@@ -1345,7 +1345,7 @@ impl App {
             match intent {
                 LoadIntent::Open => {
                     let id = self.new_id();
-                    let len = dec.channels[0].len();
+                    let len = dec.audio.len();
                     let rate = dec.sample_rate;
                     let doc = Document::from_decoded(id, name.clone(), path.clone(), dec);
                     self.add_doc(doc);
@@ -1355,14 +1355,24 @@ impl App {
                 }
                 LoadIntent::Append(doc_id) => {
                     if let Some(d) = self.docs.iter_mut().find(|d| d.id == doc_id) {
-                        let mut audio = dec.channels;
-                        if dec.sample_rate != d.sample_rate {
-                            audio = resample_channels(&audio, d.sample_rate as f64 / dec.sample_rate as f64);
-                        }
-                        let audio = remap_channels(&audio, d.n_ch());
                         let end = d.len();
-                        let active = vec![true; d.n_ch()];
-                        apply_edit(d, "Append", (end, end), &active, audio, None, true);
+                        if dec.sample_rate == d.sample_rate && (dec.audio.n_ch() == d.n_ch() || dec.audio.n_ch() == 1) {
+                            // Same format: the files' chunks are shared, nothing is copied.
+                            d.push_undo("Append");
+                            let joined = d.audio.append(&dec.audio);
+                            let added = joined.len() - end;
+                            d.set_audio(joined);
+                            d.sel = Some((end, end + added));
+                            d.cursor = end;
+                        } else {
+                            let mut audio = dec.audio.to_vec();
+                            if dec.sample_rate != d.sample_rate {
+                                audio = resample_channels(&audio, d.sample_rate as f64 / dec.sample_rate as f64);
+                            }
+                            let audio = remap_channels(&audio, d.n_ch());
+                            let active = vec![true; d.n_ch()];
+                            apply_edit(d, "Append", (end, end), &active, audio, None, true);
+                        }
                         self.set_status(format!("Appended {name}"));
                     }
                 }
@@ -1376,8 +1386,8 @@ impl App {
                 }
                 LoadIntent::Audition => {
                     if self.browser_selected.as_deref() == Some(path.as_path()) {
-                        let len = dec.channels[0].len() as f64;
-                        self.engine.play(Arc::new(dec.channels), dec.sample_rate, 0.0, len, false, BROWSER_TAG);
+                        let len = dec.audio.len() as f64;
+                        self.engine.play(dec.audio, dec.sample_rate, 0.0, len, false, BROWSER_TAG);
                     }
                 }
             }
@@ -1924,7 +1934,7 @@ impl App {
             self.set_status("The file being recorded into was closed; the recording was discarded.");
             return;
         };
-        if rec.first().map(|c| c.is_empty()).unwrap_or(true) {
+        if rec.is_empty() {
             self.set_status("Recording was empty.");
             return;
         }
@@ -1935,32 +1945,37 @@ impl App {
             // latency set in Preferences); outside it the file is unchanged.
             let offset = ((lead + self.prefs.rec_offset_ms as f64 / 1000.0) * rate as f64).round() as usize;
             let want = ((range.1 - range.0) as f64 * rate as f64 / doc.sample_rate as f64).round() as usize;
-            let got = rec[0].len().saturating_sub(offset).min(want);
+            let got = rec.len().saturating_sub(offset).min(want);
             if got == 0 {
                 self.set_status("Punch In stopped before the selection: nothing was replaced.");
                 return;
             }
-            for c in rec.iter_mut() {
-                *c = c[offset..offset + got].to_vec();
-            }
+            rec = rec.crop(offset, offset + got);
             if got < want {
                 range.1 = range.0 + (got as f64 * doc.sample_rate as f64 / rate as f64).round() as usize;
             }
         }
-        let secs = rec[0].len() as f64 / rate as f64;
-        let mut audio = rec;
-        if rate != doc.sample_rate {
-            audio = resample_channels(&audio, doc.sample_rate as f64 / rate as f64);
-        }
-        let mut audio = remap_channels(&audio, doc.n_ch());
-        let active = vec![true; doc.n_ch()];
-        if t.punch_lead.is_some() {
-            // Exactly the selection's length, so nothing after it moves.
-            for c in audio.iter_mut() {
-                c.resize(range.1 - range.0, 0.0);
+        let secs = rec.len() as f64 / rate as f64;
+        let label = if t.punch_lead.is_some() { "Punch In" } else { "Record" };
+        let fits = t.punch_lead.is_none() || rec.len() == range.1 - range.0;
+        if rate == doc.sample_rate && (rec.n_ch() == doc.n_ch() || rec.n_ch() == 1) && fits {
+            // The take's chunks go straight into the file: nothing is copied.
+            apply_edit_audio(doc, label, range, &rec, true);
+        } else {
+            let mut audio = rec.to_vec();
+            if rate != doc.sample_rate {
+                audio = resample_channels(&audio, doc.sample_rate as f64 / rate as f64);
             }
+            let mut audio = remap_channels(&audio, doc.n_ch());
+            let active = vec![true; doc.n_ch()];
+            if t.punch_lead.is_some() {
+                // Exactly the selection's length, so nothing after it moves.
+                for c in audio.iter_mut() {
+                    c.resize(range.1 - range.0, 0.0);
+                }
+            }
+            apply_edit(doc, label, range, &active, audio, None, true);
         }
-        apply_edit(doc, if t.punch_lead.is_some() { "Punch In" } else { "Record" }, range, &active, audio, None, true);
         doc.clamp_view();
         self.set_status(format!("Recorded {secs:.1} s"));
     }
@@ -2963,6 +2978,22 @@ pub fn apply_edit(
     }
     doc.set_audio(audio);
     doc.sel = if select && out_len > 0 { Some((a, a + out_len)) } else { None };
+    doc.cursor = a;
+}
+
+/// `apply_edit` with audio that's already chunked (a recording): its chunks
+/// are shared, not copied.
+pub fn apply_edit_audio(doc: &mut Document, label: &str, range: (usize, usize), audio: &Audio, select: bool) {
+    doc.push_undo(label);
+    let (a, b) = (range.0.min(doc.len()), range.1.min(doc.len()));
+    let n = audio.len();
+    if n != b - a {
+        doc.spec_sel = None;
+        doc.shift_markers(a, b - a, n);
+    }
+    let joined = doc.audio.replace_with(a, b, audio);
+    doc.set_audio(joined);
+    doc.sel = if select && n > 0 { Some((a, a + n)) } else { None };
     doc.cursor = a;
 }
 

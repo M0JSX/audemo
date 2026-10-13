@@ -2,7 +2,7 @@
 
 use std::io::{Seek, SeekFrom, Write};
 
-use super::{meta, mp4, ExportSettings, Metadata, Progress, Quantizer};
+use super::{all_frames, meta, mp4, read_block, ExportSettings, Frames, Metadata, Progress, Quantizer};
 
 const MP3_RATES: [u32; 9] = [8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000];
 const AAC_RATES: [u32; 12] = [8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 64000, 88200, 96000];
@@ -24,9 +24,29 @@ fn prepare(chs: &[Vec<f32>], rate: u32, allowed: &[u32]) -> (Vec<Vec<f32>>, u32)
     (out, target)
 }
 
-pub fn write_mp3<W: Write + Seek>(
+/// Whether `prepare` has work to do (surround to fold, or an unsupported rate).
+fn needs_prepare<F: Frames + ?Sized>(chs: &F, rate: u32, allowed: &[u32]) -> bool {
+    chs.channels() > 2 || !allowed.contains(&rate)
+}
+
+pub fn write_mp3<W: Write + Seek, F: Frames + ?Sized>(
     out: &mut W,
-    chs: &[Vec<f32>],
+    chs: &F,
+    rate: u32,
+    s: &ExportSettings,
+    meta: &Metadata,
+    progress: &Progress,
+) -> Result<(), String> {
+    if needs_prepare(chs, rate, &MP3_RATES) {
+        let (v, r) = prepare(&all_frames(chs), rate, &MP3_RATES);
+        return mp3(out, &v, r, s, meta, progress);
+    }
+    mp3(out, chs, rate, s, meta, progress)
+}
+
+fn mp3<W: Write + Seek, F: Frames + ?Sized>(
+    out: &mut W,
+    chs: &F,
     rate: u32,
     s: &ExportSettings,
     meta: &Metadata,
@@ -34,9 +54,9 @@ pub fn write_mp3<W: Write + Seek>(
 ) -> Result<(), String> {
     use mp3lame_encoder::{max_required_buffer_size, Bitrate, Builder, FlushGap, InterleavedPcm, Mode, MonoPcm, Quality, VbrMode};
     let err = |e: std::io::Error| format!("Write failed: {e}");
-    let (chs, rate) = prepare(chs, rate, &MP3_RATES);
-    let n = chs.len();
-    let len = chs[0].len();
+    let n = chs.channels();
+    let len = chs.frames();
+    let mut blk: Vec<Vec<f32>> = Vec::new();
     let be = |e: mp3lame_encoder::BuildError| format!("MP3 encoder: {e}");
     let mut b = Builder::new().ok_or("Couldn't start the MP3 encoder.")?;
     b.set_num_channels(n as u8).map_err(be)?;
@@ -80,13 +100,14 @@ pub fn write_mp3<W: Write + Seek>(
         let end = (i + block).min(len);
         buf.clear();
         buf.reserve(max_required_buffer_size((end - i) * n));
+        read_block(chs, i, end, &mut blk);
         if n == 1 {
-            enc.encode_to_vec(MonoPcm(&chs[0][i..end]), &mut buf).map_err(ee)?;
+            enc.encode_to_vec(MonoPcm(&blk[0][..]), &mut buf).map_err(ee)?;
         } else {
             pcm.clear();
-            for f in i..end {
-                pcm.push(chs[0][f]);
-                pcm.push(chs[1][f]);
+            for f in 0..end - i {
+                pcm.push(blk[0][f]);
+                pcm.push(blk[1][f]);
             }
             enc.encode_to_vec(InterleavedPcm(&pcm[..]), &mut buf).map_err(ee)?;
         }
@@ -128,18 +149,33 @@ fn quality(q: u8) -> mp3lame_encoder::Quality {
     }
 }
 
-pub fn write_m4a<W: Write + Seek>(
+pub fn write_m4a<W: Write + Seek, F: Frames + ?Sized>(
     out: &mut W,
-    chs: &[Vec<f32>],
+    chs: &F,
+    rate: u32,
+    s: &ExportSettings,
+    meta: &Metadata,
+    progress: &Progress,
+) -> Result<(), String> {
+    if needs_prepare(chs, rate, &AAC_RATES) {
+        let (v, r) = prepare(&all_frames(chs), rate, &AAC_RATES);
+        return m4a(out, &v, r, s, meta, progress);
+    }
+    m4a(out, chs, rate, s, meta, progress)
+}
+
+fn m4a<W: Write + Seek, F: Frames + ?Sized>(
+    out: &mut W,
+    chs: &F,
     rate: u32,
     s: &ExportSettings,
     meta: &Metadata,
     progress: &Progress,
 ) -> Result<(), String> {
     use fdk_aac::enc::{AudioObjectType, BitRate, ChannelMode, Encoder, EncoderParams, Transport};
-    let (chs, rate) = prepare(chs, rate, &AAC_RATES);
-    let n = chs.len();
-    let len = chs[0].len();
+    let n = chs.channels();
+    let len = chs.frames();
+    let mut blk: Vec<Vec<f32>> = Vec::new();
     let fe = |e: fdk_aac::enc::EncoderError| format!("AAC encoder: {e}");
     let enc = Encoder::new(EncoderParams {
         bit_rate: BitRate::Cbr(s.aac_kbps * 1000),
@@ -171,10 +207,11 @@ pub fn write_m4a<W: Write + Seek>(
         }
         let end = (i + frame_len).min(padded);
         pcm.clear();
-        for f in i..end {
-            for c in &chs {
-                let v = if f < len { c[f] } else { 0.0 };
-                pcm.push(q.quantize(v, 16) as i16);
+        // (Past the audio, read_block gives silence.)
+        read_block(chs, i, end, &mut blk);
+        for f in 0..end - i {
+            for c in &blk {
+                pcm.push(q.quantize(c[f], 16) as i16);
             }
         }
         let mut off = 0;

@@ -249,16 +249,81 @@ fn temp_path(path: &Path) -> PathBuf {
 }
 
 /// Write `chs` to `path` in the chosen format.
-pub fn save(
+/// Audio an encoder reads a block at a time: plain vectors, or a file's
+/// chunked audio (so saving never needs the whole file as one buffer).
+pub trait Frames: Sync {
+    fn frames(&self) -> usize;
+    fn channels(&self) -> usize;
+    /// Frames [start, start + out.len()) of channel `c` (zeros past the end).
+    fn read_into(&self, c: usize, start: usize, out: &mut [f32]);
+}
+
+impl Frames for [Vec<f32>] {
+    fn frames(&self) -> usize {
+        self.first().map(|c| c.len()).unwrap_or(0)
+    }
+    fn channels(&self) -> usize {
+        self.len()
+    }
+    fn read_into(&self, c: usize, start: usize, out: &mut [f32]) {
+        let ch = &self[c];
+        for (i, v) in out.iter_mut().enumerate() {
+            *v = ch.get(start + i).copied().unwrap_or(0.0);
+        }
+    }
+}
+
+impl Frames for Vec<Vec<f32>> {
+    fn frames(&self) -> usize {
+        self.as_slice().frames()
+    }
+    fn channels(&self) -> usize {
+        self.len()
+    }
+    fn read_into(&self, c: usize, start: usize, out: &mut [f32]) {
+        self.as_slice().read_into(c, start, out)
+    }
+}
+
+impl Frames for crate::audio::Audio {
+    fn frames(&self) -> usize {
+        self.len()
+    }
+    fn channels(&self) -> usize {
+        self.n_ch()
+    }
+    fn read_into(&self, c: usize, start: usize, out: &mut [f32]) {
+        self.read(c, start, out)
+    }
+}
+
+/// Frames [start, end) of every channel into `blk` (buffers reused).
+pub(crate) fn read_block<F: Frames + ?Sized>(src: &F, start: usize, end: usize, blk: &mut Vec<Vec<f32>>) {
+    let n = src.channels();
+    blk.resize_with(n, Vec::new);
+    for (c, b) in blk.iter_mut().enumerate() {
+        b.resize(end - start, 0.0);
+        src.read_into(c, start, b);
+    }
+}
+
+/// Everything, as vectors (for encoders that must resample or downmix).
+pub(crate) fn all_frames<F: Frames + ?Sized>(src: &F) -> Vec<Vec<f32>> {
+    let mut v = Vec::new();
+    read_block(src, 0, src.frames(), &mut v);
+    v
+}
+
+pub fn save<F: Frames + ?Sized>(
     path: &Path,
-    chs: &[Vec<f32>],
+    chs: &F,
     sample_rate: u32,
     s: &ExportSettings,
     meta: &Metadata,
     markers: &[Marker],
     progress: &Progress,
 ) -> Result<(), String> {
-    if chs.is_empty() || chs[0].is_empty() {
+    if chs.channels() == 0 || chs.frames() == 0 {
         return Err("There is no audio to save.".into());
     }
     let tmp = temp_path(path);
@@ -301,9 +366,9 @@ pub fn save(
     }
 }
 
-/// `save` for a file's (chunked) audio.
+/// `save` for a file's (chunked) audio: read and written a block at a time.
 pub fn save_audio(path: &Path, audio: &crate::audio::Audio, sample_rate: u32, s: &ExportSettings, meta: &Metadata, markers: &[Marker], progress: &Progress) -> Result<(), String> {
-    save(path, &audio.to_vec(), sample_rate, s, meta, markers, progress)
+    save(path, audio, sample_rate, s, meta, markers, progress)
 }
 
 #[cfg(all(test, not(audemo_std_test)))]

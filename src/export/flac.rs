@@ -517,9 +517,9 @@ fn encode_frame(chs: &[Vec<i64>], bps: u32, sr: u32, frame_no: u64, window: &[f6
 }
 
 /// Write a complete FLAC file.
-pub fn write<W: Write + Seek>(
+pub fn write<W: Write + Seek, F: super::Frames + ?Sized>(
     out: &mut W,
-    chs: &[Vec<f32>],
+    chs: &F,
     sample_rate: u32,
     bps: u32,
     dither: bool,
@@ -527,14 +527,15 @@ pub fn write<W: Write + Seek>(
     progress: &Progress,
 ) -> Result<(), String> {
     let err = |e: std::io::Error| format!("Write failed: {e}");
-    if !(1..=8).contains(&chs.len()) {
+    if !(1..=8).contains(&chs.channels()) {
         return Err("FLAC supports 1 to 8 channels.".into());
     }
     if sample_rate == 0 || sample_rate > 655_350 {
         return Err("FLAC can't store this sample rate.".into());
     }
-    let n_ch = chs.len();
-    let len = chs[0].len();
+    let n_ch = chs.channels();
+    let len = chs.frames();
+    let mut blk: Vec<Vec<f32>> = Vec::new();
     let start = out.stream_position().map_err(err)?;
     out.write_all(b"fLaC").map_err(err)?;
     // STREAMINFO placeholder, rewritten at the end.
@@ -571,8 +572,9 @@ pub fn write<W: Write + Seek>(
             let end = (i + BLOCK).min(len);
             let mut ints: Vec<Vec<i64>> = vec![Vec::with_capacity(end - i); n_ch];
             raw.clear();
-            for f in i..end {
-                for (c, ch) in chs.iter().enumerate() {
+            super::read_block(chs, i, end, &mut blk);
+            for f in 0..end - i {
+                for (c, ch) in blk.iter().enumerate() {
                     let v = q.quantize(ch[f], bps);
                     ints[c].push(v as i64);
                     raw.extend_from_slice(&v.to_le_bytes()[..bytes_ps]);

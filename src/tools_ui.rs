@@ -413,7 +413,7 @@ impl App {
                 let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<String, String> {
                     let dec = io::load(path)?;
                     let (meta, mut markers) = (dec.meta, dec.markers);
-                    let mut audio = dec.channels;
+                    let mut audio = dec.audio.to_vec();
                     let mut sr = dec.sample_rate;
                     let n_ch = audio.len();
                     audio = match &job {

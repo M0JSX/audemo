@@ -2,7 +2,7 @@
 
 use std::io::{Seek, SeekFrom, Write};
 
-use super::{Progress, Quantizer};
+use super::{read_block, Frames, Progress, Quantizer};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WavFormat {
@@ -47,9 +47,9 @@ impl WavFormat {
     }
 }
 
-pub fn write<W: Write + Seek>(
+pub fn write<W: Write + Seek, F: Frames + ?Sized>(
     out: &mut W,
-    chs: &[Vec<f32>],
+    chs: &F,
     sample_rate: u32,
     fmt: WavFormat,
     dither: bool,
@@ -58,8 +58,8 @@ pub fn write<W: Write + Seek>(
     progress: &Progress,
 ) -> Result<(), String> {
     let err = |e: std::io::Error| format!("Write failed: {e}");
-    let n_ch = chs.len().max(1);
-    let len = chs.first().map(|c| c.len()).unwrap_or(0);
+    let n_ch = chs.channels().max(1);
+    let len = chs.frames();
     let bps = fmt.bytes();
     let data_len = len as u64 * n_ch as u64 * bps as u64;
     let float = fmt == WavFormat::Float32;
@@ -115,6 +115,7 @@ pub fn write<W: Write + Seek>(
     let mut q = Quantizer::new(dither);
     let block = 16384;
     let mut buf: Vec<u8> = Vec::with_capacity(block * n_ch * bps);
+    let mut blk: Vec<Vec<f32>> = Vec::new();
     let mut i = 0;
     while i < len {
         if progress.cancelled() {
@@ -122,8 +123,9 @@ pub fn write<W: Write + Seek>(
         }
         let end = (i + block).min(len);
         buf.clear();
-        for f in i..end {
-            for c in chs {
+        read_block(chs, i, end, &mut blk);
+        for f in 0..end - i {
+            for c in &blk {
                 let s = c[f];
                 match fmt {
                     WavFormat::Float32 => buf.extend_from_slice(&s.to_le_bytes()),

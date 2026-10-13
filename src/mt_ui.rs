@@ -393,7 +393,7 @@ impl App {
         }
         let id = self.new_id();
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled".into());
-        let doc = Document::new(id, name, Some(path.to_path_buf()), dec.channels, dec.sample_rate, dec.bits, "Open");
+        let doc = Document::new(id, name, Some(path.to_path_buf()), dec.audio, dec.sample_rate, dec.bits, "Open");
         self.docs.push(doc);
         if self.active.is_none() {
             self.active = Some(self.docs.len() - 1);
@@ -579,7 +579,7 @@ impl App {
             }
             taken.insert(p.clone());
             let float = ExportSettings { container: Container::Wav, wav: WavFormat::Float32, include_meta: false, ..Default::default() };
-            if let Err(e) = export::save(&p, &src.audio, s.sample_rate, &float, &export::Metadata::default(), &[], &export::Progress::default()) {
+            if let Err(e) = export::save(&p, src.audio.as_slice(), s.sample_rate, &float, &export::Metadata::default(), &[], &export::Progress::default()) {
                 self.dialog = Some(Dialog::Message { title: "Save failed".into(), text: e });
                 return;
             }
@@ -850,7 +850,7 @@ impl App {
         self.engine.stop();
         let Some((audio, rate)) = self.engine.stop_recording() else { return };
         let Some(rec) = rec else { return };
-        if audio.first().map(|c| c.is_empty()).unwrap_or(true) {
+        if audio.is_empty() {
             self.set_status("Recording was empty.");
             return;
         }
@@ -858,7 +858,7 @@ impl App {
         let tname = target.map(|(si, ti)| self.sessions[si].tracks[ti].name.clone()).unwrap_or_else(|| "Recording".into());
         let n = self.docs.iter().filter(|d| d.name.starts_with(&tname)).count() + 1;
         let id = self.new_id();
-        let secs = audio[0].len() as f64 / rate as f64;
+        let secs = audio.len() as f64 / rate as f64;
         let mut doc = Document::new(id, format!("{tname}_{n:03}"), None, audio, rate, None, "Record");
         doc.dirty = true;
         self.docs.push(doc);

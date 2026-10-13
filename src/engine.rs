@@ -166,47 +166,42 @@ pub struct RecShared {
     pub peaks: [f32; 2],
 }
 
-/// The UI thread's de-interleaved copy of the recording so far (first two
-/// channels), with a min/max summary per REC_BLOCK frames. It is topped up
-/// once per frame, so the live waveform is drawn from the real samples.
-#[derive(Default)]
+/// The UI thread's copy of the recording so far (first two channels), built
+/// into chunked audio as it arrives (so a long take is held once, partly on
+/// disk), and readable for drawing the live waveform.
 pub struct RecView {
-    pub chans: Vec<Vec<f32>>,
-    blocks: Vec<Vec<(f32, f32)>>,
+    take: crate::audio::Builder,
     /// Interleaved samples already copied.
     taken: usize,
 }
 
+impl Default for RecView {
+    fn default() -> Self {
+        RecView { take: crate::audio::Builder::new(1), taken: 0 }
+    }
+}
+
 impl RecView {
     pub fn frames(&self) -> usize {
-        self.chans.first().map(|c| c.len()).unwrap_or(0)
+        self.take.len()
+    }
+
+    pub fn n_ch(&self) -> usize {
+        self.take.n_ch()
     }
 
     /// Exact (min, max) of channel `c` over frames [a, b).
     pub fn min_max(&self, c: usize, a: usize, b: usize) -> (f32, f32) {
-        let c = c.min(self.chans.len().saturating_sub(1));
-        let (ch, bl) = (&self.chans[c], &self.blocks[c]);
-        let b = b.min(ch.len());
-        let fold = |acc: (f32, f32), v: f32| (acc.0.min(v), acc.1.max(v));
-        let mut m = (f32::MAX, f32::MIN);
-        if a >= b {
-            return (0.0, 0.0);
-        }
-        let first_full = a.div_ceil(REC_BLOCK);
-        let last_full = b / REC_BLOCK;
-        if last_full > first_full + 1 {
-            m = ch[a..first_full * REC_BLOCK].iter().copied().fold(m, fold);
-            m = bl[first_full..last_full.min(bl.len())].iter().fold(m, |m, &(lo, hi)| (m.0.min(lo), m.1.max(hi)));
-            m = ch[(last_full.min(bl.len()) * REC_BLOCK)..b].iter().copied().fold(m, fold);
-        } else {
-            m = ch[a..b].iter().copied().fold(m, fold);
-        }
-        m
+        self.take.min_max(c, a, b)
+    }
+
+    /// Channel `c`'s frames [a, b).
+    pub fn range(&self, c: usize, a: usize, b: usize) -> Vec<f32> {
+        self.take.range(c, a, b)
     }
 
     fn reset(&mut self, n: usize) {
-        self.chans = vec![Vec::new(); n];
-        self.blocks = vec![Vec::new(); n];
+        self.take = crate::audio::Builder::new(n);
         self.taken = 0;
     }
 }
@@ -884,19 +879,22 @@ impl Engine {
         let Some(r) = &mut self.rec else { return };
         let n_ch = r.channels.max(1);
         let keep = n_ch.min(2);
-        let Ok(s) = r.shared.lock() else { return };
+        let Ok(mut s) = r.shared.lock() else { return };
         let v = &mut r.view;
         let total = s.samples - s.samples % n_ch;
         let mut i = v.taken;
+        let mut picked: Vec<f32> = Vec::new();
         while i < total {
             let chunk = &s.chunks[i / s.chunk_len];
             let off = i % s.chunk_len;
             let n = (chunk.len() - off).min(total - i);
+            picked.clear();
             for frame in chunk[off..off + n].chunks_exact(n_ch) {
                 for c in 0..keep {
-                    v.chans[c].push(frame[r.map[c]]);
+                    picked.push(frame[r.map[c]]);
                 }
             }
+            v.take.push_interleaved(&picked, keep);
             i += n - n % n_ch;
             if n % n_ch != 0 {
                 // A frame straddles two chunks (only if chunk_len % n_ch != 0).
@@ -904,21 +902,18 @@ impl Engine {
             }
         }
         v.taken = i;
-        drop(s);
-        let frames = v.frames();
-        for c in 0..keep {
-            let done = v.blocks[c].len();
-            for bi in done..frames / REC_BLOCK {
-                let seg = &v.chans[c][bi * REC_BLOCK..(bi + 1) * REC_BLOCK];
-                let m = seg.iter().fold((f32::MAX, f32::MIN), |m, &x| (m.0.min(x), m.1.max(x)));
-                v.blocks[c].push(m);
+        // Input chunks already copied are freed (the take lives in `view`).
+        let consumed = i / s.chunk_len;
+        for c in s.chunks.iter_mut().take(consumed) {
+            if c.capacity() > 0 {
+                *c = Vec::new();
             }
         }
     }
 
     /// The recording so far, for live drawing.
     pub fn rec_view(&self) -> Option<&RecView> {
-        self.rec.as_ref().map(|r| &r.view).filter(|v| !v.chans.is_empty())
+        self.rec.as_ref().map(|r| &r.view)
     }
 
     /// Start recording from the chosen input; returns (rate, channels).
@@ -980,8 +975,8 @@ impl Engine {
         Ok((rate, channels))
     }
 
-    /// Stop recording and return de-interleaved audio (max two channels).
-    pub fn stop_recording(&mut self) -> Option<(Vec<Vec<f32>>, u32)> {
+    /// Stop recording and return the take (at most two channels).
+    pub fn stop_recording(&mut self) -> Option<(crate::audio::Audio, u32)> {
         let rec = self.rec.as_mut()?;
         // Stop the input first, then collect whatever arrived since the last frame.
         rec._stream.pause().ok();
@@ -989,7 +984,7 @@ impl Engine {
         let rec = self.rec.take()?;
         let rate = rec.rate;
         drop(rec._stream);
-        Some((rec.view.chans, rate))
+        Some((rec.view.take.finish(), rate))
     }
 }
 
@@ -1223,15 +1218,18 @@ mod tests {
     fn rec_view_min_max_matches_scan() {
         let mut v = RecView::default();
         v.reset(1);
-        let n = 10_000;
-        v.chans[0] = (0..n).map(|i| ((i as f32 * 0.37).sin() * (i as f32 / n as f32))).collect();
-        for bi in 0..n / REC_BLOCK {
-            let seg = &v.chans[0][bi * REC_BLOCK..(bi + 1) * REC_BLOCK];
-            v.blocks[0].push(seg.iter().fold((f32::MAX, f32::MIN), |m, &x| (m.0.min(x), m.1.max(x))));
+        // Longer than a chunk, so the view spans finished chunks and the tail.
+        let n = crate::audio::CHUNK + 10_000;
+        let data: Vec<f32> = (0..n).map(|i| ((i as f32 * 0.37).sin() * (i as f32 / n as f32))).collect();
+        for part in data.chunks(4099) {
+            v.take.push(&[part.to_vec()]);
         }
-        for &(a, b) in &[(0, 1), (3, 70), (63, 129), (100, 9_999), (5, 10_000), (640, 704), (9_990, 12_000)] {
-            let want = v.chans[0][a..b.min(n)].iter().fold((f32::MAX, f32::MIN), |m, &x| (m.0.min(x), m.1.max(x)));
+        assert_eq!(v.frames(), n);
+        let c = crate::audio::CHUNK;
+        for &(a, b) in &[(0, 1), (3, 70), (63, 129), (100, 9_999), (5, 10_000), (640, 704), (c - 50, c + 50), (c + 9_990, n + 2_000), (0, n)] {
+            let want = data[a..b.min(n)].iter().fold((f32::MAX, f32::MIN), |m, &x| (m.0.min(x), m.1.max(x)));
             assert_eq!(v.min_max(0, a, b), want, "{a}..{b}");
         }
+        assert_eq!(v.range(0, c - 5, c + 5), data[c - 5..c + 5].to_vec());
     }
 }

@@ -207,7 +207,7 @@ impl App {
                 if let Some(((start, ratio), rv)) = rec {
                     let f0 = ((a.max(start) - start) as f64 * ratio) as usize;
                     let f1 = (((b.min(start + doc.pending) - start) as f64 * ratio).ceil() as usize).max(f0 + 1);
-                    for c in 0..rv.chans.len().min(2) {
+                    for c in 0..rv.n_ch().min(2) {
                         let (lo, hi) = rv.min_max(c, f0, f1);
                         amp = amp.max(hi.abs()).max(lo.abs());
                     }
@@ -494,11 +494,11 @@ impl App {
                             }
                         } else {
                             // Zoomed in past one sample per pixel: draw the samples as a line.
-                            let ch = &rv.chans[c.min(rv.chans.len() - 1)];
                             let fa = ((v.start - a) * ratio).floor().max(0.0) as usize;
                             let fb = (((v.end - a) * ratio).ceil() as usize + 1).min(frames);
                             if fb > fa + 1 {
-                                let pts: Vec<Pos2> = (fa..fb).map(|i| pos2(v.x(a + i as f64 / ratio), y(ch[i]))).collect();
+                                let ch = rv.range(c.min(rv.n_ch() - 1), fa, fb);
+                                let pts: Vec<Pos2> = (fa..fb).map(|i| pos2(v.x(a + i as f64 / ratio), y(ch[i - fa]))).collect();
                                 shapes.push(Shape::line(pts, Stroke::new(1.3_f32, WAVE())));
                             }
                         }

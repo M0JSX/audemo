@@ -727,6 +727,43 @@ impl Audio {
         Audio { chans: Arc::new(chans) }
     }
 
+    /// Frames [a, b) replaced by `other`, sharing its chunks (channel counts
+    /// matched by repetition).
+    pub fn replace_with(&self, a: usize, b: usize, other: &Audio) -> Audio {
+        let len = self.len();
+        let (a, b) = (a.min(len), b.min(len).max(a.min(len)));
+        let chans = self
+            .chans
+            .iter()
+            .enumerate()
+            .map(|(c, ch)| {
+                let head = ch.range(0, a);
+                let mid = other.chans[c.min(other.chans.len() - 1)].range(0, other.len());
+                let tail = ch.range(b, len);
+                Channel::from_chunks(head.chunks.into_iter().chain(mid.chunks).chain(tail.chunks).collect())
+            })
+            .collect();
+        Audio { chans: Arc::new(chans) }
+    }
+
+    /// `other` added at the end, sharing both files' chunks (channel counts
+    /// matched by repetition).
+    pub fn append(&self, other: &Audio) -> Audio {
+        let len = self.len();
+        let chans = self
+            .chans
+            .iter()
+            .enumerate()
+            .map(|(c, ch)| {
+                let head = ch.range(0, len);
+                let tail = &other.chans[c.min(other.chans.len() - 1)];
+                let tail = tail.range(0, other.len());
+                Channel::from_chunks(head.chunks.into_iter().chain(tail.chunks).collect())
+            })
+            .collect();
+        Audio { chans: Arc::new(chans) }
+    }
+
     /// Frames [a, b) taken out.
     pub fn delete(&self, a: usize, b: usize) -> Audio {
         self.replace(a, b, &vec![Vec::new(); self.n_ch()], &[])
@@ -758,16 +795,17 @@ impl Audio {
 }
 
 /// Builds audio a block at a time (decoding, recording) without ever holding
-/// the whole thing as one buffer.
+/// the whole thing as one buffer. It can be read while it grows (for drawing
+/// a recording as it happens).
 pub struct Builder {
     pending: Vec<Vec<f32>>,
-    chunks: Vec<Vec<Arc<Chunk>>>,
+    done: Vec<Channel>,
 }
 
 impl Builder {
     pub fn new(n_ch: usize) -> Builder {
         let n = n_ch.max(1);
-        Builder { pending: vec![Vec::with_capacity(CHUNK); n], chunks: vec![Vec::new(); n] }
+        Builder { pending: vec![Vec::with_capacity(CHUNK); n], done: vec![Channel::default(); n] }
     }
 
     pub fn n_ch(&self) -> usize {
@@ -776,14 +814,14 @@ impl Builder {
 
     /// Frames so far.
     pub fn len(&self) -> usize {
-        self.chunks[0].iter().map(|c| c.len).sum::<usize>() + self.pending[0].len()
+        self.done[0].len + self.pending[0].len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Append interleaved frames.
+    /// Append interleaved frames (the first `n_ch()` channels of each).
     pub fn push_interleaved(&mut self, samples: &[f32], n_ch: usize) {
         let n = self.n_ch();
         for frame in samples.chunks(n_ch.max(1)) {
@@ -817,14 +855,60 @@ impl Builder {
         for c in 0..self.n_ch() {
             let p = std::mem::replace(&mut self.pending[c], Vec::with_capacity(CHUNK));
             if !p.is_empty() {
-                self.chunks[c].push(Chunk::new(p));
+                let ch = &mut self.done[c];
+                let chunk = Chunk::new(p);
+                ch.starts.push(ch.len);
+                ch.len += chunk.len;
+                ch.chunks.push(chunk);
             }
         }
     }
 
-    /// Drop frames past `len` (e.g. an encoder's padding).
-    pub fn truncate(self, len: usize) -> Audio {
-        self.finish().crop(0, len)
+    /// (min, max) of channel `c` over [a, b) so far.
+    pub fn min_max(&self, c: usize, a: usize, b: usize) -> (f32, f32) {
+        let c = c.min(self.n_ch() - 1);
+        let split = self.done[c].len;
+        let b = b.min(self.len());
+        if a >= b {
+            return (0.0, 0.0);
+        }
+        let mut lo = f32::MAX;
+        let mut hi = f32::MIN;
+        if a < split {
+            let (l, h) = self.done[c].min_max(a, b.min(split));
+            lo = l;
+            hi = h;
+        }
+        if b > split {
+            for &v in &self.pending[c][a.max(split) - split..b - split] {
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+        }
+        if lo > hi {
+            (0.0, 0.0)
+        } else {
+            (lo, hi)
+        }
+    }
+
+    /// Channel `c`'s frames [a, b) so far.
+    pub fn range(&self, c: usize, a: usize, b: usize) -> Vec<f32> {
+        let c = c.min(self.n_ch() - 1);
+        let split = self.done[c].len;
+        let b = b.min(self.len());
+        let mut out = vec![0.0; b.saturating_sub(a)];
+        if a >= b {
+            return out;
+        }
+        if a < split {
+            self.done[c].read(a, &mut out[..b.min(split) - a]);
+        }
+        if b > split {
+            let from = a.max(split);
+            out[from - a..].copy_from_slice(&self.pending[c][from - split..b - split]);
+        }
+        out
     }
 
     /// Drop the first `n` frames.
@@ -836,7 +920,7 @@ impl Builder {
 
     pub fn finish(mut self) -> Audio {
         self.flush();
-        Audio { chans: Arc::new(self.chunks.into_iter().map(Channel::from_chunks).collect()) }
+        Audio { chans: Arc::new(self.done) }
     }
 }
 
@@ -980,6 +1064,28 @@ mod tests {
         b.push(&[l[..1000].to_vec(), r[..1000].to_vec()]);
         b.push(&[l[1000..].to_vec(), r[1000..].to_vec()]);
         assert_eq!(b.finish_skipping(10).to_vec(), vec![l[10..].to_vec(), r[10..].to_vec()]);
+    }
+
+    #[test]
+    fn builder_reads_while_growing_and_takes_splice_in() {
+        let n = CHUNK + 5000;
+        let v = ramp(n, 0.4);
+        let mut b = Builder::new(1);
+        b.push(&[v[..CHUNK + 1000].to_vec()]);
+        assert_eq!(b.len(), CHUNK + 1000);
+        assert_eq!(b.range(0, CHUNK - 10, CHUNK + 10), v[CHUNK - 10..CHUNK + 10].to_vec());
+        let want = v[100..CHUNK + 900].iter().fold((f32::MAX, f32::MIN), |m, &x| (m.0.min(x), m.1.max(x)));
+        assert_eq!(b.min_max(0, 100, CHUNK + 900), want);
+        b.push(&[v[CHUNK + 1000..].to_vec()]);
+        let take = b.finish();
+        assert_eq!(take.to_vec(), vec![v.clone()]);
+        // A take dropped into a file shares its chunks.
+        let file = Audio::from_vec(&[vec![0.25; CHUNK * 3]]);
+        let joined = file.replace_with(CHUNK, CHUNK + 10, &take);
+        assert_eq!(joined.len(), CHUNK * 3 - 10 + n);
+        assert_eq!(joined.channel_range(0, CHUNK, CHUNK + n), v);
+        assert!(joined.shared_chunks(&take) >= 1);
+        assert_eq!(joined.sample(0, CHUNK + n), 0.25);
     }
 
     #[test]

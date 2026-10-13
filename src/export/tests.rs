@@ -35,9 +35,10 @@ fn surround_wav_round_trips() {
         let path = dir().join(format!("surround{}.wav", fmt as u8));
         save(&path, &chs, rate, &s, &Metadata::default(), &[], &Progress::default()).unwrap();
         let dec = crate::io::load(&path).unwrap();
-        assert_eq!(dec.channels.len(), 6, "{fmt:?}");
+        let dchs = chans_of(&dec);
+        assert_eq!(dchs.len(), 6, "{fmt:?}");
         for c in 0..6 {
-            assert!((dec.channels[c][1000] - chs[c][1000]).abs() < 1e-5, "{fmt:?} channel {c}");
+            assert!((dchs[c][1000] - chs[c][1000]).abs() < 1e-5, "{fmt:?} channel {c}");
         }
     }
 }
@@ -63,15 +64,16 @@ fn lossless_round_trips_are_exact() {
         let path = dir().join(format!("rt{bits}.{}", c.ext()));
         save(&path, &chs, rate, &s, &tags(), &markers, &Progress::default()).unwrap();
         let dec = crate::io::load(&path).unwrap();
+        let dchs = chans_of(&dec);
         assert_eq!(dec.sample_rate, rate);
-        assert_eq!(dec.channels.len(), 2);
-        assert_eq!(dec.channels[0].len(), chs[0].len(), "{path:?}");
+        assert_eq!(dchs.len(), 2);
+        assert_eq!(dchs[0].len(), chs[0].len(), "{path:?}");
         let scale = (1u64 << (bits - 1)) as f32;
         let mut q = Quantizer::new(false);
         for i in 0..chs[0].len() {
             for c in 0..2 {
                 let want = q.quantize(chs[c][i], bits) as f32 / scale;
-                assert!((dec.channels[c][i] - want).abs() < 1e-6, "{path:?} sample {i}: {} vs {want}", dec.channels[c][i]);
+                assert!((dchs[c][i] - want).abs() < 1e-6, "{path:?} sample {i}: {} vs {want}", dchs[c][i]);
             }
         }
         assert_eq!(dec.meta.get(Tag::Title), "Round Trip ✓", "{path:?}");
@@ -93,14 +95,15 @@ fn lossy_round_trips_keep_length_and_tags() {
         let path = dir().join(format!("rt{rate}_{ch}.{}", c.ext()));
         save(&path, &chs, rate, &s, &tags(), &[], &Progress::default()).unwrap();
         let dec = crate::io::load(&path).unwrap();
+        let dchs = chans_of(&dec);
         assert_eq!(dec.sample_rate, rate, "{path:?}");
-        assert_eq!(dec.channels.len(), ch, "{path:?}");
-        let n = dec.channels[0].len() as i64;
+        assert_eq!(dchs.len(), ch, "{path:?}");
+        let n = dchs[0].len() as i64;
         assert!((n - 48_000).abs() <= 3000, "{path:?}: {n} frames");
         // The tone survives: similar RMS in the middle of the file.
         let rms = |x: &[f32]| (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt();
         let a = rms(&chs[0][10_000..30_000]);
-        let b = rms(&dec.channels[0][10_000..30_000]);
+        let b = rms(&dchs[0][10_000..30_000]);
         assert!((a - b).abs() < 0.05, "{path:?}: rms {a} vs {b}");
         assert_eq!(dec.meta.get(Tag::Title), "Round Trip ✓", "{path:?}");
         assert_eq!(dec.meta.get(Tag::Album), "Tests", "{path:?}");
@@ -126,7 +129,7 @@ fn unusual_rates_are_converted_for_lossy_formats() {
 fn a_failed_save_leaves_the_target_alone() {
     let path = dir().join("keep.wav");
     std::fs::write(&path, b"original").unwrap();
-    let r = save(&path, &[Vec::new()], 44100, &ExportSettings::default(), &Metadata::default(), &[], &Progress::default());
+    let r = save(&path, &vec![Vec::<f32>::new()], 44100, &ExportSettings::default(), &Metadata::default(), &[], &Progress::default());
     assert!(r.is_err());
     assert_eq!(std::fs::read(&path).unwrap(), b"original");
     let p = Progress::default();
@@ -157,4 +160,29 @@ fn id3_and_vorbis_tags_are_well_formed() {
     assert_eq!(count, 4);
     assert!(meta::id3v2(&Metadata::default(), "").is_empty());
     assert!(meta::riff_info(&Metadata::default(), "").is_empty());
+}
+
+fn chans_of(dec: &crate::io::Decoded) -> Vec<Vec<f32>> {
+    dec.audio.to_vec()
+}
+
+#[test]
+fn chunked_audio_saves_byte_for_byte_like_plain_vectors() {
+    // Longer than a chunk and an encoder block, odd length, stereo.
+    let n = crate::audio::CHUNK * 2 + 4321;
+    let chs: Vec<Vec<f32>> = (0..2).map(|c| (0..n).map(|i| ((i as f32) * 0.003 + c as f32).sin() * 0.7).collect()).collect();
+    let audio = crate::audio::Audio::from_vec(&chs);
+    for (name, s) in [
+        ("f32.wav", ExportSettings { container: Container::Wav, wav: WavFormat::Float32, ..Default::default() }),
+        ("i24.wav", ExportSettings { container: Container::Wav, wav: WavFormat::Pcm24, dither: false, ..Default::default() }),
+        ("s16.flac", ExportSettings { container: Container::Flac, flac_bits: 16, dither: false, ..Default::default() }),
+    ] {
+        let a = dir().join(format!("plain-{name}"));
+        let b = dir().join(format!("chunked-{name}"));
+        save(&a, &chs, 48000, &s, &Metadata::default(), &[], &Progress::default()).unwrap();
+        save_audio(&b, &audio, 48000, &s, &Metadata::default(), &[], &Progress::default()).unwrap();
+        assert_eq!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap(), "{name}");
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
 }

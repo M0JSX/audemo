@@ -17,7 +17,9 @@ pub const OPEN_EXTENSIONS: &[&str] = &[
 
 pub struct Decoded {
     pub sample_rate: u32,
-    pub channels: Vec<Vec<f32>>,
+    /// The samples, built a chunk at a time as they're decoded (a long file
+    /// is never held as one buffer).
+    pub audio: crate::audio::Audio,
     pub bits: Option<u32>,
     pub meta: crate::export::Metadata,
     /// Markers stored in the file (WAV cue points): (frame, name).
@@ -93,7 +95,9 @@ pub fn load(path: &Path) -> Result<Decoded, String> {
     let (track_id, rate, bits, mut decoder) = found.ok_or(last_err)?;
     let mut sample_rate = rate.unwrap_or(44100);
 
-    let mut channels: Vec<Vec<f32>> = Vec::new();
+    let mut builder: Option<crate::audio::Builder> = None;
+    let mut sb: Option<SampleBuffer<f32>> = None;
+    let (mut sb_frames, mut sb_ch) = (0usize, 0usize);
     loop {
         let packet = match format.next_packet() {
             Ok(p) => p,
@@ -109,35 +113,27 @@ pub fn load(path: &Path) -> Result<Decoded, String> {
                 let spec = *decoded.spec();
                 let n_ch = spec.channels.count().max(1);
                 sample_rate = spec.rate;
-                if channels.is_empty() {
-                    channels = vec![Vec::new(); n_ch];
-                }
+                // Up to eight channels (7.1) are kept.
+                let b = builder.get_or_insert_with(|| crate::audio::Builder::new(n_ch.min(8)));
                 let frames = decoded.capacity() as u64;
-                let mut sb = SampleBuffer::<f32>::new(frames, spec);
-                sb.copy_interleaved_ref(decoded);
-                for frame in sb.samples().chunks(n_ch) {
-                    for (c, s) in frame.iter().enumerate() {
-                        if let Some(ch) = channels.get_mut(c) {
-                            ch.push(*s);
-                        }
-                    }
+                // One sample buffer, replaced only if a packet needs more room.
+                if sb.is_none() || decoded.capacity() > sb_frames || n_ch != sb_ch {
+                    sb = Some(SampleBuffer::<f32>::new(frames, spec));
+                    sb_frames = decoded.capacity();
+                    sb_ch = n_ch;
                 }
+                let s = sb.as_mut().unwrap();
+                s.copy_interleaved_ref(decoded);
+                b.push_interleaved(s.samples(), n_ch);
             }
             Err(SymError::DecodeError(_)) => continue,
             Err(e) => return Err(format!("Decode error: {e}")),
         }
     }
-    if channels.is_empty() || channels[0].is_empty() {
+    let Some(builder) = builder.filter(|b| !b.is_empty()) else {
         return Err("The file contains no audio samples.".into());
-    }
-    // Up to eight channels (7.1) are kept.
-    if channels.len() > 8 {
-        channels.truncate(8);
-    }
-    let len = channels.iter().map(|c| c.len()).min().unwrap_or(0);
-    for c in channels.iter_mut() {
-        c.truncate(len);
-    }
+    };
+    let mut audio = builder.finish();
     // MPEG-4 audio: apply the edit list (encoder delay and padding), which
     // the decoder leaves in.
     if matches!(crate::export::Container::from_path(path), Some(crate::export::Container::M4a)) {
@@ -145,16 +141,13 @@ pub fn load(path: &Path) -> Result<Decoded, String> {
             let scale = sample_rate as f64 / ts.max(1) as f64;
             let skip = (skip as f64 * scale).round() as usize;
             let dur = (dur as f64 * scale).round() as usize;
-            let len = channels[0].len();
+            let len = audio.len();
             if skip < len && dur > 0 && skip + dur <= len + 4096 {
-                for c in channels.iter_mut() {
-                    c.drain(..skip);
-                    c.truncate(dur);
-                }
+                audio = audio.crop(skip, (skip + dur).min(len));
             }
         }
     }
-    let len = channels[0].len();
+    let len = audio.len();
     if let Some(total) = track_total {
         let n = meta.get(crate::export::Tag::Track).to_string();
         if !n.is_empty() && !n.contains('/') && !total.trim().is_empty() {
@@ -174,7 +167,7 @@ pub fn load(path: &Path) -> Result<Decoded, String> {
             }
         }
     }
-    Ok(Decoded { sample_rate, channels, bits, meta, markers })
+    Ok(Decoded { sample_rate, audio, bits, meta, markers })
 }
 
 /// The first audio track's edit: (media frames to skip, frames to play,
