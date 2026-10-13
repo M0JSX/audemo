@@ -59,6 +59,8 @@ pub enum MtDrag {
     Select(usize),
     /// An automation point: (track, pan envelope?, point index).
     EnvPoint(usize, EnvKey, usize),
+    /// A clip envelope point: (clip, volume? (else pan), point index).
+    ClipEnv(u64, bool, usize),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -95,6 +97,9 @@ pub enum ClipCmd {
     SetTempo { bpm: f64, beats_per_bar: u32, metronome_db: f32 },
     ToggleMetronome,
     ToggleGrid,
+    ToggleClipEnv,
+    /// Clear the selected clips' volume (true) or pan (false) envelope.
+    ClearClipEnv(bool),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,6 +160,66 @@ fn env_area(lane: Rect) -> Rect {
 }
 
 const VOL_ENV_COL: Color32 = Color32::from_rgb(0xf2, 0xc2, 0x30);
+
+// Clip envelopes: volume in dB from VOL_ENV_MAX (top) to silence (bottom),
+// pan from left (top) to right (bottom), drawn inside the clip.
+fn clip_env_y(vol: bool, v: f32, area: Rect) -> f32 {
+    let frac = if vol { (VOL_ENV_MAX - v) / (VOL_ENV_MAX - VOL_ENV_MIN) } else { (v + 100.0) / 200.0 };
+    area.top() + frac.clamp(0.0, 1.0) * area.height()
+}
+
+fn clip_env_value(vol: bool, y: f32, area: Rect) -> f32 {
+    let frac = ((y - area.top()) / area.height().max(1.0)).clamp(0.0, 1.0);
+    if vol {
+        let db = VOL_ENV_MAX - frac * (VOL_ENV_MAX - VOL_ENV_MIN);
+        // A little stickiness at unity.
+        if db.abs() < 0.4 {
+            0.0
+        } else {
+            (db * 10.0).round() / 10.0
+        }
+    } else {
+        let p = (frac * 200.0 - 100.0).round();
+        if p.abs() <= 3.0 {
+            0.0
+        } else {
+            p
+        }
+    }
+}
+
+fn clip_env_label(vol: bool, v: f32) -> String {
+    if vol {
+        if v <= VOL_ENV_MIN {
+            "Clip volume: −∞ dB".into()
+        } else {
+            format!("Clip volume: {v:+.1} dB")
+        }
+    } else if v.abs() < 0.5 {
+        "Clip pan: centre".into()
+    } else if v < 0.0 {
+        format!("Clip pan: L{:.0}", -v)
+    } else {
+        format!("Clip pan: R{v:.0}")
+    }
+}
+
+/// The line for a clip envelope across the clip's rect: its values at the
+/// clip's edges and at each point inside.
+fn clip_env_line(c: &Clip, vol: bool, area: Rect, v: &TView) -> Vec<egui::Pos2> {
+    let e = if vol { &c.vol_env } else { &c.pan_env };
+    let at = |i: usize| e.value_at(c.env_pos(i)).unwrap_or(0.0);
+    let x_of = |i: i64| v.x((c.start as i64 + i) as f64);
+    let mut pts = vec![pos2(x_of(0), clip_env_y(vol, at(0), area))];
+    for (p, val) in &e.points {
+        let k = c.env_to_clip(*p);
+        if k > 0 && k < c.len as i64 {
+            pts.push(pos2(x_of(k), clip_env_y(vol, *val, area)));
+        }
+    }
+    pts.push(pos2(x_of(c.len as i64), clip_env_y(vol, at(c.len), area)));
+    pts
+}
 const PAN_ENV_COL: Color32 = Color32::from_rgb(0x4d, 0xa3, 0xff);
 
 /// An automation line: track volume, pan, or one of its extra lanes.
@@ -909,7 +974,7 @@ impl App {
 
     fn mt_clip_cmd(&mut self, si: usize, cmd: ClipCmd) {
         let sel: Vec<u64> = self.sessions[si].selected_clips.iter().copied().collect();
-        let need_clips = !matches!(cmd, ClipCmd::Bounce(BounceKind::Track) | ClipCmd::Bounce(BounceKind::TimeSelection) | ClipCmd::ShowEssential | ClipCmd::TempoDialog | ClipCmd::ExportXml | ClipCmd::SetTempo { .. } | ClipCmd::ToggleMetronome | ClipCmd::ToggleGrid);
+        let need_clips = !matches!(cmd, ClipCmd::Bounce(BounceKind::Track) | ClipCmd::Bounce(BounceKind::TimeSelection) | ClipCmd::ShowEssential | ClipCmd::TempoDialog | ClipCmd::ExportXml | ClipCmd::SetTempo { .. } | ClipCmd::ToggleMetronome | ClipCmd::ToggleGrid | ClipCmd::ToggleClipEnv);
         if need_clips && sel.is_empty() {
             self.set_status("Select one or more clips first.");
             return;
@@ -1018,6 +1083,24 @@ impl App {
                 let s = &mut self.sessions[si];
                 s.show_grid = !s.show_grid;
                 s.dirty = true;
+            }
+            ClipCmd::ToggleClipEnv => {
+                self.prefs.mt_clip_env = !self.prefs.mt_clip_env;
+                self.prefs.save();
+            }
+            ClipCmd::ClearClipEnv(vol) => {
+                let s = &mut self.sessions[si];
+                s.push_undo(if vol { "Clear Clip Volume Envelope" } else { "Clear Clip Pan Envelope" });
+                for id in &sel {
+                    if let Some(c) = s.clip_mut(*id) {
+                        if vol {
+                            c.vol_env.points.clear();
+                        } else {
+                            c.pan_env.points.clear();
+                        }
+                    }
+                }
+                s.touch();
             }
         }
     }
@@ -1137,6 +1220,14 @@ impl App {
             s.sources.insert(sid, Arc::new(Source { id: sid, name: name.clone(), doc_id: None, doc_version: 0, path: None, audio, peaks }));
             let ratio = len as f64 / c.len.max(1) as f64;
             if let Some(cm) = s.clip_mut(cid) {
+                // The automation stays with the audio: rescale it into the new source.
+                let off = cm.offset as f64;
+                for e in [&mut cm.vol_env, &mut cm.pan_env] {
+                    for p in e.points.iter_mut() {
+                        p.0 = ((p.0 as f64 - off) * ratio).max(0.0).round() as usize;
+                    }
+                    e.points.dedup_by_key(|p| p.0);
+                }
                 cm.source = sid;
                 cm.offset = 0;
                 cm.len = len;
@@ -1897,6 +1988,7 @@ impl App {
 
     fn mt_editor(&mut self, ui: &mut Ui, si: usize) {
         let (show_names, wheel_base) = (self.prefs.show_clip_names, self.wheel_base());
+        let show_cenv = self.prefs.mt_clip_env;
         let full = ui.available_rect_before_wrap();
         ui.allocate_rect(full, Sense::hover());
         if full.width() < 300.0 || full.height() < 100.0 {
@@ -2037,6 +2129,29 @@ impl App {
                 let r = Rect::from_min_max(pos2(x0, lane.top() + 1.0), pos2(x1.max(x0 + 2.0), lane.bottom() - 1.0));
                 let selected = s.selected_clips.contains(&c.id);
                 draw_clip(&clip_painter, r, c, s.sources.get(&c.source).map(|a| a.as_ref()), colour(t.colour), selected, t.mute || c.mute, &v, lane, show_names);
+                if show_cenv && r.width() > 6.0 && r.height() > CLIP_BAR + 12.0 {
+                    let area = env_area(r);
+                    let cr = clip_painter.with_clip_rect(r.intersect(lanes.intersect(body)));
+                    for vol in [false, true] {
+                        let e = if vol { &c.vol_env } else { &c.pan_env };
+                        let col = if vol { VOL_ENV_COL } else { PAN_ENV_COL };
+                        let pts = clip_env_line(c, vol, area, &v);
+                        if e.is_empty() {
+                            cr.add(Shape::line(pts, Stroke::new(1.0_f32, col.linear_multiply(0.45))));
+                            continue;
+                        }
+                        cr.add(Shape::line(pts, Stroke::new(1.5_f32, col)));
+                        for (p, val) in &e.points {
+                            let k = c.env_to_clip(*p);
+                            if k < 0 || k > c.len as i64 {
+                                continue;
+                            }
+                            let ctr = pos2(v.x((c.start as i64 + k) as f64), clip_env_y(vol, *val, area));
+                            cr.circle_filled(ctr, 3.5, col);
+                            cr.circle_stroke(ctr, 3.5, Stroke::new(1.0_f32, Color32::BLACK));
+                        }
+                    }
+                }
             }
             // Automatic crossfades where clips overlap.
             for (ia, ib) in crossfade_pairs(&t.clips) {
@@ -2196,9 +2311,59 @@ impl App {
             None
         };
         let env_area_of = |ti: usize| env_area(Rect::from_min_max(pos2(lanes_x, rows[ti].top()), rows[ti].max));
+        // Where a clip's envelopes are drawn.
+        let clip_env_area = |s: &Session, id: u64| -> Option<Rect> {
+            let (ti, ci) = s.find_clip(id)?;
+            let c = &s.tracks[ti].clips[ci];
+            let row = rows[ti];
+            let (x0, x1) = (v.x(c.start as f64), v.x(c.end() as f64));
+            Some(env_area(Rect::from_min_max(pos2(x0, row.top() + 1.0), pos2(x1.max(x0 + 2.0), row.bottom() - 1.0))))
+        };
+        // Clip envelopes: points always; lines once they have points (an
+        // empty line takes a double-click, so clicks on clips still select
+        // and move them).
+        let clip_env_hit = |p: egui::Pos2, s: &Session, empty_too: bool| -> Option<(u64, bool, EnvHit)> {
+            if !show_cenv {
+                return None;
+            }
+            let (_, Some((id, zone))) = hit(p, s)? else { return None };
+            let c = s.clip(id)?;
+            let area = clip_env_area(s, id)?;
+            if area.height() < 10.0 {
+                return None;
+            }
+            for vol in [true, false] {
+                let e = if vol { &c.vol_env } else { &c.pan_env };
+                for (i, (pp, val)) in e.points.iter().enumerate() {
+                    let k = c.env_to_clip(*pp);
+                    if k < 0 || k > c.len as i64 {
+                        continue;
+                    }
+                    let ctr = pos2(v.x((c.start as i64 + k) as f64), clip_env_y(vol, *val, area));
+                    if (ctr.x - p.x).abs() <= 6.0 && (ctr.y - p.y).abs() <= 6.0 {
+                        return Some((id, vol, EnvHit::Point(i)));
+                    }
+                }
+            }
+            if matches!(zone, Zone::FadeIn | Zone::FadeOut) {
+                return None;
+            }
+            let i = (v.s(p.x) - c.start as f64).clamp(0.0, c.len as f64) as usize;
+            for vol in [true, false] {
+                let e = if vol { &c.vol_env } else { &c.pan_env };
+                if e.is_empty() && !empty_too {
+                    continue;
+                }
+                let val = e.value_at(c.env_pos(i)).unwrap_or(0.0);
+                if (clip_env_y(vol, val, area) - p.y).abs() <= 4.0 {
+                    return Some((id, vol, EnvHit::Line));
+                }
+            }
+            None
+        };
         // Cursor shape.
         if let Some(p) = pointer.filter(|p| lane_area.contains(*p)) {
-            if self.mt.drag.is_none() && env_hit(p, s).is_some() {
+            if self.mt.drag.is_none() && (env_hit(p, s).is_some() || clip_env_hit(p, s, false).is_some()) {
                 ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
             } else if self.mt.drag.is_none() {
                 match hit(p, s) {
@@ -2231,8 +2396,28 @@ impl App {
             let origin = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos());
             if let Some(p) = origin {
                 let pos = v.s(p.x).max(0.0);
-                let env = env_hit(p, s);
-                if let Some((ti, key, h)) = env {
+                let mut env = env_hit(p, s);
+                if env.is_none() {
+                    if let Some((id, vol, h)) = clip_env_hit(p, s, false) {
+                        s.push_undo("Clip Automation");
+                        let area = clip_env_area(s, id).unwrap();
+                        let c = s.clip_mut(id).unwrap();
+                        let idx = match h {
+                            EnvHit::Point(i) => i,
+                            EnvHit::Line => {
+                                let i = (pos - c.start as f64).clamp(0.0, c.len as f64) as usize;
+                                let at = c.env_pos(i);
+                                let e = if vol { &mut c.vol_env } else { &mut c.pan_env };
+                                e.insert(at, clip_env_value(vol, p.y, area))
+                            }
+                        };
+                        s.touch();
+                        self.mt.drag = Some(MtDrag::ClipEnv(id, vol, idx));
+                        // Handled: keep the clip code below from acting too.
+                        env = Some((usize::MAX, EnvKey::Vol, EnvHit::Line));
+                    }
+                }
+                if let Some((ti, key, h)) = env.filter(|e| e.0 != usize::MAX) {
                     s.selected_track = ti;
                     s.push_undo("Automation");
                     let idx = match h {
@@ -2373,6 +2558,20 @@ impl App {
                             painter.text(p + vec2(14.0, -14.0), Align2::LEFT_BOTTOM, label, FontId::monospace(11.0), Color32::from_rgb(0xf2, 0xc2, 0x30));
                         }
                     }
+                    MtDrag::ClipEnv(id, vol, idx) => {
+                        let (id, vol, idx) = (*id, *vol, *idx);
+                        if let Some(area) = clip_env_area(s, id) {
+                            if let Some(c) = s.clip_mut(id) {
+                                let i = (pos - c.start as f64).clamp(0.0, c.len as f64) as usize;
+                                let at = c.env_pos(i);
+                                let val = clip_env_value(vol, p.y, area);
+                                let e = if vol { &mut c.vol_env } else { &mut c.pan_env };
+                                e.move_point(idx, at, val);
+                                s.touch();
+                                painter.text(p + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, clip_env_label(vol, val), FontId::monospace(11.0), if vol { VOL_ENV_COL } else { PAN_ENV_COL });
+                            }
+                        }
+                    }
                     MtDrag::EnvPoint(ti, key, idx) => {
                         let (ti, key, idx) = (*ti, *key, *idx);
                         if ti < s.tracks.len() {
@@ -2438,7 +2637,34 @@ impl App {
         if resp.double_clicked() {
             let p = resp.interact_pointer_pos();
             let env = p.and_then(|p| env_hit(p, s));
-            if let Some((ti, key, EnvHit::Point(i))) = env {
+            let cenv = if env.is_none() { p.and_then(|p| clip_env_hit(p, s, true)) } else { None };
+            if let Some((id, vol, h)) = cenv {
+                let area = clip_env_area(s, id);
+                if let (Some(c), Some(area), Some(p)) = (s.clip(id).cloned(), area, p) {
+                    s.push_undo(if matches!(h, EnvHit::Point(_)) { "Delete Clip Automation Point" } else { "Clip Automation" });
+                    let c2 = s.clip_mut(id).unwrap();
+                    let e = if vol { &mut c2.vol_env } else { &mut c2.pan_env };
+                    match h {
+                        EnvHit::Point(i) => {
+                            e.points.remove(i);
+                        }
+                        EnvHit::Line => {
+                            let i = (v.s(p.x) - c.start as f64).clamp(0.0, c.len as f64) as usize;
+                            // A first point also pins the far edge, so the
+                            // line only bends where the user clicked.
+                            if e.is_empty() {
+                                e.insert(c.env_pos(0), 0.0);
+                                e.insert(c.env_pos(c.len), 0.0);
+                            }
+                            let at = c.env_pos(i);
+                            if !e.points.iter().any(|q| q.0 == at) {
+                                e.insert(at, clip_env_value(vol, p.y, area));
+                            }
+                        }
+                    }
+                    s.touch();
+                }
+            } else if let Some((ti, key, EnvHit::Point(i))) = env {
                 s.push_undo("Delete Automation Point");
                 env_of_mut(&mut s.tracks[ti], key).points.remove(i);
                 s.touch();
@@ -3104,6 +3330,22 @@ impl App {
                     menu_action = Some(Action::MtClip(ClipCmd::Bounce(BounceKind::Clips)));
                     ui.close_menu();
                 }
+                ui.menu_button("Clip Envelopes", |ui| {
+                    let mut shown = show_cenv;
+                    if ui.checkbox(&mut shown, "Show Clip Envelopes").on_hover_text("Volume (yellow) and pan (blue) lines on each clip. Double-click a line to add a point; drag points; double-click a point to remove it.").changed() {
+                        menu_action = Some(Action::MtClip(ClipCmd::ToggleClipEnv));
+                        ui.close_menu();
+                    }
+                    let (hv, hp) = c0.as_ref().map(|c| (!c.vol_env.is_empty(), !c.pan_env.is_empty())).unwrap_or((false, false));
+                    if ui.add_enabled(hv, egui::Button::new("Clear Volume Envelope")).clicked() {
+                        menu_action = Some(Action::MtClip(ClipCmd::ClearClipEnv(true)));
+                        ui.close_menu();
+                    }
+                    if ui.add_enabled(hp, egui::Button::new("Clear Pan Envelope")).clicked() {
+                        menu_action = Some(Action::MtClip(ClipCmd::ClearClipEnv(false)));
+                        ui.close_menu();
+                    }
+                });
                 if let Some(c) = s.clip_mut(id) {
                     ui.separator();
                     let mut mute = c.mute;

@@ -485,6 +485,34 @@ fn fade_attrs(len: usize, curve: f32, cos: bool) -> (&'static str, i32) {
     }
 }
 
+/// A clip envelope as keyframes relative to the clip's start: the points
+/// inside the clip, plus its values at the edges when points lie beyond them.
+fn clip_keys(c: &Clip, e: &Envelope, map: impl Fn(f32) -> f64) -> Option<String> {
+    if e.is_empty() {
+        return None;
+    }
+    let mut pts: Vec<(usize, f64)> = Vec::new();
+    let first = c.env_to_clip(e.points[0].0);
+    let last = c.env_to_clip(e.points[e.points.len() - 1].0);
+    if first < 0 && last > 0 {
+        pts.push((0, map(e.value_at(c.env_pos(0)).unwrap_or(0.0))));
+    }
+    for (p, v) in &e.points {
+        let k = c.env_to_clip(*p);
+        if k >= 0 && k <= c.len as i64 {
+            pts.push((k as usize, map(*v)));
+        }
+    }
+    if last > c.len as i64 && pts.last().map(|p| p.0 < c.len).unwrap_or(true) {
+        pts.push((c.len, map(e.value_at(c.env_pos(c.len)).unwrap_or(0.0))));
+    }
+    if pts.is_empty() {
+        // Every point lies on one side of the clip: it holds that value.
+        pts.push((0, map(e.value_at(c.env_pos(0)).unwrap_or(0.0))));
+    }
+    Some(keyframes(&pts))
+}
+
 fn track_params(t: &Track, output: &str, input: &str, master: bool) -> String {
     let (gf, gm, gp) = if master { (GUID_MASTER_FADER, GUID_MASTER_MUTE, GUID_MASTER_PAN) } else { (GUID_TRACK_FADER, GUID_TRACK_MUTE, GUID_TRACK_PAN) };
     let vol_keys = (!t.vol_env.points.is_empty()).then(|| keyframes(&t.vol_env.points.iter().map(|(p, db)| (*p, gain_to_fader(db_to_lin(*db)))).collect::<Vec<_>>()));
@@ -584,7 +612,8 @@ pub fn to_sesx(s: &Session, paths: &BTreeMap<u64, PathBuf>, base: &Path) -> Stri
                 c.start
             );
             tracks += &format!("          <component componentGuid=\"{GUID_CLIP_FADER}\" componentID=\"Audition.Fader\" id=\"clipGain\" name=\"volume\" powered=\"true\">\n");
-            tracks += &param(0, "volume", db_to_lin(c.gain_db), None);
+            let vol_keys = clip_keys(c, &c.vol_env, |db| gain_to_fader(session::env_gain(db) as f64));
+            tracks += &param(0, "volume", db_to_lin(c.gain_db), vol_keys);
             tracks += &param(1, "static gain", 1.0, None);
             tracks += "          </component>\n";
             tracks += &format!("          <component componentGuid=\"{GUID_CLIP_MUTE}\" componentID=\"Audition.Mute\" id=\"clipMute\" name=\"Mute\" powered=\"true\">\n");
@@ -592,7 +621,8 @@ pub fn to_sesx(s: &Session, paths: &BTreeMap<u64, PathBuf>, base: &Path) -> Stri
             tracks += &param(1, "mute", m, None);
             tracks += "          </component>\n";
             tracks += &format!("          <component componentGuid=\"{GUID_CLIP_PAN}\" componentID=\"Audition.StereoPanner\" id=\"clipPan\" name=\"StereoPanner\" powered=\"true\">\n");
-            tracks += &param(0, "Pan", 0.0, None);
+            let pan_keys = clip_keys(c, &c.pan_env, |v| ((v as f64 / 100.0) + 1.0) / 2.0);
+            tracks += &param(0, "Pan", 0.0, pan_keys);
             tracks += "          </component>\n";
             tracks += &format!("          <fadeIn crossFadeLinkType=\"linkedAsymmetric\" endPoint=\"{}\" shape=\"{fi_s}\" startPoint=\"0\" type=\"{fi_t}\"/>\n", c.fade_in.min(c.len));
             tracks += &format!("          <fadeOut crossFadeLinkType=\"linkedAsymmetric\" endPoint=\"{}\" shape=\"{fo_s}\" startPoint=\"{}\" type=\"{fo_t}\"/>\n", c.len, c.len - c.fade_out.min(c.len));
@@ -791,11 +821,23 @@ pub fn from_sesx(id: u64, text: &str, base: Option<&Path>, effects: &[EffectDef]
             let (fade_in, fade_in_curve, fade_in_cos) = fade_curve(c.child("fadeIn"));
             let (fade_out, fade_out_curve, fade_out_cos) = fade_curve(c.child("fadeOut"));
             let mut gain_db = 0.0;
+            let offset = c.num("sourceInPoint").unwrap_or(0.0).max(0.0) as usize;
+            // Clip keyframes count from the clip's start; Audemo keeps them in source positions.
+            let mut vol_env = Envelope::default();
+            let mut pan_env = Envelope::default();
             if let Some(g) = component(c, "clipGain") {
-                if let Some((v, _)) = read_param(g, 0) {
+                if let Some((v, keys)) = read_param(g, 0) {
                     gain_db = lin_to_db(v * read_param(g, 1).map(|x| x.0).unwrap_or(1.0)).clamp(-96.0, 24.0);
+                    vol_env.points = keys.iter().map(|(p, v)| (p + offset, lin_to_db(fader_to_gain(*v)).clamp(session::VOL_ENV_MIN, session::VOL_ENV_MAX))).collect();
                 }
             }
+            if let Some(pc) = component(c, "clipPan") {
+                if let Some((_, keys)) = read_param(pc, 0) {
+                    pan_env.points = keys.iter().map(|(p, v)| (p + offset, ((*v as f32) * 2.0 - 1.0).clamp(-1.0, 1.0) * 100.0)).collect();
+                }
+            }
+            vol_env.points.sort_by_key(|p| p.0);
+            pan_env.points.sort_by_key(|p| p.0);
             let mute = component(c, "clipMute").and_then(|m| read_param(m, 1).or_else(|| read_param(m, 0))).map(|x| x.0 >= 0.5).unwrap_or(false);
             let cid = s.new_id();
             t.clips.push(Clip {
@@ -803,7 +845,7 @@ pub fn from_sesx(id: u64, text: &str, base: Option<&Path>, effects: &[EffectDef]
                 source: sid,
                 name: c.attr("name").unwrap_or("Clip").to_string(),
                 start,
-                offset: c.num("sourceInPoint").unwrap_or(0.0).max(0.0) as usize,
+                offset,
                 len,
                 gain_db,
                 fade_in: fade_in.min(len),
@@ -820,6 +862,8 @@ pub fn from_sesx(id: u64, text: &str, base: Option<&Path>, effects: &[EffectDef]
                 fx_on: true,
                 stretch: 100.0,
                 es: None,
+                vol_env,
+                pan_env,
             });
         }
         t.clips.sort_by_key(|c| c.start);
@@ -970,6 +1014,8 @@ mod tests {
             id: cid, source: sid, name: "Take & 2".into(), start: 1000, offset: 500, len: 20000, gain_db: 2.0,
             fade_in: 1000, fade_out: 2000, fade_in_curve: 0.4, fade_out_curve: 0.0, fade_in_cos: false, fade_out_cos: true,
             mute: false, group: 7, looped: true, locked: false, fx: Vec::new(), fx_on: true, stretch: 100.0, es: None,
+            vol_env: Envelope { points: vec![(500, 0.0), (10500, -6.0)] },
+            pan_env: Envelope { points: vec![(0, -100.0), (20500, 50.0)] },
         });
         s.tracks.push(t);
         s.tempo = 140.0;
@@ -988,6 +1034,8 @@ mod tests {
         let back = from_sesx(9, &xml, Some(base), &[]).unwrap();
         let c = &back.session.tracks[0].clips[0];
         assert_eq!((c.start, c.offset, c.len, c.group), (1000, 500, 20000, 7));
+        assert_eq!(c.vol_env, s.tracks[0].clips[0].vol_env);
+        assert_eq!(c.pan_env, s.tracks[0].clips[0].pan_env);
         assert_eq!(back.session.markers, s.markers);
         // Marker edits undo with the rest of the session.
         let mut s3 = back.session;
@@ -1019,5 +1067,15 @@ mod tests {
         assert_eq!((c2.fade_in, c2.fade_out, c2.fade_out_cos), (1000, 2000, true));
         assert!((c2.fade_in_curve - 0.4).abs() < 0.01);
         assert_eq!(c2.name, "Take & 2");
+        // Clip automation: keyframes count from the clip's start in the XML.
+        assert!(xml.contains("sampleOffset=\"10000\""));
+        let v: Vec<usize> = c2.vol_env.points.iter().map(|p| p.0).collect();
+        assert_eq!(v, vec![500, 10500]);
+        assert!(c2.vol_env.points[0].1.abs() < 0.05 && (c2.vol_env.points[1].1 + 6.0).abs() < 0.05);
+        // The pan point before the clip becomes the clip's value at its start.
+        assert_eq!(c2.pan_env.points.len(), 2);
+        assert_eq!((c2.pan_env.points[0].0, c2.pan_env.points[1].0), (500, 20500));
+        assert!((c2.pan_env.points[0].1 - (-100.0 + 150.0 * 500.0 / 20500.0)).abs() < 0.1);
+        assert!((c2.pan_env.points[1].1 - 50.0).abs() < 0.01);
     }
 }

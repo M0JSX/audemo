@@ -218,6 +218,8 @@ impl App {
                         let (grid, metro) = self.session().map(|s| (s.show_grid, s.metronome_on)).unwrap_or((false, false));
                         if item(ui, if grid { "✓ Show Beat Grid" } else { "Show Beat Grid" }, &km.label("mt_grid"), has_session) { self.actions.push(Action::MtClip(crate::mt_ui::ClipCmd::ToggleGrid)); }
                         if item(ui, if metro { "✓ Metronome" } else { "Metronome" }, &km.label("mt_metronome"), has_session) { self.actions.push(Action::MtClip(crate::mt_ui::ClipCmd::ToggleMetronome)); }
+                        let cenv = self.prefs.mt_clip_env;
+                        if item(ui, if cenv { "✓ Show Clip Envelopes" } else { "Show Clip Envelopes" }, &km.label("mt_clip_env"), has_session) { self.actions.push(Action::MtClip(crate::mt_ui::ClipCmd::ToggleClipEnv)); }
                         ui.menu_button("Bounce to New Track", |ui| {
                             use crate::mt_ui::{BounceKind as B, ClipCmd as C};
                             if item(ui, "Selected Track", &km.label("mt_bounce"), in_mt) { self.actions.push(Action::MtClip(C::Bounce(B::Track))); }

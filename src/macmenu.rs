@@ -182,6 +182,7 @@ impl NativeMenu {
         let _ = multitrack.append(&item("mt_xml", "Export to Premiere Pro (FCP XML)…", None));
         let _ = multitrack.append(&item("mt_tempo", "Tempo and Metronome…", None));
         let _ = multitrack.append(&item("mt_grid", "Show/Hide Beat Grid", ka(app, "mt_grid")));
+        let _ = multitrack.append(&item("mt_clip_env", "Show/Hide Clip Envelopes", ka(app, "mt_clip_env")));
         let _ = multitrack.append(&item("mt_metronome", "Metronome On/Off", ka(app, "mt_metronome")));
         let bounce = Submenu::new("Bounce to New Track", true);
         for (id, label) in [("mt_bounce", "Selected Track"), ("mt_bounce_sel", "Time Selection in Selected Track"), ("mt_bounce_clips", "Selected Clips")] {

@@ -218,6 +218,7 @@ pub const COMMANDS: &[Command] = &[
     c("mt_bounce_sel", "Bounce Time Selection to New Track", "Multitrack", &[]),
     c("mt_bounce_clips", "Bounce Selected Clips to New Track", "Multitrack", &[]),
     c("mt_grid", "Show Beat Grid", "Multitrack", &[]),
+    c("mt_clip_env", "Show Clip Envelopes", "Multitrack", &[]),
     c("mt_metronome", "Metronome On/Off", "Multitrack", &[]),
 ];
 
@@ -296,6 +297,7 @@ pub fn action(id: &str) -> Option<Action> {
         "mt_bounce_sel" => Action::MtClip(ClipCmd::Bounce(BounceKind::TimeSelection)),
         "mt_bounce_clips" => Action::MtClip(ClipCmd::Bounce(BounceKind::Clips)),
         "mt_grid" => Action::MtClip(ClipCmd::ToggleGrid),
+        "mt_clip_env" => Action::MtClip(ClipCmd::ToggleClipEnv),
         "mt_metronome" => Action::MtClip(ClipCmd::ToggleMetronome),
         _ => return None,
     })

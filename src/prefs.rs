@@ -235,6 +235,8 @@ prefs! {
     memory_mb: u32 = 0,
     // Multitrack
     pan_law: PanLaw = PanLaw::LrCut,
+    /// Show clip volume and pan envelopes on multitrack clips.
+    mt_clip_env: bool = true,
     // Multitrack clips
     auto_crossfade: bool = true,
     crossfade_curve: FadeCurve = FadeCurve::Linear,

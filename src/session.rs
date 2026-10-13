@@ -99,9 +99,44 @@ pub struct Clip {
     pub stretch: f32,
     /// Essential Sound type and settings.
     pub es: Option<Box<crate::essential::Essential>>,
+    /// Clip volume automation (dB; at or below VOL_ENV_MIN is silence).
+    /// Positions are in the clip's source (offset + samples into the clip,
+    /// not wrapped when looping), so the automation stays with the audio
+    /// when the clip is trimmed or split.
+    pub vol_env: Envelope,
+    /// Clip pan automation (−100 left … 100 right, a balance: centre leaves
+    /// both sides at unity). Positions as for `vol_env`.
+    pub pan_env: Envelope,
 }
 
 impl Clip {
+    /// Envelope position for `i` samples into the clip.
+    pub fn env_pos(&self, i: usize) -> usize {
+        self.offset + i
+    }
+
+    /// Samples into the clip for an envelope position (may fall outside it).
+    pub fn env_to_clip(&self, pos: usize) -> i64 {
+        pos as i64 - self.offset as i64
+    }
+
+    /// Clip volume automation gain at `i` samples into the clip.
+    pub fn env_gain_at(&self, i: usize) -> f32 {
+        self.vol_env.value_at(self.env_pos(i)).map(env_gain).unwrap_or(1.0)
+    }
+
+    /// Clip pan (left, right) gains at `i` samples into the clip.
+    pub fn pan_at(&self, i: usize) -> (f32, f32) {
+        match self.pan_env.value_at(self.env_pos(i)) {
+            Some(p) => balance_gains(p),
+            None => (1.0, 1.0),
+        }
+    }
+
+    pub fn has_env(&self) -> bool {
+        !self.vol_env.is_empty() || !self.pan_env.is_empty()
+    }
+
     pub fn end(&self) -> usize {
         self.start + self.len
     }
@@ -133,6 +168,9 @@ impl Clip {
         if self.fade_out > 0 && i + self.fade_out > self.len {
             let r = (self.len - i) as f32 / self.fade_out as f32;
             g *= fade_shape(r.min(1.0), self.fade_out_curve, self.fade_out_cos);
+        }
+        if !self.vol_env.is_empty() {
+            g *= self.env_gain_at(i);
         }
         g
     }
@@ -250,6 +288,18 @@ pub fn pan_gains(pan: f32) -> (f32, f32) {
         let th = (p + 1.0) * std::f32::consts::FRAC_PI_4;
         return (th.cos(), th.sin());
     }
+    let cut = |x: f32| (std::f32::consts::FRAC_PI_2 * x).cos();
+    if p >= 0.0 {
+        (cut(p), 1.0)
+    } else {
+        (1.0, cut(-p))
+    }
+}
+
+/// Balance (left, right) for a clip pan of −100…100: centre is unity on
+/// both sides, and the far side fades out as the pan moves away from it.
+pub fn balance_gains(pan: f32) -> (f32, f32) {
+    let p = (pan / 100.0).clamp(-1.0, 1.0);
     let cut = |x: f32| (std::f32::consts::FRAC_PI_2 * x).cos();
     if p >= 0.0 {
         (cut(p), 1.0)
@@ -922,6 +972,8 @@ impl Session {
             fx_on: true,
             stretch: 100.0,
             es: None,
+            vol_env: Envelope::default(),
+            pan_env: Envelope::default(),
         });
         self.selected_clips.clear();
         self.selected_clips.insert(id);
@@ -1013,13 +1065,20 @@ impl Session {
     pub fn clip_audio(&self, id: u64) -> Option<Vec<Vec<f32>>> {
         let c = self.clip(id)?;
         let src = self.sources.get(&c.source)?;
-        let n = src.audio.len().clamp(1, 2);
+        let pan = !c.pan_env.is_empty();
+        // Clip pan makes even a mono clip stereo.
+        let n = if pan { 2 } else { src.audio.len().clamp(1, 2) };
         let g = db_to_lin(c.gain_db);
         Some(
             (0..n)
                 .map(|ch| {
-                    let s = &src.audio[ch];
-                    (0..c.len).map(|i| c.source_index(i, s.len()).map(|k| s[k] * g * c.envelope(i)).unwrap_or(0.0)).collect()
+                    let s = &src.audio[ch.min(src.audio.len().saturating_sub(1))];
+                    (0..c.len)
+                        .map(|i| {
+                            let p = if pan { [c.pan_at(i).0, c.pan_at(i).1][ch] } else { 1.0 };
+                            c.source_index(i, s.len()).map(|k| s[k] * g * c.envelope(i) * p).unwrap_or(0.0)
+                        })
+                        .collect()
                 })
                 .collect(),
         )
@@ -1420,6 +1479,7 @@ pub fn mix_into(m: &MixState, a: usize, b: usize, out: &mut [Vec<f32>], peaks: &
                 let sl = &src.audio[0];
                 let sr = &src.audio[src.audio.len().min(2) - 1];
                 let cg = db_to_lin(c.gain_db);
+                let pan = !c.pan_env.is_empty();
                 // A clip with effects is rendered on its own, through its rack.
                 let own = c.fx_on && c.fx.iter().any(|f| f.on);
                 if own {
@@ -1434,8 +1494,14 @@ pub fn mix_into(m: &MixState, a: usize, b: usize, out: &mut [Vec<f32>], peaks: &
                     let Some(idx) = c.source_index(i, sl.len()) else { break };
                     let g = cg * c.envelope(i);
                     let k = t_pos - a;
-                    dl[k] += sl[idx] * g;
-                    dr[k] += sr[idx] * g;
+                    if pan {
+                        let (pl, pr) = c.pan_at(i);
+                        dl[k] += sl[idx] * g * pl;
+                        dr[k] += sr[idx] * g * pr;
+                    } else {
+                        dl[k] += sl[idx] * g;
+                        dr[k] += sr[idx] * g;
+                    }
                 }
                 if own {
                     run_rack(&c.fx, true, cl, cr, None);
@@ -1680,6 +1746,12 @@ pub fn to_text(s: &Session, paths: &BTreeMap<u64, PathBuf>, base: Option<&Path>)
             if let Some(es) = &c.es {
                 o.push_str(&format!("ess\t{}\n", es.to_text()));
             }
+            if !c.vol_env.is_empty() {
+                o.push_str(&format!("cvenv\t{}\n", c.vol_env.to_text()));
+            }
+            if !c.pan_env.is_empty() {
+                o.push_str(&format!("cpenv\t{}\n", c.pan_env.to_text()));
+            }
             for f in &c.fx {
                 o.push_str(&fx_line("cfx", f));
             }
@@ -1798,6 +1870,8 @@ pub fn from_text(id: u64, text: &str, base: Option<&Path>, effects: &[EffectDef]
                     fx_on: num(18).map(|v| v != 0.0).unwrap_or(true),
                     stretch: num(19).unwrap_or(100.0) as f32,
                     es: None,
+                    vol_env: Envelope::default(),
+                    pan_env: Envelope::default(),
                 };
                 let mut c = c;
                 c.len = c.len.max(1);
@@ -1837,6 +1911,19 @@ pub fn from_text(id: u64, text: &str, base: Option<&Path>, effects: &[EffectDef]
                         p.1 = p.1.clamp(min.min(max), max.max(min));
                     }
                     t.lanes.push(AutoLane { target, env, min, max, step: num(6).map(|v| v != 0.0).unwrap_or(false), name: f.get(7).unwrap_or(&"").to_string() });
+                }
+            }
+            "cvenv" | "cpenv" => {
+                if let Some(c) = s.tracks.last_mut().and_then(|t| t.clips.last_mut()) {
+                    let mut e = Envelope::parse(f.get(1).unwrap_or(&""));
+                    for p in e.points.iter_mut() {
+                        p.1 = if f[0] == "cvenv" { p.1.clamp(VOL_ENV_MIN, VOL_ENV_MAX) } else { p.1.clamp(-100.0, 100.0) };
+                    }
+                    if f[0] == "cvenv" {
+                        c.vol_env = e;
+                    } else {
+                        c.pan_env = e;
+                    }
                 }
             }
             "ess" => {
@@ -1918,6 +2005,46 @@ mod tests {
         s.tracks[1].solo = false;
         s.clip_mut(c).unwrap().mute = true;
         assert!(mix_range(&s.mix_state(), 0, 200)[0].iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn clip_envelopes_follow_the_audio() {
+        let (mut s, src) = session_with(vec![vec![0.5; 400]]);
+        let c = s.insert_clip(0, src, 100).unwrap();
+        {
+            let k = s.clip_mut(c).unwrap();
+            k.fade_in = 0;
+            k.fade_out = 0;
+            // Silence to unity over source samples 0..200, then hard right from 300.
+            k.vol_env = Envelope { points: vec![(0, VOL_ENV_MIN), (200, 0.0)] };
+            k.pan_env = Envelope { points: vec![(250, 0.0), (300, 100.0)] };
+        }
+        let m = mix_range(&s.mix_state(), 0, 600);
+        assert_eq!(m[0][100], 0.0, "silent at the start");
+        assert!((m[0][420] - 0.5 * balance_gains(100.0).0).abs() < 1e-4 && (m[1][420] - 0.5).abs() < 1e-4);
+        assert!((m[0][340] - 0.5).abs() < 1e-4, "unity, centre");
+        let mid = m[0][200];
+        assert!(mid > 0.0 && mid < 0.5);
+        // Trimming the start keeps the automation on the same audio.
+        s.trim_start(c, 150);
+        let m2 = mix_range(&s.mix_state(), 0, 600);
+        assert_eq!(m2[0][200], mid);
+        assert_eq!(m2[0][149], 0.0);
+        // Splitting: both halves keep their part.
+        s.selected_clips.clear();
+        s.selected_clips.insert(c);
+        s.split_at(380);
+        let m3 = mix_range(&s.mix_state(), 0, 600);
+        assert_eq!(m3[1][420], m2[1][420]);
+        assert!(m3[0][420].abs() < 1e-6, "right half still hard right");
+        // The clip's own audio carries pan as stereo.
+        let a = s.clip_audio(c).unwrap();
+        assert_eq!(a.len(), 2);
+        // Saved and reopened.
+        let text = to_text(&s, &Default::default(), None);
+        let back = from_text(2, &text, None, &[]).unwrap().session;
+        assert_eq!(back.clip(c).unwrap().vol_env, s.clip(c).unwrap().vol_env);
+        assert_eq!(back.clip(c).unwrap().pan_env, s.clip(c).unwrap().pan_env);
     }
 
     #[test]
