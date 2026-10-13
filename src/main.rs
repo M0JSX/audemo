@@ -27,6 +27,8 @@ mod prefs;
 mod prefs_ui;
 mod session;
 mod sesx;
+#[cfg(test)]
+mod sesx_pack;
 mod shortcuts;
 mod theme;
 mod tools_ui;

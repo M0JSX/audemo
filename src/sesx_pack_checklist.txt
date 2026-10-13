@@ -1,0 +1,77 @@
+AUDEMO -> AUDITION TEST PACK (Audemo 1.7)
+==========================================
+
+Six multitrack sessions saved by Audemo as Audition .sesx files, with the
+audio they use in the Audio folder. Keep the folder structure as it is.
+
+For each session: open it in Audition (File > Open), compare what you see
+with the list below, and note anything that's different. Then:
+
+  1. File > Save As, in the same folder, adding " (Audition)" to the name,
+     for example "04 Clip envelopes (Audition).sesx".
+  2. Also please make two small sessions in Audition itself and save them
+     here (these show exactly how Audition writes things Audemo can't
+     check by itself):
+       a) "07 Made in Audition.sesx": one track, one clip that you trim from
+          the left so it starts part-way into its file, with a few clip
+          volume keyframes and a few clip pan keyframes (View > Show Clip
+          Volume/Pan Envelopes), plus a few track volume keyframes.
+       b) "08 Surround.sesx": a new 5.1 session (File > New > Multitrack
+          Session, Master: 5.1) with one stereo track and one 5.1 track if
+          you have a 5.1 file, else any file. Move a track's surround
+          panner off centre. Then a 7.1 one if your Audition version has it.
+  3. Zip the folder (the Audio folder isn't needed) and send it back.
+
+Track names describe what each track should do, and clip names what each
+clip's envelope does. Times are session times in seconds unless noted.
+
+
+01 Basics
+---------
+[ ] Opens without errors or missing-file warnings.
+[ ] "Vol -6 Pan L50": volume -6 dB, pan L50.
+[ ] "Vol +3 Pan R100": volume +3 dB, pan R100; its clip has clip gain -6 dB.
+[ ] "Muted": track muted; clip "Clip gain +4.5" has +4.5 dB clip gain.
+[ ] "Solo": track soloed; clip "Muted clip" is muted.
+[ ] Clips start at 0 s, 4 s, 0 s and 2 s.
+
+02 Fades
+--------
+[ ] Five tracks, each a clip at 1 s with a 2 s fade in and 1.5 s fade out.
+[ ] Fade shapes match the track names: linear; log +50; log -50; log +100;
+    cosine. (Hover a fade handle to read its curve value.)
+
+03 Track automation
+-------------------
+[ ] "Volume 0 > -20 > +6 dB": volume keyframes at 1 s (0 dB), 3 s (-20),
+    5 s (-20) and 7 s (+6 dB).
+[ ] "Pan L100 > R100": pan keyframes at 1 s (L100), 4 s (R100), 5 s (C).
+[ ] Playing it, the tone dips and swells and the noise sweeps left to right.
+
+04 Clip envelopes
+-----------------
+The key question here is whether the keyframes sit at the right place,
+especially on the clip that starts part-way into its file.
+[ ] "Clip volume (untrimmed)": clip at 1 s; its volume envelope dips to
+    -18 dB between 2 s and 4 s into the clip (session 3 s to 5 s), with
+    half-second ramps.
+[ ] "Clip volume (trimmed start)": clip from 3 s to 7 s showing clicks
+    from 2 s into the file; its volume rises from silence at the clip's
+    start (3 s) to 0 dB one second later (4 s). The click at 3 s should be
+    silent and the click at 4 s at full level.
+[ ] "Clip pan L > R": clip at 2 s; pan envelope from L100 at its start to
+    R100 five seconds in (session 7 s).
+
+05 Markers and tempo
+--------------------
+[ ] Markers panel shows: "Cue at 1 s" (cue, with description "A plain cue
+    marker"); "Range 3-5 s" (a range); "CD track at 6 s" (CD track);
+    "Subclip 8-12 s" (subclip, 4 s long).
+[ ] Tempo 100 bpm, 3 beats per bar (Bars and Beats time display).
+
+06 Buses and loops
+------------------
+[ ] "Bus -6 dB" is a bus track at -6 dB.
+[ ] Both other tracks output to "Bus -6 dB".
+[ ] "Into bus (looped clip)": a 4 s clip of clicks, looped out to 20 s.
+[ ] "Into bus (locked clip)": clip at 2 s, Lock in Time on.
