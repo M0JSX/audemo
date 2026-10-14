@@ -750,6 +750,15 @@ pub struct App {
     pub actions: Vec<Action>,
     pub hud_gain: f32,
     pub drag_anchor: Option<usize>,
+    /// Dragging the playhead (or the ruler) during playback.
+    pub scrubbing: bool,
+    /// A scrub happened this frame (following waits while you scrub).
+    pub scrub_seen: bool,
+    /// Following the playhead is held after you move the view yourself
+    /// during playback, until the playhead comes back into view (or
+    /// playback restarts). `follow_last` is the view following left.
+    pub follow_hold: bool,
+    pub follow_last: Option<(u64, f64, f64)>,
     pub hand_anchor: Option<(f32, f64, f64)>,
     /// Waveform fade handle drag: (fade in?, length, curve, cosine).
     pub fade_drag: Option<(bool, usize, f32, bool)>,
@@ -864,6 +873,10 @@ impl App {
             actions: Vec::new(),
             hud_gain: 0.0,
             drag_anchor: None,
+            scrubbing: false,
+            scrub_seen: false,
+            follow_hold: false,
+            follow_last: None,
             hand_anchor: None,
             fade_drag: None,
             play_origin: 0,
@@ -1422,27 +1435,32 @@ impl App {
     fn follow_playhead(&mut self) {
         let centered = self.prefs.autoscroll == crate::prefs::AutoScroll::Centered;
         let st = self.engine.status();
+        if !st.playing {
+            self.follow_hold = false;
+            self.follow_last = None;
+        }
         if !self.follow || !st.playing {
             return;
         }
+        if std::mem::take(&mut self.scrub_seen) {
+            // The view stays put under the pointer while you scrub.
+            self.follow_last = None;
+            return;
+        }
+        let (mut hold, mut last) = (self.follow_hold, self.follow_last);
         if let Some(d) = self.doc_mut() {
             if st.tag != d.id {
                 return;
             }
-            let span = d.view_end - d.view_start;
-            if centered {
-                // Keep the playhead in the middle once it gets there.
-                if st.pos > d.view_start + span / 2.0 || st.pos < d.view_start {
-                    d.view_start = st.pos - span / 2.0;
-                    d.view_end = d.view_start + span;
-                    d.clamp_view();
-                }
-            } else if st.pos > d.view_end || st.pos < d.view_start {
-                d.view_start = st.pos - span * 0.02;
-                d.view_end = d.view_start + span;
+            if let Some(v) = follow_view(&mut hold, &mut last, d.id, (d.view_start, d.view_end), st.pos, centered) {
+                d.view_start = v.0;
+                d.view_end = v.1;
                 d.clamp_view();
+                last = Some((d.id, d.view_start, d.view_end));
             }
         }
+        self.follow_hold = hold;
+        self.follow_last = last;
     }
 
     // ---------------------------------------------------------------- loading
@@ -2019,6 +2037,7 @@ impl App {
     // ---------------------------------------------------------------- playback
 
     pub fn play_toggle(&mut self) {
+        self.follow_hold = false;
         let Some(doc) = self.doc() else { return };
         let st = self.engine.status();
         if st.playing && st.tag == doc.id {
@@ -2093,6 +2112,7 @@ impl App {
     }
 
     pub fn restart_from_cursor_if_playing(&mut self) {
+        self.follow_hold = false;
         let Some(doc) = self.doc() else { return };
         let st = self.engine.status();
         if st.playing && st.tag == doc.id {
@@ -3294,5 +3314,62 @@ mod tests {
         assert!(d.view_end <= 10_000.0 + 1e-6);
         d.zoom(1e9, 0.0);
         assert_eq!((d.view_start, d.view_end), (0.0, 10_000.0));
+    }
+}
+
+/// Auto-scroll for a playing view: returns the view to move to, if any.
+/// `last` is the view this left last frame; if it has changed since, you
+/// moved it, and following holds (`hold`) until the playhead is back in
+/// view short of where following would move it (the middle when centred,
+/// the right edge otherwise), so you can look elsewhere while it plays.
+pub fn follow_view(hold: &mut bool, last: &mut Option<(u64, f64, f64)>, id: u64, view: (f64, f64), pos: f64, centered: bool) -> Option<(f64, f64)> {
+    let (a, b) = view;
+    let span = b - a;
+    if let Some((lid, la, lb)) = *last {
+        if lid == id && ((la - a).abs() > 0.5 || (lb - b).abs() > 0.5) {
+            *hold = true;
+        }
+    }
+    *last = Some((id, a, b));
+    let resume_at = if centered { a + span / 2.0 } else { b };
+    if *hold {
+        if pos >= a && pos <= resume_at {
+            *hold = false;
+        } else {
+            return None;
+        }
+    }
+    if centered {
+        // Keep the playhead in the middle once it gets there.
+        if pos > a + span / 2.0 || pos < a {
+            return Some((pos - span / 2.0, pos - span / 2.0 + span));
+        }
+    } else if pos > b || pos < a {
+        return Some((pos - span * 0.02, pos - span * 0.02 + span));
+    }
+    None
+}
+
+#[cfg(test)]
+mod follow_tests {
+    use super::follow_view;
+
+    #[test]
+    fn following_holds_while_you_look_elsewhere() {
+        let (mut hold, mut last) = (false, None);
+        // Page mode: the playhead runs off the right edge and the view follows.
+        assert_eq!(follow_view(&mut hold, &mut last, 1, (0.0, 100.0), 50.0, false), None);
+        let v = follow_view(&mut hold, &mut last, 1, (0.0, 100.0), 101.0, false).unwrap();
+        last = Some((1, v.0, v.1));
+        // You scroll back to the start: following holds while the playhead is out of view.
+        assert_eq!(follow_view(&mut hold, &mut last, 1, (0.0, 100.0), 150.0, false), None);
+        assert!(hold);
+        assert_eq!(follow_view(&mut hold, &mut last, 1, (0.0, 100.0), 300.0, false), None);
+        // You scroll ahead of it: it resumes once the playhead enters the view.
+        assert_eq!(follow_view(&mut hold, &mut last, 1, (400.0, 500.0), 350.0, false), None);
+        assert!(hold);
+        assert_eq!(follow_view(&mut hold, &mut last, 1, (400.0, 500.0), 410.0, false), None);
+        assert!(!hold);
+        assert!(follow_view(&mut hold, &mut last, 1, (400.0, 500.0), 501.0, false).is_some());
     }
 }

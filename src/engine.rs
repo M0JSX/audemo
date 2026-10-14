@@ -833,6 +833,22 @@ impl Engine {
         }
     }
 
+    /// Move playback to `pos` while scrubbing. Unless a selection is
+    /// looping, the whole file (`len` frames) becomes playable, so you can
+    /// scrub back past where playback started or on past its end.
+    pub fn scrub(&self, pos: f64, len: f64) {
+        if let Ok(mut s) = self.shared.lock() {
+            if !s.looping {
+                s.start = 0.0;
+                s.end = s.end.max(len);
+            }
+            s.pos = pos.clamp(s.start, s.end.max(s.start));
+            if let Some(sb) = &s.stream {
+                sb.set_pos(s.pos);
+            }
+        }
+    }
+
     pub fn status(&self) -> Status {
         match self.shared.lock() {
             Ok(s) => Status { playing: s.playing, pos: s.pos, tag: s.tag },

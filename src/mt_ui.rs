@@ -825,6 +825,7 @@ impl App {
         let recording = self.engine.is_recording();
         let rec_head = self.transport_info().map(|t| t.0);
         let Some(si) = self.active_session.filter(|&i| i < self.sessions.len()) else { return };
+        let (mut f_hold, mut f_last) = (self.follow_hold, self.follow_last);
         let s = &mut self.sessions[si];
         if st.playing && st.tag == s.id {
             let (v, end, sel) = (s.version, s.end(), s.sel_range());
@@ -837,13 +838,16 @@ impl App {
             }
         }
         let head = if recording { rec_head } else if st.playing && st.tag == s.id { Some(st.pos) } else { None };
-        if let (true, Some(h)) = (follow, head) {
-            let span = s.view_end - s.view_start;
-            if centered && !recording && (h > s.view_start + span / 2.0 || h < s.view_start) {
-                s.view_start = h - span / 2.0;
-                s.view_end = s.view_start + span;
+        if let (true, Some(h), false) = (follow, head, recording) {
+            if let Some(nv) = crate::app::follow_view(&mut f_hold, &mut f_last, s.id, (s.view_start, s.view_end), h, centered) {
+                s.view_start = nv.0;
+                s.view_end = nv.1;
                 s.clamp_view();
-            } else if h > s.view_end - span * 0.02 || h < s.view_start {
+                f_last = Some((s.id, s.view_start, s.view_end));
+            }
+        } else if let (true, Some(h)) = (follow, head) {
+            let span = s.view_end - s.view_start;
+            if h > s.view_end - span * 0.02 || h < s.view_start {
                 s.view_start = h - span * 0.05;
                 s.view_end = s.view_start + span;
                 if recording {
@@ -854,9 +858,12 @@ impl App {
                 }
             }
         }
+        self.follow_hold = f_hold;
+        self.follow_last = f_last;
     }
 
     fn mt_play_toggle(&mut self) {
+        self.follow_hold = false;
         let Some(si) = self.active_session else { return };
         let st = self.engine.status();
         let s = &mut self.sessions[si];

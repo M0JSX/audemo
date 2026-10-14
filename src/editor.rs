@@ -279,11 +279,16 @@ impl App {
                 }
             }
             let resp = ui.interact(ruler, ui.id().with(("ruler", doc.id)), Sense::click_and_drag());
+            let playing_here = st.playing && st.tag == doc.id;
             if resp.clicked() || resp.dragged() {
                 if let Some(p) = resp.interact_pointer_pos() {
                     let s = v.s(p.x.clamp(lanes.left(), lanes.right())).round().clamp(0.0, len as f64) as usize;
                     doc.cursor = s;
-                    if resp.clicked() || resp.drag_stopped() {
+                    if playing_here && resp.dragged() {
+                        // Scrub: playback follows the drag and carries on from where you let go.
+                        self.engine.scrub(s as f64, len as f64);
+                        self.scrub_seen = true;
+                    } else if resp.clicked() || resp.drag_stopped() {
                         self.actions.push(Action::SetCursor(s));
                     }
                 }
@@ -723,7 +728,28 @@ impl App {
             };
             ui.ctx().set_cursor_icon(icon);
         }
-        if resp.drag_started() && !spec_busy {
+        // During playback the playhead can be grabbed and dragged to scrub.
+        let playhead_x = (st.playing && st.tag == doc.id).then(|| v.x(st.pos)).filter(|x| *x >= lanes.left() && *x <= lanes.right());
+        let near_playhead = |x: f32| playhead_x.map(|px| (px - x).abs() <= 5.0).unwrap_or(false);
+        if self.scrubbing || (self.drag_anchor.is_none() && resp.hovered() && ui.input(|i| i.pointer.hover_pos()).map(|p| near_playhead(p.x)).unwrap_or(false)) {
+            ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+        }
+        if resp.drag_started() && !spec_busy && playhead_x.is_some() && !middle && tool != Tool::Hand {
+            let origin = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos());
+            if origin.map(|o| near_playhead(o.x)).unwrap_or(false) {
+                self.scrubbing = true;
+            }
+        }
+        if self.scrubbing {
+            if let Some(p) = resp.interact_pointer_pos() {
+                self.engine.scrub(to_sample(p.x.clamp(lanes.left(), lanes.right())) as f64, len as f64);
+                self.scrub_seen = true;
+            }
+            if !resp.dragged() || !(st.playing && st.tag == doc.id) {
+                self.scrubbing = false;
+            }
+        }
+        if resp.drag_started() && !spec_busy && !self.scrubbing {
             let origin = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos()).unwrap_or(lanes.center());
             if tool == Tool::Hand || middle {
                 self.hand_anchor = Some((origin.x, doc.view_start, doc.view_end));
@@ -749,7 +775,7 @@ impl App {
                 self.drag_anchor = Some(anchor);
             }
         }
-        if resp.dragged() && !spec_busy {
+        if resp.dragged() && !spec_busy && !self.scrubbing {
             if let Some(p) = resp.interact_pointer_pos() {
                 if let Some((x0, vs, ve)) = self.hand_anchor {
                     let spp = (ve - vs) / v.width as f64;
