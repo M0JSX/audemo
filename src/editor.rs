@@ -316,15 +316,19 @@ impl App {
             let r = lane_rect(wave_area, c);
             let active = doc.active_ch.get(c).copied().unwrap_or(true);
             crate::theme::lane_fill(&painter, r);
+            // The faint level guides go under the selection, so they don't
+            // show up as dark lines across it.
+            draw_grid(&painter, r, doc.amp_zoom);
             // Selection behind the waveform.
             if let Some((a, b)) = sel {
                 let x0 = v.x(a as f64).max(r.left());
                 let x1 = v.x(b as f64).min(r.right()).max(x0 + 1.0);
                 if x1 > r.left() && x0 < r.right() {
                     painter.rect_filled(Rect::from_x_y_ranges(x0..=x1, r.y_range()), 0.0, if active { SEL_FILL() } else { Color32::from_rgb(0x2c, 0x3d, 0x37) });
+                    // The centre (zero) line stays visible through it.
+                    painter.line_segment([pos2(x0, r.center().y), pos2(x1, r.center().y)], Stroke::new(1.0_f32, LANE_GRID()));
                 }
             }
-            draw_grid(&painter, r, doc.amp_zoom);
             draw_wave(&painter, r, &doc.audio, c, &v, sel, active, doc.amp_zoom);
             // Beyond end of file.
             let xe = v.x(len as f64);
