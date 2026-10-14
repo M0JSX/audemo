@@ -2694,9 +2694,8 @@ impl App {
             if was_edit && s.undo.last().map(|u| u.tracks == s.tracks).unwrap_or(false) {
                 s.undo.pop();
             }
-            if matches!(self.mt.drag, Some(MtDrag::Select(_))) && playing {
-                self.actions.push(Action::SetCursor(s.cursor));
-            }
+            // A time selection made while playing leaves playback where it is
+            // (Space or a click starts from the selection).
             self.mt.drag = None;
         }
         if resp.clicked() {
