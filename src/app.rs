@@ -756,6 +756,8 @@ pub struct App {
     pub scrub_seen: bool,
     /// `scrub_seen` from the frame before (what following checks).
     pub scrub_now: bool,
+    /// The channel mask last sent to the engine.
+    pub sent_mask: [bool; 8],
     /// Following the playhead is held after you move the view yourself
     /// during playback, until the playhead comes back into view (or
     /// playback restarts). `follow_last` is the view following left.
@@ -878,6 +880,7 @@ impl App {
             scrubbing: false,
             scrub_seen: false,
             scrub_now: false,
+            sent_mask: [true; 8],
             follow_hold: false,
             follow_last: None,
             hand_anchor: None,
@@ -1208,6 +1211,7 @@ impl App {
         self.handle_dropped_files(ctx);
         self.handle_shortcuts(ctx);
         self.update_meters(ctx);
+        self.sync_channel_mask();
         self.follow_playhead();
         self.track_recording();
         self.maybe_render_preview();
@@ -1432,6 +1436,24 @@ impl App {
             if db >= hold || at.elapsed() > Duration::from_millis(1500) {
                 self.meter_hold[c] = (db.max(if at.elapsed() > Duration::from_millis(1500) { -120.0 } else { hold }), Instant::now());
             }
+        }
+    }
+
+    /// "Play only enabled channels": silence the channels switched off for
+    /// editing in the file being played.
+    fn sync_channel_mask(&mut self) {
+        let mut mask = [true; 8];
+        if self.prefs.play_enabled_only {
+            let tag = self.engine.status().tag;
+            if let Some(d) = self.docs.iter().find(|d| d.id == tag) {
+                for (m, on) in mask.iter_mut().zip(&d.active_ch) {
+                    *m = *on;
+                }
+            }
+        }
+        if mask != self.sent_mask {
+            self.engine.set_channel_mask(mask);
+            self.sent_mask = mask;
         }
     }
 

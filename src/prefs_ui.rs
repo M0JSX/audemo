@@ -804,6 +804,10 @@ impl App {
                     row(ui, "", |ui| {
                         ui.checkbox(&mut p.follow, "Auto-scroll to follow the playhead");
                     });
+                    row(ui, "", |ui| {
+                        ui.checkbox(&mut p.play_enabled_only, "Play only enabled channels")
+                            .on_hover_text("In the Waveform editor, channels switched off for editing (the L/R buttons) are silent while playing");
+                    });
                 });
                 section(ui, "Pre-roll and Post-roll");
                 group(ui, |ui| {

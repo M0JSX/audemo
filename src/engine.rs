@@ -152,6 +152,8 @@ pub struct Shared {
     tag: u64,
     volume: f32,
     peaks: [f32; 2],
+    /// Channels heard when playing a file (false = silent); mixes ignore it.
+    ch_mask: [bool; 8],
     /// Per-channel peaks of what's playing (up to 7.1), and how many channels.
     ch_peaks: ([f32; 8], usize),
     /// Device output channels that Audemo's left and right play on.
@@ -537,6 +539,7 @@ impl Engine {
             volume: 1.0,
             peaks: [0.0; 2],
             ch_peaks: ([0.0; 8], 2),
+            ch_mask: [true; 8],
             out_map: config.out_map,
         }));
         let mut engine = Engine {
@@ -893,6 +896,13 @@ impl Engine {
         }
     }
 
+    /// Which channels of a playing file are heard (see `ch_mask`).
+    pub fn set_channel_mask(&self, mask: [bool; 8]) {
+        if let Ok(mut s) = self.shared.lock() {
+            s.ch_mask = mask;
+        }
+    }
+
     pub fn is_recording(&self) -> bool {
         self.rec.is_some()
     }
@@ -1150,7 +1160,8 @@ where
                                     }
                                 }
                             };
-                            *out = (a + (b - a) * fr) * st.volume;
+                            let on = st.mix.is_some() || st.ch_mask[c];
+                            *out = if on { (a + (b - a) * fr) * st.volume } else { 0.0 };
                         }
                         let lr = match n_read {
                             1 => [vals[0], vals[0]],

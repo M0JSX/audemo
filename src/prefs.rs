@@ -244,6 +244,8 @@ prefs! {
     show_clip_names: bool = true,
     // Playback and recording
     return_to_start: bool = false,
+    /// Waveform editor: channels switched off for editing are silent on playback.
+    play_enabled_only: bool = false,
     preroll_s: f32 = 2.0,
     postroll_s: f32 = 2.0,
     follow: bool = true,
