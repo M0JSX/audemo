@@ -680,6 +680,9 @@ pub struct App {
     pub files_anchor: Option<FileKey>,
     pub files_focus: bool,
     pub files_drawn: bool,
+    /// Drag-selecting rows: (press position below the list's top, rows
+    /// selected before the drag when adding to them with Cmd/Ctrl).
+    pub files_sweep: Option<(f32, std::collections::BTreeSet<FileKey>)>,
     /// Files and sessions waiting to be closed, one at a time (each unsaved
     /// one asks first), and the file being saved before it closes.
     pub close_queue: std::collections::VecDeque<FileKey>,
@@ -885,6 +888,7 @@ impl App {
             files_anchor: None,
             files_focus: false,
             files_drawn: false,
+            files_sweep: None,
             close_queue: Default::default(),
             close_waiting: None,
         };

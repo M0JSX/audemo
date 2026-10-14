@@ -541,6 +541,12 @@ impl App {
         let sel_set = self.files_sel.clone();
         let focused = self.files_focus;
         let n_sel = sel_set.len();
+        // Drag-select: from empty space, or from a row with Cmd/Ctrl held (a
+        // plain drag on a file still drags it onto a multitrack track).
+        let sweeping = self.files_sweep.is_some();
+        let mut sweep_start: Option<(f32, bool)> = None;
+        let mut sweep_rows: Vec<(crate::app::FileKey, f32, f32)> = Vec::new();
+        let mut list_top = 0.0f32;
 
         // One row per session and file; every row is a single strip that
         // clicks (select), double-clicks (open) and drags (into a track).
@@ -628,12 +634,19 @@ impl App {
                 let full_w = ui.available_width().max(total_w);
                 // Header.
                 let (hr, _) = ui.allocate_exact_size(vec2(full_w, HEAD_H), Sense::hover());
+                list_top = hr.bottom();
                 for (k, h) in HEADS.iter().enumerate() {
                     ui.painter().text(pos2(hr.left() + col_x[k], hr.center().y), Align2::LEFT_CENTER, *h, head_font.clone(), TEXT_DIM());
                 }
                 for (k, row) in rows.iter().enumerate() {
-                    let sense = if row.doc.is_some() { Sense::click_and_drag() } else { Sense::click() };
-                    let (r, resp) = ui.allocate_exact_size(vec2(full_w, ROW_H), sense);
+                    let (r, resp) = ui.allocate_exact_size(vec2(full_w, ROW_H), Sense::click_and_drag());
+                    sweep_rows.push((row.key, r.top(), r.bottom()));
+                    let cmd_held = ui.input(|i| i.modifiers.command);
+                    if resp.drag_started() && (cmd_held || row.doc.is_none()) {
+                        if let Some(p) = ui.input(|i| i.pointer.press_origin()) {
+                            sweep_start = Some((p.y, cmd_held));
+                        }
+                    }
                     let painter = ui.painter();
                     let selected = sel_set.contains(&row.key);
                     if selected {
@@ -685,8 +698,11 @@ impl App {
                         });
                     }
                     if let Some((i, id)) = row.doc {
-                        resp.dnd_set_drag_payload(crate::mt_ui::DocDrag(id));
-                        if resp.dragged() {
+                        let sweep_here = sweeping || sweep_start.is_some();
+                        if !sweep_here {
+                            resp.dnd_set_drag_payload(crate::mt_ui::DocDrag(id));
+                        }
+                        if resp.dragged() && !sweep_here {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                         }
                         if resp.clicked() && !cmd && !shift {
@@ -719,9 +735,28 @@ impl App {
                 }
                 // The empty space below: right-click for new files.
                 let used = HEAD_H + rows.len() as f32 * ROW_H;
-                let (_, empty) = ui.allocate_exact_size(vec2(full_w, (view_h - used - 4.0).max(32.0)), Sense::click());
+                let (_, empty) = ui.allocate_exact_size(vec2(full_w, (view_h - used - 4.0).max(32.0)), Sense::click_and_drag());
                 if empty.clicked() {
                     picked_empty = true;
+                }
+                if empty.drag_started() {
+                    if let Some(p) = ui.input(|i| i.pointer.press_origin()) {
+                        sweep_start = Some((p.y, ui.input(|i| i.modifiers.command)));
+                    }
+                }
+                // The drag-select band.
+                if let (Some((off, _)), Some(p)) = (&self.files_sweep, ui.input(|i| i.pointer.latest_pos())) {
+                    let y0 = list_top + off;
+                    let band = Rect::from_x_y_ranges(hr.left()..=hr.right(), y0.min(p.y)..=y0.max(p.y));
+                    ui.painter().rect(band, 0.0, Color32::from_rgba_unmultiplied(0x2d, 0x7f, 0xd9, 30), Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(0x2d, 0x7f, 0xd9, 160)));
+                    // Scroll when the pointer goes past the top or bottom.
+                    let clip = ui.clip_rect();
+                    if p.y < clip.top() + 6.0 {
+                        ui.scroll_with_delta(vec2(0.0, 8.0));
+                    } else if p.y > clip.bottom() - 6.0 {
+                        ui.scroll_with_delta(vec2(0.0, -8.0));
+                    }
+                    ui.ctx().request_repaint();
                 }
                 empty.context_menu(|ui| {
                     if ui.button("New Audio File…").clicked() {
@@ -747,6 +782,31 @@ impl App {
         }
         if picked_empty {
             self.files_sel.clear();
+        }
+        if let Some((y, add)) = sweep_start {
+            self.files_focus = true;
+            let base = if add { self.files_sel.clone() } else { Default::default() };
+            self.files_sweep = Some((y - list_top, base));
+            picked = None;
+        }
+        if let Some((off, base)) = &self.files_sweep {
+            let (down, pos) = ui.input(|i| (i.pointer.primary_down(), i.pointer.latest_pos()));
+            if let Some(p) = pos {
+                let y0 = list_top + off;
+                let (lo, hi) = (y0.min(p.y), y0.max(p.y));
+                let hit: Vec<crate::app::FileKey> = sweep_rows.iter().filter(|(_, t, b)| *b > lo && *t < hi).map(|r| r.0).collect();
+                let mut sel = base.clone();
+                sel.extend(hit.iter().copied());
+                // The row under the pointer becomes the Shift-click anchor.
+                let under = sweep_rows.iter().find(|(_, t, b)| p.y >= *t && p.y < *b).map(|r| r.0);
+                self.files_sel = sel;
+                if under.is_some() {
+                    self.files_anchor = under;
+                }
+            }
+            if !down {
+                self.files_sweep = None;
+            }
         }
         if let Some((key, cmd, shift)) = picked {
             let order = self.file_keys();
