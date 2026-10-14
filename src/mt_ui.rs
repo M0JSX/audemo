@@ -61,6 +61,8 @@ pub enum MtDrag {
     EnvPoint(usize, EnvKey, usize),
     /// A clip envelope point: (clip, volume? (else pan), point index).
     ClipEnv(u64, bool, usize),
+    /// Dragging the playhead during playback.
+    Scrub,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -826,6 +828,7 @@ impl App {
         let rec_head = self.transport_info().map(|t| t.0);
         let Some(si) = self.active_session.filter(|&i| i < self.sessions.len()) else { return };
         let (mut f_hold, mut f_last) = (self.follow_hold, self.follow_last);
+        let scrubbing = self.scrub_now;
         let s = &mut self.sessions[si];
         if st.playing && st.tag == s.id {
             let (v, end, sel) = (s.version, s.end(), s.sel_range());
@@ -838,7 +841,10 @@ impl App {
             }
         }
         let head = if recording { rec_head } else if st.playing && st.tag == s.id { Some(st.pos) } else { None };
-        if let (true, Some(h), false) = (follow, head, recording) {
+        if scrubbing {
+            // The view stays put under the pointer while you scrub.
+            f_last = None;
+        } else if let (true, Some(h), false) = (follow, head, recording) {
             if let Some(nv) = crate::app::follow_view(&mut f_hold, &mut f_last, s.id, (s.view_start, s.view_end), h, centered) {
                 s.view_start = nv.0;
                 s.view_end = nv.1;
@@ -2155,7 +2161,11 @@ impl App {
                 if let Some(p) = resp.interact_pointer_pos() {
                     let pos = v.s(p.x.clamp(lanes.left(), lanes.right())).max(0.0) as usize;
                     s.cursor = pos;
-                    if resp.clicked() || resp.drag_stopped() {
+                    if playing && resp.dragged() {
+                        // Scrub: playback follows the drag and carries on from where you let go.
+                        self.engine.scrub(pos as f64, s.end() as f64);
+                        self.scrub_seen = true;
+                    } else if resp.clicked() || resp.drag_stopped() {
                         self.actions.push(Action::SetCursor(pos));
                     }
                 }
@@ -2467,7 +2477,10 @@ impl App {
         };
         // Cursor shape.
         if let Some(p) = pointer.filter(|p| lane_area.contains(*p)) {
-            if self.mt.drag.is_none() && (env_hit(p, s).is_some() || clip_env_hit(p, s, false).is_some()) {
+            let on_playhead = playing && (v.x(st.pos) - p.x).abs() <= 5.0;
+            if matches!(self.mt.drag, Some(MtDrag::Scrub)) || (self.mt.drag.is_none() && on_playhead) {
+                ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+            } else if self.mt.drag.is_none() && (env_hit(p, s).is_some() || clip_env_hit(p, s, false).is_some()) {
                 ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
             } else if self.mt.drag.is_none() {
                 match hit(p, s) {
@@ -2498,7 +2511,12 @@ impl App {
             // pointer is now; otherwise small targets (fade handles, clip
             // edges, automation points) are missed and the clip moves instead.
             let origin = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos());
-            if let Some(p) = origin {
+            // Grabbing the playhead during playback scrubs.
+            let scrub = playing && origin.map(|o| (v.x(st.pos) - o.x).abs() <= 5.0).unwrap_or(false);
+            if scrub {
+                self.mt.drag = Some(MtDrag::Scrub);
+            }
+            if let Some(p) = origin.filter(|_| !scrub) {
                 let pos = v.s(p.x).max(0.0);
                 let mut env = env_hit(p, s);
                 if env.is_none() {
@@ -2587,6 +2605,13 @@ impl App {
             if let (Some(p), Some(drag)) = (resp.interact_pointer_pos(), self.mt.drag.as_ref()) {
                 let pos = v.s(p.x.clamp(lanes.left() - 40.0, lanes.right() + 40.0)).max(0.0);
                 match drag {
+                    MtDrag::Scrub => {
+                        if playing {
+                            let x = v.s(p.x.clamp(lanes.left(), lanes.right())).max(0.0);
+                            self.engine.scrub(x, s.end() as f64);
+                            self.scrub_seen = true;
+                        }
+                    }
                     MtDrag::Move { grabbed, grab, track0, items } => {
                         let orig = items.iter().find(|i| i.0 == *grabbed).map(|i| i.1).unwrap_or(0) as f64;
                         let mut start = (pos - grab).max(0.0);
@@ -2697,7 +2722,7 @@ impl App {
             }
         }
         if resp.drag_stopped() {
-            let was_edit = !matches!(self.mt.drag, Some(MtDrag::Select(_)) | None);
+            let was_edit = !matches!(self.mt.drag, Some(MtDrag::Select(_)) | Some(MtDrag::Scrub) | None);
             if was_edit && s.undo.last().map(|u| u.tracks == s.tracks).unwrap_or(false) {
                 s.undo.pop();
             }

@@ -754,6 +754,8 @@ pub struct App {
     pub scrubbing: bool,
     /// A scrub happened this frame (following waits while you scrub).
     pub scrub_seen: bool,
+    /// `scrub_seen` from the frame before (what following checks).
+    pub scrub_now: bool,
     /// Following the playhead is held after you move the view yourself
     /// during playback, until the playhead comes back into view (or
     /// playback restarts). `follow_last` is the view following left.
@@ -875,6 +877,7 @@ impl App {
             drag_anchor: None,
             scrubbing: false,
             scrub_seen: false,
+            scrub_now: false,
             follow_hold: false,
             follow_last: None,
             hand_anchor: None,
@@ -1435,6 +1438,7 @@ impl App {
     fn follow_playhead(&mut self) {
         let centered = self.prefs.autoscroll == crate::prefs::AutoScroll::Centered;
         let st = self.engine.status();
+        self.scrub_now = std::mem::take(&mut self.scrub_seen);
         if !st.playing {
             self.follow_hold = false;
             self.follow_last = None;
@@ -1442,7 +1446,7 @@ impl App {
         if !self.follow || !st.playing {
             return;
         }
-        if std::mem::take(&mut self.scrub_seen) {
+        if self.scrub_now {
             // The view stays put under the pointer while you scrub.
             self.follow_last = None;
             return;
