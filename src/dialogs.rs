@@ -614,7 +614,9 @@ impl App {
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
+                            // Saved (or Save As chosen) first, then closed.
                             self.active = Some(doc);
+                            self.close_waiting = self.docs.get(doc).map(|d| d.id);
                             self.actions.push(Action::Save);
                             keep = false;
                         }
@@ -623,6 +625,8 @@ impl App {
                             keep = false;
                         }
                         if ui.button("Cancel").clicked() {
+                            // Cancel stops closing the rest too.
+                            self.close_queue.clear();
                             keep = false;
                         }
                     });
@@ -758,6 +762,8 @@ impl App {
                             self.save_session(false);
                             if !self.sessions.get(session).map(|s| s.dirty).unwrap_or(true) {
                                 self.actions.push(Action::MtCloseSession(session));
+                            } else {
+                                self.close_queue.clear();
                             }
                             keep = false;
                         }
@@ -769,6 +775,7 @@ impl App {
                             keep = false;
                         }
                         if ui.button("Cancel").clicked() {
+                            self.close_queue.clear();
                             keep = false;
                         }
                     });

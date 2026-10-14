@@ -529,10 +529,23 @@ impl App {
         let mut insert: Option<u64> = None;
         let mut close_doc: Option<usize> = None;
         let mut new_action: Option<Action> = None;
+        let mut close_keys: Option<Vec<crate::app::FileKey>> = None;
+        let mut picked_empty = false;
+        // Row clicks: (row key, Cmd/Ctrl held, Shift held).
+        let mut picked: Option<(crate::app::FileKey, bool, bool)> = None;
+        self.files_drawn = true;
+        {
+            let live = self.file_keys();
+            self.files_sel.retain(|k| live.contains(k));
+        }
+        let sel_set = self.files_sel.clone();
+        let focused = self.files_focus;
+        let n_sel = sel_set.len();
 
         // One row per session and file; every row is a single strip that
         // clicks (select), double-clicks (open) and drags (into a track).
         struct Row {
+            key: crate::app::FileKey,
             session: Option<usize>,
             doc: Option<(usize, u64)>,
             icon: Icon,
@@ -545,6 +558,7 @@ impl App {
         for (i, s) in self.sessions.iter().enumerate() {
             let active = Some(i) == self.active_session && self.mode == Mode::Multitrack;
             rows.push(Row {
+                key: crate::app::FileKey::Session(s.id),
                 session: Some(i),
                 doc: None,
                 icon: Icon::Multitrack,
@@ -564,6 +578,7 @@ impl App {
         for (i, d) in self.docs.iter().enumerate() {
             let active = Some(i) == self.active;
             rows.push(Row {
+                key: crate::app::FileKey::Doc(d.id),
                 session: None,
                 doc: Some((i, d.id)),
                 icon: Icon::Waveform,
@@ -605,7 +620,7 @@ impl App {
             x += w + GAP;
         }
         let total_w = x;
-        egui::Frame::none().fill(BG_LIST()).show(ui, |ui| {
+        let panel = egui::Frame::none().fill(BG_LIST()).show(ui, |ui| {
             ui.set_min_height(ui.available_height());
             let view_h = ui.available_height();
             egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
@@ -620,7 +635,12 @@ impl App {
                     let sense = if row.doc.is_some() { Sense::click_and_drag() } else { Sense::click() };
                     let (r, resp) = ui.allocate_exact_size(vec2(full_w, ROW_H), sense);
                     let painter = ui.painter();
-                    if row.active {
+                    let selected = sel_set.contains(&row.key);
+                    if selected {
+                        // Selected rows: accent-tinted, stronger while the panel has focus.
+                        let a = if focused { 70 } else { 38 };
+                        painter.rect_filled(r, 2.0, Color32::from_rgba_unmultiplied(0x2d, 0x7f, 0xd9, a));
+                    } else if row.active {
                         painter.rect_filled(r, 2.0, BG_RAISED());
                     } else if resp.hovered() {
                         painter.rect_filled(r, 2.0, Color32::from_white_alpha(14));
@@ -634,13 +654,32 @@ impl App {
                     for (c, text) in row.cols.iter().enumerate() {
                         painter.text(pos2(r.left() + col_x[c + 1], r.center().y), Align2::LEFT_CENTER, text, font.clone(), if row.active { TEXT() } else { TEXT_DIM() });
                     }
+                    let (cmd, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
+                    if resp.clicked() {
+                        picked = Some((row.key, cmd, shift));
+                    }
+                    if resp.secondary_clicked() && !selected {
+                        picked = Some((row.key, false, false));
+                    }
+                    // Closing several: the right-clicked row is in a multi-row selection.
+                    let close_many = selected && n_sel > 1;
                     if let Some(i) = row.session {
-                        if resp.clicked() || resp.double_clicked() {
+                        if (resp.clicked() && !cmd && !shift) || resp.double_clicked() {
                             switch_session = Some(i);
                         }
                         resp.context_menu(|ui| {
                             if ui.button("Open in Multitrack Editor").clicked() {
                                 switch_session = Some(i);
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            if close_many {
+                                if ui.button(format!("Close {n_sel} Selected")).clicked() {
+                                    close_keys = Some(Vec::new());
+                                    ui.close_menu();
+                                }
+                            } else if ui.button("Close Session").clicked() {
+                                close_keys = Some(vec![row.key]);
                                 ui.close_menu();
                             }
                         });
@@ -650,7 +689,7 @@ impl App {
                         if resp.dragged() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                         }
-                        if resp.clicked() {
+                        if resp.clicked() && !cmd && !shift {
                             select = Some(i);
                         }
                         if resp.double_clicked() {
@@ -666,7 +705,12 @@ impl App {
                                 ui.close_menu();
                             }
                             ui.separator();
-                            if ui.button("Close File").clicked() {
+                            if close_many {
+                                if ui.button(format!("Close {n_sel} Selected")).clicked() {
+                                    close_keys = Some(Vec::new());
+                                    ui.close_menu();
+                                }
+                            } else if ui.button("Close File").clicked() {
                                 close_doc = Some(i);
                                 ui.close_menu();
                             }
@@ -676,6 +720,9 @@ impl App {
                 // The empty space below: right-click for new files.
                 let used = HEAD_H + rows.len() as f32 * ROW_H;
                 let (_, empty) = ui.allocate_exact_size(vec2(full_w, (view_h - used - 4.0).max(32.0)), Sense::click());
+                if empty.clicked() {
+                    picked_empty = true;
+                }
                 empty.context_menu(|ui| {
                     if ui.button("New Audio File…").clicked() {
                         new_action = Some(Action::New);
@@ -693,6 +740,39 @@ impl App {
                 });
             });
         });
+        // Keyboard focus: the panel has it after a click inside it, until a click elsewhere.
+        let press = ui.input(|i| if i.pointer.any_pressed() { i.pointer.press_origin() } else { None });
+        if let Some(p) = press {
+            self.files_focus = panel.response.rect.contains(p);
+        }
+        if picked_empty {
+            self.files_sel.clear();
+        }
+        if let Some((key, cmd, shift)) = picked {
+            let order = self.file_keys();
+            if shift {
+                let a = self.files_anchor.and_then(|k| order.iter().position(|x| *x == k)).unwrap_or(0);
+                let b = order.iter().position(|x| *x == key).unwrap_or(a);
+                let (lo, hi) = (a.min(b), a.max(b));
+                if !cmd {
+                    self.files_sel.clear();
+                }
+                self.files_sel.extend(order[lo..=hi].iter().copied());
+            } else if cmd {
+                if !self.files_sel.remove(&key) {
+                    self.files_sel.insert(key);
+                }
+                self.files_anchor = Some(key);
+            } else {
+                self.files_sel.clear();
+                self.files_sel.insert(key);
+                self.files_anchor = Some(key);
+            }
+        }
+        if let Some(keys) = close_keys {
+            let keys = if keys.is_empty() { self.file_keys().into_iter().filter(|k| self.files_sel.contains(k)).collect() } else { keys };
+            self.close_files(keys);
+        }
         if let Some(a) = new_action {
             self.actions.push(a);
         }

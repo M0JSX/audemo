@@ -666,7 +666,24 @@ pub const FAVORITES: &[(&str, &str, &str)] = &[
     ("Broadcast Compression", "dynamics", "Broadcast"),
 ];
 
+/// A row of the Files panel: a session or an open file, by id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FileKey {
+    Session(u64),
+    Doc(u64),
+}
+
 pub struct App {
+    /// Files panel: selected rows, the row Shift-click extends from, and
+    /// whether the panel has keyboard focus (it was clicked last).
+    pub files_sel: std::collections::BTreeSet<FileKey>,
+    pub files_anchor: Option<FileKey>,
+    pub files_focus: bool,
+    pub files_drawn: bool,
+    /// Files and sessions waiting to be closed, one at a time (each unsaved
+    /// one asks first), and the file being saved before it closes.
+    pub close_queue: std::collections::VecDeque<FileKey>,
+    pub close_waiting: Option<u64>,
     pub docs: Vec<Document>,
     pub active: Option<usize>,
     next_id: u64,
@@ -864,6 +881,12 @@ impl App {
             surface: None,
             update_check: None,
             updater: None,
+            files_sel: Default::default(),
+            files_anchor: None,
+            files_focus: false,
+            files_drawn: false,
+            close_queue: Default::default(),
+            close_waiting: None,
         };
         let opened_files = !open.is_empty();
         if opened_files {
@@ -1175,6 +1198,90 @@ impl App {
         self.poll_marker_export();
         self.poll_control_surface();
         self.poll_update_check();
+        if !self.files_drawn {
+            self.files_focus = false;
+        }
+        self.files_drawn = false;
+        self.pump_close_queue();
+    }
+
+    /// Every row of the Files panel, in order: sessions, then files.
+    pub fn file_keys(&self) -> Vec<FileKey> {
+        self.sessions.iter().map(|s| FileKey::Session(s.id)).chain(self.docs.iter().map(|d| FileKey::Doc(d.id))).collect()
+    }
+
+    /// Close these files and sessions, asking about each unsaved one in turn.
+    pub fn close_files(&mut self, keys: Vec<FileKey>) {
+        self.close_queue = keys.into();
+        self.close_waiting = None;
+        self.pump_close_queue();
+    }
+
+    /// Close a file right away (no questions).
+    fn force_close_doc(&mut self, i: usize) {
+        if i < self.docs.len() {
+            if self.engine.status().tag == self.docs[i].id {
+                self.engine.stop();
+            }
+            let id = self.docs[i].id;
+            self.docs.remove(i);
+            self.files_sel.remove(&FileKey::Doc(id));
+            self.active = if self.docs.is_empty() { None } else { Some(i.min(self.docs.len() - 1)) };
+        }
+    }
+
+    /// Work through the close queue until something needs an answer.
+    fn pump_close_queue(&mut self) {
+        loop {
+            if self.dialog.is_some() || self.saving.is_some() || !self.actions.is_empty() {
+                return;
+            }
+            // A file being saved before closing: close it once it's saved;
+            // if the save was cancelled or failed, stop closing.
+            if let Some(id) = self.close_waiting.take() {
+                match self.docs.iter().position(|d| d.id == id) {
+                    Some(i) if !self.docs[i].dirty => self.force_close_doc(i),
+                    Some(_) => {
+                        self.close_queue.clear();
+                        return;
+                    }
+                    None => {}
+                }
+                continue;
+            }
+            let Some(key) = self.close_queue.pop_front() else { return };
+            match key {
+                FileKey::Doc(id) => {
+                    let Some(i) = self.docs.iter().position(|d| d.id == id) else { continue };
+                    if self.docs[i].recording {
+                        self.set_status("Stop recording before closing that file.");
+                        self.close_queue.clear();
+                        return;
+                    }
+                    if self.docs[i].dirty {
+                        self.active = Some(i);
+                        self.dialog = Some(Dialog::ConfirmClose { doc: i });
+                        return;
+                    }
+                    self.force_close_doc(i);
+                }
+                FileKey::Session(id) => {
+                    let Some(i) = self.sessions.iter().position(|s| s.id == id) else { continue };
+                    let rec_session = self.mt.rec.as_ref().map(|r| r.session_id);
+                    if self.engine.is_recording() && rec_session == Some(id) {
+                        self.set_status("Stop recording before closing that session.");
+                        self.close_queue.clear();
+                        return;
+                    }
+                    if self.sessions[i].dirty {
+                        self.dialog = Some(Dialog::ConfirmCloseSession { session: i });
+                        return;
+                    }
+                    self.mt_close_session(i);
+                    self.files_sel.remove(&FileKey::Session(id));
+                }
+            }
+        }
     }
 
     /// Keep the target file's live length and view in step with the input.
@@ -2307,6 +2414,29 @@ impl App {
 
     pub fn perform(&mut self, action: Action, ctx: &egui::Context) {
         let action = action;
+        // With the Files panel focused, Select All, Delete/Backspace and Esc
+        // act on its rows.
+        if self.files_focus {
+            match action {
+                Action::SelectAll => {
+                    self.files_sel = self.file_keys().into_iter().collect();
+                    return;
+                }
+                Action::Delete => {
+                    let order = self.file_keys();
+                    let keys: Vec<FileKey> = order.into_iter().filter(|k| self.files_sel.contains(k)).collect();
+                    if !keys.is_empty() {
+                        self.close_files(keys);
+                    }
+                    return;
+                }
+                Action::Deselect => {
+                    self.files_sel.clear();
+                    return;
+                }
+                _ => {}
+            }
+        }
         let editing = !matches!(
             action,
             Action::New
@@ -2351,21 +2481,12 @@ impl App {
             Action::SaveAs => self.save(true),
             Action::Close(i) => {
                 let i = if i == usize::MAX { match self.active { Some(a) => a, None => return } } else { i };
-                if self.docs.get(i).map(|d| d.dirty).unwrap_or(false) {
-                    self.dialog = Some(Dialog::ConfirmClose { doc: i });
-                } else {
-                    self.actions.push(Action::ForceClose(i));
+                if let Some(d) = self.docs.get(i) {
+                    let id = d.id;
+                    self.close_files(vec![FileKey::Doc(id)]);
                 }
             }
-            Action::ForceClose(i) => {
-                if i < self.docs.len() {
-                    if self.engine.status().tag == self.docs[i].id {
-                        self.engine.stop();
-                    }
-                    self.docs.remove(i);
-                    self.active = if self.docs.is_empty() { None } else { Some(i.min(self.docs.len() - 1)) };
-                }
-            }
+            Action::ForceClose(i) => self.force_close_doc(i),
             Action::Quit => {
                 self.wait_for_save();
                 if (self.docs.iter().any(|d| d.dirty) || self.sessions.iter().any(|s| s.dirty)) && !self.allow_quit {
@@ -2744,17 +2865,8 @@ impl App {
             }
             Action::Status(s) => self.set_status(s),
             Action::CloseAll => {
-                let dirty: Vec<usize> = (0..self.docs.len()).filter(|&i| self.docs[i].dirty).collect();
-                for i in (0..self.docs.len()).rev() {
-                    if !self.docs[i].dirty {
-                        self.actions.push(Action::ForceClose(i));
-                    }
-                }
-                if let Some(&first) = dirty.first() {
-                    // Indices shift as clean files close; confirm the dirty ones next frame.
-                    let id = self.docs[first].id;
-                    self.actions.push(Action::Status(format!("__confirm_close:{id}")));
-                }
+                let keys = self.docs.iter().map(|d| FileKey::Doc(d.id)).collect();
+                self.close_files(keys);
             }
             Action::SaveAll => {
                 self.wait_for_save();

@@ -1398,7 +1398,7 @@ impl App {
         self.spawn_job("Mixdown".into(), JobKind::NewDoc { name, rate }, move || Ok(mix_range(&state, a, b)));
     }
 
-    fn mt_close_session(&mut self, i: usize) {
+    pub(crate) fn mt_close_session(&mut self, i: usize) {
         if i >= self.sessions.len() {
             return;
         }
