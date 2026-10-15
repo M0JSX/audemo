@@ -601,7 +601,7 @@ impl App {
                         }
                     });
                 });
-                note(ui, "Backups never replace your files. Unsaved recordings and edits in a session are written beside its backup.");
+                note(ui, "Backups never replace your files. Unsaved recordings and edits in a session are written beside its backup. Audio files with unsaved changes are always backed up to the centralized folder, never beside the file.");
             }
             Page::ControlSurface => {
                 if d.midi_ports.is_none() {

@@ -85,11 +85,19 @@ fn prune(dir: &Path, prefix: &str, keep: usize) {
 }
 
 impl App {
+    /// Where a session's backups go: a Backup folder beside the session, or
+    /// the centralized folder.
     fn backup_dir_for(&self, near: Option<&Path>) -> Option<PathBuf> {
         match (self.prefs.backup_location, near.and_then(|p| p.parent())) {
             (BackupLocation::WithSession, Some(dir)) => Some(dir.join("Backup")),
-            _ => self.prefs.backup_dir.clone().or_else(default_dir),
+            _ => self.central_backup_dir(),
         }
+    }
+
+    /// Audio files are always backed up to the centralized folder, so no
+    /// Backup folders appear beside your recordings.
+    fn central_backup_dir(&self) -> Option<PathBuf> {
+        self.prefs.backup_dir.clone().filter(|_| self.prefs.backup_location == BackupLocation::Folder).or_else(default_dir)
     }
 
     /// Called every frame: write backups when the interval has passed.
@@ -160,7 +168,7 @@ impl App {
         }
         if self.prefs.backup_files {
             for d in self.docs.iter().filter(|d| d.dirty && d.len() > 0) {
-                let Some(dir) = self.backup_dir_for(d.path.as_deref()) else { continue };
+                let Some(dir) = self.central_backup_dir() else { continue };
                 let stem = Path::new(&d.name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled".into());
                 let prefix = format!("{} [{}] backup ", crate::mt_ui::safe_file_name(&stem), tag(d.path.as_deref(), d.id));
                 let markers = d.markers.clone();
