@@ -2487,6 +2487,9 @@ impl App {
                     Some((_, Some((_, Zone::Left | Zone::Right)))) => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),
                     Some((_, Some((_, Zone::FadeIn | Zone::FadeOut)))) => ui.ctx().set_cursor_icon(CursorIcon::PointingHand),
                     Some((_, Some((_, Zone::Body)))) => ui.ctx().set_cursor_icon(CursorIcon::Grab),
+                    Some((_, None)) if s.sel_range().map(|(a, b)| (p.x - v.x(a as f64)).abs() <= 5.0 || (p.x - v.x(b as f64)).abs() <= 5.0).unwrap_or(false) => {
+                        ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal)
+                    }
                     _ => ui.ctx().set_cursor_icon(CursorIcon::Text),
                 }
             }
@@ -2592,10 +2595,25 @@ impl App {
                         if !(mods.command || mods.shift) {
                             s.selected_clips.clear();
                         }
-                        let a = snap(pos, s, None) as usize;
-                        s.cursor = a;
-                        s.sel = None;
-                        self.mt.drag = Some(MtDrag::Select(a));
+                        // Grabbing an end of the time selection moves just that end.
+                        let edge = s.sel_range().and_then(|(a, b)| {
+                            let (da, db) = ((p.x - v.x(a as f64)).abs(), (p.x - v.x(b as f64)).abs());
+                            if da <= 5.0 && da <= db {
+                                Some(b)
+                            } else if db <= 5.0 {
+                                Some(a)
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(other) = edge {
+                            self.mt.drag = Some(MtDrag::Select(other));
+                        } else {
+                            let a = snap(pos, s, None) as usize;
+                            s.cursor = a;
+                            s.sel = None;
+                            self.mt.drag = Some(MtDrag::Select(a));
+                        }
                     }
                     None => {}
                 }

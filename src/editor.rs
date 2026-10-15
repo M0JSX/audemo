@@ -735,7 +735,25 @@ impl App {
         // During playback the playhead can be grabbed and dragged to scrub.
         let playhead_x = (st.playing && st.tag == doc.id).then(|| v.x(st.pos)).filter(|x| *x >= lanes.left() && *x <= lanes.right());
         let near_playhead = |x: f32| playhead_x.map(|px| (px - x).abs() <= 5.0).unwrap_or(false);
-        if self.scrubbing || (self.drag_anchor.is_none() && resp.hovered() && ui.input(|i| i.pointer.hover_pos()).map(|p| near_playhead(p.x)).unwrap_or(false)) {
+        // The ends of a time selection can be grabbed and dragged.
+        let sel_edge = |x: f32| -> Option<usize> {
+            let (a, b) = doc.sel_range()?;
+            let (xa, xb) = (v.x(a as f64), v.x(b as f64));
+            let (da, db) = ((x - xa).abs(), (x - xb).abs());
+            // The nearer end; dragging it keeps the other end as the anchor.
+            if da <= 5.0 && da <= db {
+                Some(b)
+            } else if db <= 5.0 {
+                Some(a)
+            } else {
+                None
+            }
+        };
+        let hover_x = ui.input(|i| i.pointer.hover_pos()).filter(|p| lanes.contains(*p)).map(|p| p.x);
+        let edge_tool = (tool == Tool::Selection || tool.spectral()) && !spec_busy && !middle;
+        if self.scrubbing || (self.drag_anchor.is_none() && resp.hovered() && hover_x.map(near_playhead).unwrap_or(false)) {
+            ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+        } else if edge_tool && self.drag_anchor.is_none() && resp.hovered() && hover_x.and_then(sel_edge).is_some() {
             ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
         }
         if resp.drag_started() && !spec_busy && playhead_x.is_some() && !middle && tool != Tool::Hand {
@@ -762,7 +780,10 @@ impl App {
                 if snap_zero {
                     s0 = crate::markers_ui::zero_crossing_audio(&doc.audio, &doc.active_ch, s0, 0, doc.sample_rate);
                 }
-                let anchor = if mods.shift {
+                let edge = if edge_tool && !mods.shift { sel_edge(origin.x) } else { None };
+                let anchor = if let Some(other) = edge {
+                    other
+                } else if mods.shift {
                     match doc.sel_range() {
                         Some((a, b)) => {
                             if s0.abs_diff(a) > s0.abs_diff(b) {
