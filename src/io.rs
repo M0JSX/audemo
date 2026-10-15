@@ -59,6 +59,15 @@ fn read_tags(rev: &MetadataRevision, meta: &mut crate::export::Metadata, total: 
 }
 
 pub fn load(path: &Path) -> Result<Decoded, String> {
+    load_with(path, &crate::export::Progress::default())
+}
+
+/// Error text when a load is cancelled.
+pub const CANCELLED: &str = "Cancelled.";
+
+/// Decode a file, reporting how far it has got through `progress` (when
+/// the file says how long it is) and stopping if it's cancelled.
+pub fn load_with(path: &Path, progress: &crate::export::Progress) -> Result<Decoded, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("Couldn't open file: {e}"))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
@@ -93,6 +102,7 @@ pub fn load(path: &Path) -> Result<Decoded, String> {
         }
     }
     let (track_id, rate, bits, mut decoder) = found.ok_or(last_err)?;
+    let total_frames = format.tracks().iter().find(|t| t.id == track_id).and_then(|t| t.codec_params.n_frames).filter(|n| *n > 0);
     let mut sample_rate = rate.unwrap_or(44100);
 
     let mut builder: Option<crate::audio::Builder> = None;
@@ -125,6 +135,12 @@ pub fn load(path: &Path) -> Result<Decoded, String> {
                 let s = sb.as_mut().unwrap();
                 s.copy_interleaved_ref(decoded);
                 b.push_interleaved(s.samples(), n_ch);
+                if let Some(t) = total_frames {
+                    progress.set(b.len() as f32 / t as f32);
+                }
+                if progress.cancelled() {
+                    return Err(CANCELLED.into());
+                }
             }
             Err(SymError::DecodeError(_)) => continue,
             Err(e) => return Err(format!("Decode error: {e}")),

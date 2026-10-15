@@ -1483,6 +1483,11 @@ impl Session {
 /// Render frames [a, b) of the stereo mix offline (mixdown), with fresh
 /// effect state, in blocks.
 pub fn mix_range(m: &MixState, a: usize, b: usize) -> Vec<Vec<f32>> {
+    mix_range_with(m, a, b, &crate::export::Progress::default()).unwrap_or_default()
+}
+
+/// `mix_range`, reporting progress; None if cancelled.
+pub fn mix_range_with(m: &MixState, a: usize, b: usize, progress: &crate::export::Progress) -> Option<Vec<Vec<f32>>> {
     let mut fresh = m.with_fresh_fx();
     fresh.metronome = None;
     let n_out = m.master_format.channels();
@@ -1501,8 +1506,12 @@ pub fn mix_range(m: &MixState, a: usize, b: usize) -> Vec<Vec<f32>> {
             o.extend_from_slice(t);
         }
         c = e;
+        progress.set((c - a) as f32 / (b - a).max(1) as f32);
+        if progress.cancelled() {
+            return None;
+        }
     }
-    out
+    Some(out)
 }
 
 /// Per-track working buffers, kept between blocks so mixing in the audio

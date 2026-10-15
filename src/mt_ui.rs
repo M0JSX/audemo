@@ -17,7 +17,7 @@ use crate::editor::{ruler_label, RULER_STEPS};
 use crate::engine::Buffer;
 use crate::export::{self, Container, ExportSettings, WavFormat};
 use crate::io;
-use crate::session::{self, crossfade_pairs, mix_range, Clip, Envelope, Session, Source, Track, SESSION_EXT, VOL_ENV_MAX, VOL_ENV_MIN};
+use crate::session::{self, crossfade_pairs, Clip, Envelope, Session, Source, Track, SESSION_EXT, VOL_ENV_MAX, VOL_ENV_MIN};
 use crate::theme::*;
 
 const HEADER_W: f32 = 214.0;
@@ -1254,7 +1254,9 @@ impl App {
         let tail = if has_fx && kind != BounceKind::TimeSelection { s.sample_rate as usize * 2 } else { 0 };
         let name = format!("{} Bounce", s.tracks[ti].name);
         let session_id = s.id;
-        self.spawn_job("Bounce to New Track".into(), JobKind::MtBounce { session_id, at: a, name }, move || Ok(mix_range(&state, a, b + tail)));
+        self.spawn_job_progress("Bounce to New Track".into(), JobKind::MtBounce { session_id, at: a, name }, move |pr| {
+            crate::session::mix_range_with(&state, a, b + tail, pr).map(crate::app::JobOut::Chans).ok_or_else(|| crate::io::CANCELLED.to_string())
+        });
     }
 
     pub fn mt_finish_bounce(&mut self, session_id: u64, at: usize, name: String, audio: Vec<Vec<f32>>) {
@@ -1408,7 +1410,9 @@ impl App {
         let state = Arc::new(s.mix_state());
         let name = format!("{} Mixdown", s.name);
         let rate = s.sample_rate;
-        self.spawn_job("Mixdown".into(), JobKind::NewDoc { name, rate }, move || Ok(mix_range(&state, a, b)));
+        self.spawn_job_progress("Mixdown".into(), JobKind::NewDoc { name, rate }, move |pr| {
+            crate::session::mix_range_with(&state, a, b, pr).map(crate::app::JobOut::Chans).ok_or_else(|| crate::io::CANCELLED.to_string())
+        });
     }
 
     pub(crate) fn mt_close_session(&mut self, i: usize) {

@@ -1224,8 +1224,39 @@ impl App {
             }
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
+        // Files being opened.
+        let loads: Vec<(String, f32, crate::export::Progress)> = self
+            .loads
+            .iter()
+            .filter(|l| !matches!(l.intent, crate::app::LoadIntent::Audition) && l.started.elapsed().as_secs_f32() > 0.3)
+            .map(|l| (l.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), l.progress.get(), l.progress.clone()))
+            .collect();
+        if !loads.is_empty() {
+            egui::Area::new(egui::Id::new("loading"))
+                .anchor(Align2::CENTER_CENTER, vec2(0.0, if self.job.is_some() { -90.0 } else { 0.0 }))
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(16.0)).show(ui, |ui| {
+                        ui.set_width(360.0);
+                        ui.label(RichText::new(if loads.len() == 1 { "Opening".to_string() } else { format!("Opening {} files", loads.len()) }).size(14.0));
+                        for (name, frac, pr) in &loads {
+                            ui.add_space(4.0);
+                            ui.label(RichText::new(name).color(TEXT_DIM()).size(11.0));
+                            ui.horizontal(|ui| {
+                                // Some formats don't say how long they are: the bar just moves.
+                                let bar = if *frac > 0.0 { egui::ProgressBar::new(*frac).show_percentage() } else { egui::ProgressBar::new(0.0).animate(true) };
+                                ui.add_sized(vec2(280.0, 18.0), bar);
+                                if ui.button("Cancel").clicked() {
+                                    pr.cancel();
+                                }
+                            });
+                        }
+                    });
+                });
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
         let Some(j) = &self.job else { return };
-        if !self.busy() {
+        if matches!(j.kind, crate::app::JobKind::Preview { .. }) {
             return;
         }
         let label = j.label.clone();
@@ -1233,17 +1264,42 @@ impl App {
         if t < 0.25 {
             return;
         }
+        let frac = j.progress.as_ref().map(|p| p.get());
+        let verb = match j.kind {
+            crate::app::JobKind::Edit { .. } => "Applying",
+            _ => "Rendering",
+        };
+        let mut cancel = false;
         egui::Area::new(egui::Id::new("busy"))
             .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(16.0)).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.add(egui::Spinner::new().size(18.0));
-                        ui.label(RichText::new(format!("Applying {label}…  {t:.1} s")).size(14.0));
+                    ui.set_width(360.0);
+                    ui.label(RichText::new(format!("{verb} {label}…")).size(14.0));
+                    ui.add_space(4.0);
+                    // Effects that work on the whole selection at once can't say how far
+                    // they've got: their bar just moves, with the time taken so far.
+                    let bar = match frac {
+                        Some(f) => egui::ProgressBar::new(f).show_percentage(),
+                        None => egui::ProgressBar::new(0.0).animate(true).text(format!("{t:.0} s")),
+                    };
+                    ui.add(bar);
+                    ui.add_space(4.0);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                        if frac.is_some() {
+                            ui.label(RichText::new(format!("{t:.0} s")).color(TEXT_DIM()).size(11.0));
+                        }
                     });
                 });
             });
+        if cancel {
+            self.cancel_job();
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
     }
 }
 

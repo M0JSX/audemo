@@ -26,6 +26,11 @@ enum Op {
 /// Process frames [a, b) of `src` with effect `id`. Channels that aren't
 /// active pass through untouched. Returns the replacement audio for [a, b).
 pub fn run(id: &str, p: &Params, src: &Audio, a: usize, b: usize, active: &[bool]) -> Result<Audio, String> {
+    run_with(id, p, src, a, b, active, &crate::export::Progress::default())
+}
+
+/// `run`, reporting progress (and stopping if cancelled).
+pub fn run_with(id: &str, p: &Params, src: &Audio, a: usize, b: usize, active: &[bool], progress: &crate::export::Progress) -> Result<Audio, String> {
     let n_ch = src.n_ch();
     let len = b.saturating_sub(a);
     if len == 0 || n_ch == 0 {
@@ -75,6 +80,10 @@ pub fn run(id: &str, p: &Params, src: &Audio, a: usize, b: usize, active: &[bool
         }
         out.push(&buf);
         pos += n;
+        progress.set(pos as f32 / len as f32);
+        if progress.cancelled() {
+            return Err(crate::io::CANCELLED.into());
+        }
     }
     Ok(out.finish())
 }

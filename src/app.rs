@@ -552,7 +552,18 @@ pub enum JobOut {
     Audio(Audio),
 }
 
+/// A file being opened in the background.
+pub struct Load {
+    pub path: PathBuf,
+    pub intent: LoadIntent,
+    pub rx: Receiver<Result<io::Decoded, String>>,
+    pub progress: export::Progress,
+    pub started: Instant,
+}
+
 pub struct Job {
+    /// How far along it is, for jobs that can tell (and be cancelled).
+    pub progress: Option<export::Progress>,
     pub rx: Receiver<Result<JobOut, String>>,
     pub kind: JobKind,
     pub label: String,
@@ -710,7 +721,7 @@ pub struct App {
     /// Bumped whenever the effect list changes (plug-ins rescanned).
     pub effects_gen: u64,
     pub plugin_filter: String,
-    pub loads: Vec<(PathBuf, LoadIntent, Receiver<Result<io::Decoded, String>>)>,
+    pub loads: Vec<Load>,
     pub status: String,
     pub status_at: Instant,
     pub show_spectral: bool,
@@ -1506,17 +1517,19 @@ impl App {
 
     fn poll_loads(&mut self) {
         let mut done = Vec::new();
-        for (i, (_, _, rx)) in self.loads.iter().enumerate() {
-            if let Ok(res) = rx.try_recv() {
+        for (i, l) in self.loads.iter().enumerate() {
+            if let Ok(res) = l.rx.try_recv() {
                 done.push((i, res));
             }
         }
         for (i, res) in done.into_iter().rev() {
-            let (path, intent, _) = self.loads.remove(i);
+            let Load { path, intent, .. } = self.loads.remove(i);
             let dec = match res {
                 Ok(d) => d,
                 Err(e) => {
-                    if !matches!(intent, LoadIntent::Audition) {
+                    if e == io::CANCELLED {
+                        self.set_status(format!("Stopped opening {}", path.display()));
+                    } else if !matches!(intent, LoadIntent::Audition) {
                         self.dialog = Some(Dialog::Message { title: "Couldn't open file".into(), text: format!("{}\n\n{e}", path.display()) });
                     }
                     if let LoadIntent::SessionSource { session_id, source_id } = intent {
@@ -1602,13 +1615,15 @@ impl App {
     pub(crate) fn load_async(&mut self, p: PathBuf, intent: LoadIntent) {
         let (tx, rx) = channel();
         let path = p.clone();
+        let progress = export::Progress::default();
+        let pr = progress.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(io::load(&path));
+            let _ = tx.send(io::load_with(&path, &pr));
         });
         if !matches!(intent, LoadIntent::Audition) {
             self.set_status(format!("Opening {}…", p.display()));
         }
-        self.loads.push((p, intent, rx));
+        self.loads.push(Load { path: p, intent, rx, progress, started: Instant::now() });
     }
 
     fn open_paths(&mut self, paths: Vec<PathBuf>) {
@@ -1631,6 +1646,26 @@ impl App {
         self.spawn_job_out(label, kind, move || f().map(JobOut::Chans));
     }
 
+    /// A job that reports progress (and can be cancelled through it).
+    pub(crate) fn spawn_job_progress(&mut self, label: String, kind: JobKind, f: impl FnOnce(&export::Progress) -> Result<JobOut, String> + Send + 'static) {
+        let progress = export::Progress::default();
+        let pr = progress.clone();
+        self.spawn_job_out(label, kind, move || f(&pr));
+        if let Some(j) = &mut self.job {
+            j.progress = Some(progress);
+        }
+    }
+
+    /// Stop waiting for the job running now (its result is thrown away).
+    pub fn cancel_job(&mut self) {
+        if let Some(j) = self.job.take() {
+            if let Some(p) = &j.progress {
+                p.cancel();
+            }
+            self.set_status(format!("{} cancelled.", j.label));
+        }
+    }
+
     pub(crate) fn spawn_job_out(&mut self, label: String, kind: JobKind, f: impl FnOnce() -> Result<JobOut, String> + Send + 'static) {
         let (tx, rx) = channel();
         std::thread::spawn(move || {
@@ -1638,7 +1673,7 @@ impl App {
                 .unwrap_or_else(|_| Err("The effect failed unexpectedly.".into()));
             let _ = tx.send(r);
         });
-        self.job = Some(Job { rx, kind, label, started: Instant::now() });
+        self.job = Some(Job { rx, kind, label, started: Instant::now(), progress: None });
     }
 
     fn poll_job(&mut self) {
@@ -1900,8 +1935,8 @@ impl App {
         let (doc_id, active) = (doc.id, doc.active_ch.clone());
         let (effects, np) = (self.effects.clone(), self.noise_print.clone());
         let (mix, gi, go) = (self.rack_mix, self.rack_in_db, self.rack_out_db);
-        self.spawn_job("Effects Rack".into(), JobKind::Edit { doc_id, range: (a, b), active, new_rate: None, select: true }, move || {
-            run_rack(&effects, &slots, input, sr, n_ch, np.as_ref(), mix, gi, go)
+        self.spawn_job_progress("Effects Rack".into(), JobKind::Edit { doc_id, range: (a, b), active, new_rate: None, select: true }, move |pr| {
+            run_rack_with(&effects, &slots, input, sr, n_ch, np.as_ref(), mix, gi, go, pr).map(JobOut::Chans)
         });
     }
 
@@ -2012,7 +2047,7 @@ impl App {
             let (src, active, doc_id, id) = (doc.audio.clone(), doc.active_ch.clone(), doc.id, def.id);
             self.last_effect = Some((idx, params.clone()));
             let kind = JobKind::Edit { doc_id, range: (a, b), active: active.clone(), new_rate: None, select: true };
-            self.spawn_job_out(def.name.to_string(), kind, move || crate::dsp::blockwise::run(id, &params, &src, a, b, &active).map(JobOut::Audio));
+            self.spawn_job_progress(def.name.to_string(), kind, move |pr| crate::dsp::blockwise::run_with(id, &params, &src, a, b, &active, pr).map(JobOut::Audio));
             return;
         }
         // Everything else loads the selection; check before loading hours of it.
@@ -3100,6 +3135,7 @@ impl App {
 /// Run an Effects Rack chain: input gain, each enabled effect in order,
 /// dry/wet mix, output gain.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn run_rack(
     effects: &[EffectDef],
     slots: &[(usize, Params)],
@@ -3111,12 +3147,33 @@ pub fn run_rack(
     in_db: f32,
     out_db: f32,
 ) -> Result<Vec<Vec<f32>>, String> {
+    run_rack_with(effects, slots, input, sr, n_ch, np, mix, in_db, out_db, &export::Progress::default())
+}
+
+/// `run_rack`, reporting progress effect by effect.
+#[allow(clippy::too_many_arguments)]
+pub fn run_rack_with(
+    effects: &[EffectDef],
+    slots: &[(usize, Params)],
+    input: Vec<Vec<f32>>,
+    sr: u32,
+    n_ch: usize,
+    np: Option<&NoiseProfile>,
+    mix: f32,
+    in_db: f32,
+    out_db: f32,
+    progress: &export::Progress,
+) -> Result<Vec<Vec<f32>>, String> {
     let ctx = Ctx { sample_rate: sr, channels: n_ch, noise_print: np, sound_model: None };
     let gi = db_to_lin(in_db);
     let go = db_to_lin(out_db);
     let mut x: Vec<Vec<f32>> = input.iter().map(|c| c.iter().map(|s| s * gi).collect()).collect();
-    for (idx, p) in slots {
+    for (k, (idx, p)) in slots.iter().enumerate() {
+        if progress.cancelled() {
+            return Err(crate::io::CANCELLED.into());
+        }
         x = effects[*idx].run(&x, &ctx, p).map_err(|e| format!("{}: {e}", effects[*idx].name))?;
+        progress.set((k + 1) as f32 / slots.len().max(1) as f32);
     }
     let m = (mix / 100.0).clamp(0.0, 1.0);
     let same = x.first().map(|c| c.len()) == input.first().map(|c| c.len());
