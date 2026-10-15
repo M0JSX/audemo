@@ -601,7 +601,7 @@ impl App {
                         }
                     });
                 });
-                note(ui, "Backups never replace your files. Unsaved recordings and edits in a session are written beside its backup. Audio files with unsaved changes are always backed up to the centralized folder, never beside the file.");
+                note(ui, "Backups never replace your files. Unsaved recordings and edits in a session are written beside its backup. Audio files with unsaved changes are always backed up to the centralized folder, never beside the file. Backups are deleted when you quit Audemo normally. If it closes unexpectedly they're kept, and the next time Audemo starts it offers to recover them.");
             }
             Page::ControlSurface => {
                 if d.midi_ports.is_none() {

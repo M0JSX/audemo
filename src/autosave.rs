@@ -14,6 +14,25 @@ use crate::prefs::BackupLocation;
 pub struct AutoSave {
     last: Option<Instant>,
     busy: Option<std::sync::mpsc::Receiver<Vec<String>>>,
+    /// Backups written while Audemo has been running (files, and the
+    /// "Files" folders of session backups): removed again on a normal quit.
+    /// After a crash they stay, for recovery.
+    pub(crate) written: Vec<PathBuf>,
+    /// The newest backup of each file and session this run, by backup name.
+    entries: BTreeMap<String, Recovery>,
+    /// Backups left by an earlier run that the user hasn't dealt with yet
+    /// ("Not Now"): kept in the list until they are.
+    pub(crate) stale: Vec<Recovery>,
+}
+
+/// A backup that can be reopened after Audemo didn't close normally.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Recovery {
+    pub session: bool,
+    pub backup: PathBuf,
+    /// The file or session it backs up (None if never saved).
+    pub original: Option<PathBuf>,
+    pub name: String,
 }
 
 impl AutoSave {
@@ -21,6 +40,53 @@ impl AutoSave {
     pub fn reset(&mut self) {
         self.last = Some(Instant::now());
     }
+}
+
+/// The list of backups in use, in the settings folder. It's rewritten after
+/// each round of backups and removed on a normal quit, so finding it at
+/// startup means Audemo didn't close normally last time.
+fn manifest() -> Option<PathBuf> {
+    crate::prefs::config_dir().map(|d| d.join("backups-in-use.txt"))
+}
+
+fn write_manifest(list: &[Recovery]) {
+    let Some(f) = manifest() else { return };
+    if list.is_empty() {
+        let _ = std::fs::remove_file(f);
+        return;
+    }
+    let clean = |s: &str| s.replace(['\t', '\n', '\r'], " ");
+    let text: String = list
+        .iter()
+        .map(|r| format!("{}\t{}\t{}\t{}\n", if r.session { "session" } else { "audio" }, r.backup.display(), r.original.as_ref().map(|p| p.display().to_string()).unwrap_or_default(), clean(&r.name)))
+        .collect();
+    if let Some(d) = f.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let _ = std::fs::write(f, text);
+}
+
+/// Backups left by a run that didn't close normally (those still on disk).
+pub fn leftover_backups() -> Vec<Recovery> {
+    let Some(text) = manifest().and_then(|f| std::fs::read_to_string(f).ok()) else { return Vec::new() };
+    parse_manifest(&text).into_iter().filter(|r| r.backup.is_file()).collect()
+}
+
+fn parse_manifest(text: &str) -> Vec<Recovery> {
+    text.lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            if f.len() < 4 {
+                return None;
+            }
+            Some(Recovery { session: f[0] == "session", backup: PathBuf::from(f[1]), original: (!f[2].is_empty()).then(|| PathBuf::from(f[2])), name: f[3].to_string() })
+        })
+        .collect()
+}
+
+/// The "Files" folder holding a session backup's unsaved audio.
+fn files_dir_of(backup: &Path) -> PathBuf {
+    PathBuf::from(format!("{} Files", backup.with_extension("").display()))
 }
 
 /// The centralized backup folder used when no other is chosen.
@@ -85,6 +151,77 @@ fn prune(dir: &Path, prefix: &str, keep: usize) {
 }
 
 impl App {
+    /// On a normal quit: delete the backups written this time (finishing any
+    /// in progress first), and Backup folders left empty. Backups from a
+    /// run that crashed are kept.
+    pub fn clear_backups(&mut self) {
+        if let Some(rx) = self.autosave.busy.take() {
+            let _ = rx.recv_timeout(std::time::Duration::from_secs(20));
+        }
+        let mut dirs = std::collections::BTreeSet::new();
+        for p in std::mem::take(&mut self.autosave.written) {
+            if p.is_dir() {
+                let _ = std::fs::remove_dir_all(&p);
+            } else {
+                let _ = std::fs::remove_file(&p);
+            }
+            if let Some(d) = p.parent() {
+                dirs.insert(d.to_path_buf());
+            }
+        }
+        for d in dirs {
+            let empty = std::fs::read_dir(&d).map(|mut r| r.next().is_none()).unwrap_or(false);
+            if empty && d.file_name().map(|n| n == "Backup").unwrap_or(false) {
+                let _ = std::fs::remove_dir(&d);
+            }
+        }
+        self.autosave.entries.clear();
+        // Only backups put off with "Not Now" stay listed.
+        let stale = self.autosave.stale.clone();
+        write_manifest(&stale);
+    }
+
+    /// Reopen backups left after Audemo didn't close normally: each comes
+    /// back with its original name (and file, so Save puts it back there),
+    /// marked as unsaved.
+    pub fn recover_backups(&mut self, list: Vec<Recovery>) {
+        for r in &list {
+            if r.session {
+                let n = self.sessions.len();
+                self.open_session(&r.backup);
+                if self.sessions.len() > n {
+                    let s = self.sessions.last_mut().unwrap();
+                    s.path = r.original.clone();
+                    s.name = r.name.clone();
+                    s.dirty = true;
+                }
+            } else {
+                self.load_async(r.backup.clone(), crate::app::LoadIntent::Recover { original: r.original.clone(), name: r.name.clone() });
+            }
+            // The old backup goes when Audemo next quits normally (its
+            // session audio is kept until the session has been saved).
+            self.autosave.written.push(r.backup.clone());
+        }
+        self.autosave.stale.retain(|s| !list.contains(s));
+        let mut all = self.autosave.stale.clone();
+        all.extend(list);
+        write_manifest(&all);
+    }
+
+    /// Delete backups left by an earlier run.
+    pub fn discard_backups(&mut self, list: Vec<Recovery>) {
+        for r in &list {
+            let _ = std::fs::remove_file(&r.backup);
+            if r.session {
+                let _ = std::fs::remove_dir_all(files_dir_of(&r.backup));
+            }
+        }
+        self.autosave.stale.retain(|s| !list.contains(s));
+        let mut all = self.autosave.stale.clone();
+        all.extend(self.autosave.entries.values().cloned());
+        write_manifest(&all);
+    }
+
     /// Where a session's backups go: a Backup folder beside the session, or
     /// the centralized folder.
     fn backup_dir_for(&self, near: Option<&Path>) -> Option<PathBuf> {
@@ -163,6 +300,7 @@ impl App {
                 }
             }
             let text = crate::session::to_text(s, &paths, Some(&dir));
+            self.autosave.entries.insert(prefix.clone(), Recovery { session: true, backup: file.clone(), original: s.path.clone(), name: s.name.clone() });
             items.push(Item::Text { path: file, text });
             items.push(Item::Prune { dir, prefix, keep });
         }
@@ -172,13 +310,33 @@ impl App {
                 let stem = Path::new(&d.name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled".into());
                 let prefix = format!("{} [{}] backup ", crate::mt_ui::safe_file_name(&stem), tag(d.path.as_deref(), d.id));
                 let markers = d.markers.clone();
-                items.push(Item::Audio { path: dir.join(format!("{prefix}{t}.wav")), audio: d.audio.clone(), rate: d.sample_rate, meta: d.meta.clone(), markers });
+                let file = dir.join(format!("{prefix}{t}.wav"));
+                self.autosave.entries.insert(prefix.clone(), Recovery { session: false, backup: file.clone(), original: d.path.clone(), name: d.name.clone() });
+                items.push(Item::Audio { path: file, audio: d.audio.clone(), rate: d.sample_rate, meta: d.meta.clone(), markers });
                 items.push(Item::Prune { dir, prefix, keep });
             }
         }
         if items.is_empty() {
             return;
         }
+        for it in &items {
+            match it {
+                Item::Text { path, .. } => self.autosave.written.push(path.clone()),
+                Item::Audio { path, .. } => {
+                    // Unsaved session audio lives in the backup's "Files" folder.
+                    match path.parent().filter(|d| d.to_string_lossy().ends_with(" Files")) {
+                        Some(d) => self.autosave.written.push(d.to_path_buf()),
+                        None => self.autosave.written.push(path.clone()),
+                    }
+                }
+                Item::Prune { .. } => {}
+            }
+        }
+        self.autosave.written.sort();
+        self.autosave.written.dedup();
+        let mut list: Vec<Recovery> = self.autosave.stale.clone();
+        list.extend(self.autosave.entries.values().cloned());
+        write_manifest(&list);
         let (tx, rx) = std::sync::mpsc::channel();
         self.autosave.busy = Some(rx);
         std::thread::spawn(move || {
@@ -207,6 +365,22 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn manifest_round_trips() {
+        let list = vec![
+            Recovery { session: false, backup: PathBuf::from("/b/Take [abc123] backup 2026-10-15 101500.wav"), original: Some(PathBuf::from("/music/Take.wav")), name: "Take.wav".into() },
+            Recovery { session: true, backup: PathBuf::from("/s/Backup/Song [def456] session backup 2026-10-15 101500.ases"), original: None, name: "Song\twith tab".into() },
+        ];
+        let clean = |s: &str| s.replace(['\t', '\n', '\r'], " ");
+        let text: String = list.iter().map(|r| format!("{}\t{}\t{}\t{}\n", if r.session { "session" } else { "audio" }, r.backup.display(), r.original.as_ref().map(|p| p.display().to_string()).unwrap_or_default(), clean(&r.name))).collect();
+        let back = parse_manifest(&text);
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0], list[0]);
+        assert_eq!((back[1].session, back[1].original.clone(), back[1].name.as_str()), (true, None, "Song with tab"));
+        assert_eq!(files_dir_of(&list[1].backup), PathBuf::from("/s/Backup/Song [def456] session backup 2026-10-15 101500 Files"));
+    }
+
     use super::*;
 
     #[test]

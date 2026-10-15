@@ -707,6 +707,51 @@ impl App {
                     next = Some(Dialog::ConfirmLargeEffect { idx, params, minutes, gb });
                 }
             }
+            Dialog::Recover { items, crash } => {
+                let mut choice = 0; // 1 = open, 2 = delete, 3 = later
+                centered(ctx, egui::Window::new("Recover unsaved work?")).show(ctx, |ui| {
+                    ui.set_max_width(460.0);
+                    ui.label("Audemo didn't close normally last time. These backups of unsaved work are still there:");
+                    ui.add_space(4.0);
+                    for r in &items {
+                        let kind = if r.session { "session" } else { "audio" };
+                        let when = std::fs::metadata(&r.backup)
+                            .and_then(|m| m.modified())
+                            .ok()
+                            .and_then(|t| t.elapsed().ok())
+                            .map(|e| {
+                                let m = e.as_secs() / 60;
+                                if m < 60 { format!("{m} min ago") } else if m < 48 * 60 { format!("{} h ago", m / 60) } else { format!("{} days ago", m / 1440) }
+                            })
+                            .unwrap_or_default();
+                        ui.label(RichText::new(format!("•  {}  ({kind}, backed up {when})", r.name)).color(WARN()));
+                    }
+                    if let Some(p) = &crash {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(format!("A crash report was saved to {}.", p.display())).size(11.0).color(TEXT_DIM()));
+                    }
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Recovered files open as unsaved changes under their original names; Save puts them back.").size(11.0).color(TEXT_DIM()));
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Recover All").clicked() {
+                            choice = 1;
+                        }
+                        if ui.button("Delete Backups").on_hover_text("Delete these backups for good").clicked() {
+                            choice = 2;
+                        }
+                        if ui.button("Not Now").on_hover_text("Keep them and ask again next time").clicked() {
+                            choice = 3;
+                        }
+                    });
+                });
+                match choice {
+                    1 => self.recover_backups(items),
+                    2 => self.discard_backups(items),
+                    3 => {}
+                    _ => next = Some(Dialog::Recover { items, crash }),
+                }
+            }
             Dialog::NewSession { mut name, mut rate, mut tracks, mut format } => {
                 let mut open = true;
                 let mut create = false;

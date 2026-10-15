@@ -449,6 +449,8 @@ pub enum LoadIntent {
     MtInsert { session_id: u64, track: usize, at: usize },
     /// Load a source referenced by a session file.
     SessionSource { session_id: u64, source_id: u64 },
+    /// Reopen an audio backup after a crash, as the file it backs up.
+    Recover { original: Option<PathBuf>, name: String },
 }
 
 /// Which editor fills the centre of the window.
@@ -501,6 +503,8 @@ pub enum Dialog {
     Message { title: String, text: String },
     ConfirmClose { doc: usize },
     ConfirmQuit,
+    /// Backups left after Audemo didn't close normally (and the crash report, if any).
+    Recover { items: Vec<crate::autosave::Recovery>, crash: Option<PathBuf> },
     /// An effect that needs the whole selection in memory, on a long selection.
     ConfirmLargeEffect { idx: Option<usize>, params: Params, minutes: f64, gb: f64 },
     NewSession { name: String, rate: u32, tracks: usize, format: crate::session::MasterFormat },
@@ -919,7 +923,11 @@ impl App {
         app.rebuild_keymap();
         app.apply_control_surface();
         crate::update::cleanup();
-        if let Some(p) = crate::new_crash_report() {
+        let leftovers = crate::autosave::leftover_backups();
+        if !leftovers.is_empty() {
+            app.autosave.stale = leftovers.clone();
+            app.dialog = Some(Dialog::Recover { items: leftovers, crash: crate::new_crash_report() });
+        } else if let Some(p) = crate::new_crash_report() {
             app.dialog = Some(Dialog::Message {
                 title: "Audemo closed unexpectedly".into(),
                 text: format!("Audemo crashed last time it ran. A report was saved to:\n\n{}\n\nPlease send that file in with what you were doing at the time.", p.display()),
@@ -1354,9 +1362,14 @@ impl App {
         if ctx.input(|i| i.viewport().close_requested()) {
             self.wait_for_save();
         }
-        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_quit && (self.docs.iter().any(|d| d.dirty) || self.sessions.iter().any(|s| s.dirty)) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.dialog = Some(Dialog::ConfirmQuit);
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if !self.allow_quit && (self.docs.iter().any(|d| d.dirty) || self.sessions.iter().any(|s| s.dirty)) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.dialog = Some(Dialog::ConfirmQuit);
+            } else {
+                // Closing normally: this run's backups aren't needed any more.
+                self.clear_backups();
+            }
         }
     }
 
@@ -1557,7 +1570,24 @@ impl App {
                 }
                 LoadIntent::SessionSource { session_id, source_id } => {
                     let doc_id = self.open_or_find_doc(&path, dec);
+                    // Audio from a recovered session backup counts as unsaved,
+                    // so saving the session copies it next to the session.
+                    if path.parent().map(|d| d.to_string_lossy().contains(" session backup ")).unwrap_or(false) {
+                        if let Some(d) = self.docs.iter_mut().find(|d| d.id == doc_id) {
+                            d.dirty = true;
+                        }
+                    }
                     self.mt_link_source(session_id, source_id, doc_id);
+                }
+                LoadIntent::Recover { original, name } => {
+                    let id = self.new_id();
+                    let mut doc = Document::from_decoded(id, name.clone(), path.clone(), dec);
+                    doc.path = original;
+                    doc.name = name.clone();
+                    doc.origin = "Recovered".into();
+                    doc.dirty = true;
+                    self.add_doc(doc);
+                    self.set_status(format!("Recovered {name} from its backup: save it to keep it."));
                 }
                 LoadIntent::Audition => {
                     if self.browser_selected.as_deref() == Some(path.as_path()) {

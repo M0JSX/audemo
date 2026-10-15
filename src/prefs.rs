@@ -205,7 +205,9 @@ prefs! {
     // Auto save
     autosave: bool = true,
     autosave_minutes: u32 = 5,
-    autosave_max: u32 = 10,
+    autosave_max: u32 = 3,
+    /// Settings format revision, for one-off changes to old defaults.
+    prefs_rev: u32 = 1,
     backup_location: BackupLocation = BackupLocation::WithSession,
     backup_dir: Option<PathBuf> = None,
     /// Also back up open audio files with unsaved changes.
@@ -373,6 +375,14 @@ impl Prefs {
             }
         }
         p.recent.truncate(MAX_RECENT);
+        // Settings saved before revision 1 (no prefs_rev line) kept the old
+        // default of 10 backups; the default is now 3.
+        if !text.lines().any(|l| l.trim_start().starts_with("prefs_rev")) {
+            if p.autosave_max == 10 {
+                p.autosave_max = 3;
+            }
+            p.prefs_rev = 1;
+        }
         p.sanitize();
         p
     }
