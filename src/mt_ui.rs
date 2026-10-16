@@ -828,6 +828,7 @@ impl App {
         let rec_head = self.transport_info().map(|t| t.0);
         let Some(si) = self.active_session.filter(|&i| i < self.sessions.len()) else { return };
         let (mut f_hold, mut f_last) = (self.follow_hold, self.follow_last);
+        let (mut r_hold, mut r_last) = (self.rec_hold, self.rec_last);
         let scrubbing = self.scrub_now;
         let s = &mut self.sessions[si];
         if st.playing && st.tag == s.id {
@@ -851,21 +852,19 @@ impl App {
                 s.clamp_view();
                 f_last = Some((s.id, s.view_start, s.view_end));
             }
-        } else if let (true, Some(h)) = (follow, head) {
-            let span = s.view_end - s.view_start;
-            if h > s.view_end - span * 0.02 || h < s.view_start {
-                s.view_start = h - span * 0.05;
-                s.view_end = s.view_start + span;
-                if recording {
-                    let max = s.view_end;
-                    s.view_end = max;
-                } else {
-                    s.clamp_view();
-                }
+        } else if let (true, Some(h)) = (recording, head) {
+            // Recording: the view pages along with the head, unless you've
+            // scrolled away (then it waits until the head is back in view).
+            if let Some(nv) = crate::app::rec_follow(&mut r_hold, &mut r_last, s.id, (s.view_start, s.view_end), h, follow) {
+                s.view_start = nv.0.max(0.0);
+                s.view_end = s.view_start + (nv.1 - nv.0);
+                r_last = Some((s.id, s.view_start, s.view_end));
             }
         }
         self.follow_hold = f_hold;
         self.follow_last = f_last;
+        self.rec_hold = r_hold;
+        self.rec_last = r_last;
     }
 
     fn mt_play_toggle(&mut self) {

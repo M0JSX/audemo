@@ -778,6 +778,9 @@ pub struct App {
     /// playback restarts). `follow_last` is the view following left.
     pub follow_hold: bool,
     pub follow_last: Option<(u64, f64, f64)>,
+    /// The same, for the recording head while recording.
+    pub rec_hold: bool,
+    pub rec_last: Option<(u64, f64, f64)>,
     pub hand_anchor: Option<(f32, f64, f64)>,
     /// Waveform fade handle drag: (fade in?, length, curve, cosine).
     pub fade_drag: Option<(bool, usize, f32, bool)>,
@@ -898,6 +901,8 @@ impl App {
             sent_mask: [true; 8],
             follow_hold: false,
             follow_last: None,
+            rec_hold: false,
+            rec_last: None,
             hand_anchor: None,
             fade_drag: None,
             play_origin: 0,
@@ -1331,6 +1336,10 @@ impl App {
     fn track_recording(&mut self) {
         self.engine.poll_recording();
         self.mt_punch_tick();
+        if !self.engine.is_recording() {
+            self.rec_hold = false;
+            self.rec_last = None;
+        }
         let Some(t) = &self.rec_target else { return };
         let Some((rate, _)) = self.engine.recording_format() else { return };
         if t.punch_lead.is_some() {
@@ -1345,16 +1354,19 @@ impl App {
         let doc_id = t.doc_id;
         let start = t.range.0;
         let follow = self.follow;
+        let (mut hold, mut last) = (self.rec_hold, self.rec_last);
         if let Some(d) = self.docs.iter_mut().find(|d| d.id == doc_id) {
             d.recording = true;
             d.pending = (frames as f64 * d.sample_rate as f64 / rate as f64) as usize;
             let head = (start + d.pending) as f64;
-            let span = d.view_end - d.view_start;
-            if follow && head > d.view_end - span * 0.05 {
-                d.view_end = d.max_span().min(head + span * 0.25).max(span);
-                d.view_start = (d.view_end - span).max(0.0);
+            if let Some(v) = rec_follow(&mut hold, &mut last, d.id, (d.view_start, d.view_end), head, follow) {
+                d.view_end = d.max_span().min(v.1).max(v.1 - v.0);
+                d.view_start = (d.view_end - (v.1 - v.0)).max(0.0);
+                last = Some((d.id, d.view_start, d.view_end));
             }
         }
+        self.rec_hold = hold;
+        self.rec_last = last;
     }
 
     pub fn finish_frame(&mut self, ctx: &egui::Context) {
@@ -3484,5 +3496,52 @@ mod follow_tests {
         assert_eq!(follow_view(&mut hold, &mut last, 1, (400.0, 500.0), 410.0, false), None);
         assert!(!hold);
         assert!(follow_view(&mut hold, &mut last, 1, (400.0, 500.0), 501.0, false).is_some());
+    }
+}
+
+/// Keeping the recording head in view: the view pages on as the head nears
+/// its right edge. If you move the view yourself (`last` differs from what
+/// this left), it stays where you put it until the head is back in view.
+pub fn rec_follow(hold: &mut bool, last: &mut Option<(u64, f64, f64)>, id: u64, view: (f64, f64), head: f64, follow: bool) -> Option<(f64, f64)> {
+    let (a, b) = view;
+    let span = b - a;
+    if let Some((lid, la, lb)) = *last {
+        if lid == id && ((la - a).abs() > 0.5 || (lb - b).abs() > 0.5) {
+            *hold = true;
+        }
+    }
+    *last = Some((id, a, b));
+    if *hold {
+        if head >= a && head <= b - span * 0.05 {
+            *hold = false;
+        } else {
+            return None;
+        }
+    }
+    if follow && head > b - span * 0.05 {
+        let end = head + span * 0.25;
+        return Some((end - span, end));
+    }
+    None
+}
+
+#[cfg(test)]
+mod rec_follow_tests {
+    use super::rec_follow;
+
+    #[test]
+    fn scrolling_away_while_recording_stays_put() {
+        let (mut hold, mut last) = (false, None);
+        assert_eq!(rec_follow(&mut hold, &mut last, 1, (0.0, 100.0), 50.0, true), None);
+        let v = rec_follow(&mut hold, &mut last, 1, (0.0, 100.0), 96.0, true).unwrap();
+        last = Some((1, v.0, v.1));
+        // You scroll back to the start while it records on.
+        assert_eq!(rec_follow(&mut hold, &mut last, 1, (0.0, 100.0), 130.0, true), None);
+        assert!(hold);
+        assert_eq!(rec_follow(&mut hold, &mut last, 1, (0.0, 100.0), 400.0, true), None);
+        // Scroll to where the head is and following picks up again.
+        assert_eq!(rec_follow(&mut hold, &mut last, 1, (380.0, 480.0), 401.0, true), None);
+        assert!(!hold);
+        assert!(rec_follow(&mut hold, &mut last, 1, (380.0, 480.0), 476.0, true).is_some());
     }
 }
