@@ -90,6 +90,20 @@ pub struct PrefsDialog {
     total_ram: Option<u64>,
     /// MIDI (inputs, outputs) for the Control Surface page, read when shown.
     midi_ports: Option<(Vec<String>, Vec<String>)>,
+    /// Apps with audio, for "Other Apps (System Audio)": (key, name, playing).
+    tap_list: Option<Vec<(String, String, bool)>>,
+}
+
+/// Apps that can be recorded from "Other Apps (System Audio)".
+fn tap_app_list() -> Vec<(String, String, bool)> {
+    #[cfg(any(target_os = "macos", audemo_check_tap))]
+    {
+        crate::systap::apps().into_iter().map(|a| (a.key, a.name, a.playing)).collect()
+    }
+    #[cfg(not(any(target_os = "macos", audemo_check_tap)))]
+    {
+        Vec::new()
+    }
 }
 
 impl PrefsDialog {
@@ -109,6 +123,7 @@ impl PrefsDialog {
             color_elem: 0,
             total_ram: total_ram(),
             midi_ports: None,
+            tap_list: None,
         };
         d.refresh_devices();
         d
@@ -490,6 +505,63 @@ impl App {
                         p.output_device = None;
                     } else {
                         row(ui, "Default Input", |ui| device_combo(ui, "hw_in", &mut p.input_device, &d.inputs, "System Default"));
+                        if p.input_device.as_deref() == Some(crate::engine::SYSTEM_AUDIO) {
+                            if d.tap_list.is_none() {
+                                d.tap_list = Some(tap_app_list());
+                            }
+                            let mut chosen: Vec<String> = p.tap_apps.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                            let mut changed = false;
+                            row(ui, "Record", |ui| {
+                                ui.vertical(|ui| {
+                                    let mut all = chosen.is_empty();
+                                    if ui.radio(all, "All apps (except Audemo)").clicked() && !all {
+                                        all = true;
+                                        chosen.clear();
+                                        changed = true;
+                                    }
+                                    if ui.radio(!all, "Only these apps:").clicked() && all {
+                                        // Start from the apps playing now.
+                                        chosen = d.tap_list.iter().flatten().filter(|a| a.2).map(|a| a.0.clone()).collect();
+                                        if chosen.is_empty() {
+                                            chosen = d.tap_list.iter().flatten().take(1).map(|a| a.0.clone()).collect();
+                                        }
+                                        changed = true;
+                                    }
+                                    let list = d.tap_list.clone().unwrap_or_default();
+                                    egui::ScrollArea::vertical().max_height(160.0).id_source("tap_apps").show(ui, |ui| {
+                                        // Chosen apps that aren't running now stay listed.
+                                        for key in chosen.clone() {
+                                            if !list.iter().any(|a| a.0 == key) {
+                                                let mut on = true;
+                                                if ui.checkbox(&mut on, RichText::new(format!("{key} (not running)")).color(TEXT_DIM())).changed() && !on {
+                                                    chosen.retain(|k| k != &key);
+                                                    changed = true;
+                                                }
+                                            }
+                                        }
+                                        for (key, name, playing) in &list {
+                                            let mut on = chosen.contains(key);
+                                            let label = if *playing { format!("{name}  ♪") } else { name.clone() };
+                                            if ui.add_enabled(!all || chosen.is_empty(), egui::Checkbox::new(&mut on, label)).changed() {
+                                                if on {
+                                                    chosen.push(key.clone());
+                                                } else {
+                                                    chosen.retain(|k| k != key);
+                                                }
+                                                changed = true;
+                                            }
+                                        }
+                                    });
+                                    if ui.small_button("Refresh List").clicked() {
+                                        d.tap_list = Some(tap_app_list());
+                                    }
+                                });
+                            });
+                            if changed {
+                                p.tap_apps = chosen.join(",");
+                            }
+                            note(ui, "Records what the chosen apps play (♪ = playing now), at full quality and whatever the volume. macOS asks once for permission to record system audio; if a recording is silent, allow Audemo in System Settings > Privacy & Security > Screen & System Audio Recording.");
+                        }
                         row(ui, "Default Output", |ui| device_combo(ui, "hw_out", &mut p.output_device, &d.outputs, "System Default"));
                     }
                     ui.add_space(4.0);

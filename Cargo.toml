@@ -1,6 +1,6 @@
 [package]
 name = "audemo"
-version = "1.7.8"
+version = "1.8.0"
 edition = "2021"
 rust-version = "1.80"
 description = "Audemo: a cross-platform waveform audio editor with a built-in effects suite"
@@ -49,7 +49,7 @@ muda = "0.15"
 arboard = "3.4"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(audemo_check_menu)', 'cfg(audemo_std_test)', 'cfg(audemo_stub)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(audemo_check_menu)', 'cfg(audemo_std_test)', 'cfg(audemo_stub)', 'cfg(audemo_check_tap)'] }
 
 [profile.release]
 opt-level = 3

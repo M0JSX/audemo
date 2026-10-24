@@ -1482,6 +1482,7 @@ impl Session {
 
 /// Render frames [a, b) of the stereo mix offline (mixdown), with fresh
 /// effect state, in blocks.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn mix_range(m: &MixState, a: usize, b: usize) -> Vec<Vec<f32>> {
     mix_range_with(m, a, b, &crate::export::Progress::default()).unwrap_or_default()
 }

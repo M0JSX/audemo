@@ -27,6 +27,8 @@ mod prefs;
 mod prefs_ui;
 mod session;
 mod sesx;
+#[cfg(any(target_os = "macos", audemo_check_tap))]
+mod systap;
 #[cfg(test)]
 mod sesx_pack;
 mod shortcuts;

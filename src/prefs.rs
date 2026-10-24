@@ -165,6 +165,9 @@ prefs! {
     /// Audio API ("CoreAudio", "WASAPI", "ALSA" …); None = the system's default.
     host: Option<String> = None,
     input_device: Option<String> = None,
+    /// Apps recorded from "Other Apps (System Audio)" (comma-separated
+    /// bundle identifiers; empty = everything except Audemo).
+    tap_apps: String = String::new(),
     output_device: Option<String> = None,
     /// I/O buffer size in frames (0 = the device's default).
     buffer_size: u32 = 0,
@@ -461,6 +464,7 @@ impl Prefs {
             rate: self.sample_rate,
             out_map: [self.out_map_l as usize, self.out_map_r as usize],
             in_map: [self.in_map_l as usize, self.in_map_r as usize],
+            tap_apps: self.tap_apps.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
         }
     }
 

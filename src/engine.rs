@@ -210,8 +210,33 @@ impl RecView {
     }
 }
 
+/// Where a recording comes from: an input device (or, on Windows, an
+/// output device's loopback), or the macOS tap on other apps.
+enum RecInput {
+    Device(cpal::Stream),
+    #[cfg(any(target_os = "macos", audemo_check_tap))]
+    Tap(crate::systap::Tap),
+}
+
+impl RecInput {
+    fn pause(&mut self) {
+        match self {
+            RecInput::Device(s) => {
+                let _ = s.pause();
+            }
+            #[cfg(any(target_os = "macos", audemo_check_tap))]
+            RecInput::Tap(t) => t.pause(),
+        }
+    }
+}
+
+/// The input listed for recording what other apps play (macOS 14.2+).
+pub const SYSTEM_AUDIO: &str = "Other Apps (System Audio)";
+/// Suffix of the inputs that record an output device (Windows loopback).
+pub const LOOPBACK: &str = " (what's playing)";
+
 struct Recording {
-    _stream: cpal::Stream,
+    _stream: RecInput,
     shared: Arc<Mutex<RecShared>>,
     /// Device input channels recorded as left and right.
     map: [usize; 2],
@@ -234,6 +259,8 @@ pub struct AudioConfig {
     pub rate: u32,
     pub out_map: [usize; 2],
     pub in_map: [usize; 2],
+    /// Apps recorded by SYSTEM_AUDIO (bundle identifiers; empty = all but Audemo).
+    pub tap_apps: Vec<String>,
 }
 
 pub struct Engine {
@@ -322,14 +349,22 @@ pub fn list_devices(host_name: Option<&str>) -> (Vec<String>, Vec<String>) {
         return (vec![JACK_DEVICE.into()], vec![JACK_DEVICE.into()]);
     }
     let host = host(host_name);
-    let ins = host
+    let mut ins: Vec<String> = host
         .input_devices()
         .map(|it| it.filter_map(|d| d.name().ok()).collect())
         .unwrap_or_default();
-    let outs = host
+    let outs: Vec<String> = host
         .output_devices()
         .map(|it| it.filter_map(|d| d.name().ok()).collect())
         .unwrap_or_default();
+    // Windows can record what an output device plays (WASAPI loopback).
+    if cfg!(windows) {
+        ins.extend(outs.iter().map(|o| format!("{o}{LOOPBACK}")));
+    }
+    #[cfg(any(target_os = "macos", audemo_check_tap))]
+    if crate::systap::available() {
+        ins.push(SYSTEM_AUDIO.into());
+    }
     (ins, outs)
 }
 
@@ -961,11 +996,28 @@ impl Engine {
         if let Some(r) = &self.rec {
             return Ok((r.rate, r.channels));
         }
-        let device = find_input(self.config.host.as_deref(), self.config.input.as_deref()).ok_or("No audio input device found.")?;
-        let default = device.default_input_config().map_err(|e| e.to_string())?;
+        #[cfg(any(target_os = "macos", audemo_check_tap))]
+        if self.config.input.as_deref() == Some(SYSTEM_AUDIO) {
+            return self.start_tap();
+        }
+        // An output device's loopback (Windows): an input stream on the output.
+        let loopback = self.config.input.as_deref().and_then(|n| n.strip_suffix(LOOPBACK)).filter(|_| cfg!(windows));
+        let (device, default) = match loopback {
+            Some(name) => {
+                let d = find_output(self.config.host.as_deref(), Some(name)).ok_or_else(|| format!("The output \"{name}\" isn't connected."))?;
+                let c = d.default_output_config().map_err(|e| e.to_string())?;
+                (d, c)
+            }
+            None => {
+                let d = find_input(self.config.host.as_deref(), self.config.input.as_deref()).ok_or("No audio input device found.")?;
+                let c = d.default_input_config().map_err(|e| e.to_string())?;
+                (d, c)
+            }
+        };
         // ASIO input and output share one clock: changing the rate for the
-        // input would retune the running output.
-        let want_rate = if is_asio(self.config.host.as_deref()) { None } else { want_rate };
+        // input would retune the running output. A loopback runs at the
+        // output's rate.
+        let want_rate = if is_asio(self.config.host.as_deref()) || loopback.is_some() { None } else { want_rate };
         let at_rate = want_rate.filter(|&r| r != default.sample_rate().0).and_then(|r| {
             let ranges = device.supported_input_configs().ok()?;
             ranges
@@ -1009,7 +1061,27 @@ impl Engine {
         let (rate, channels) = (cfg.sample_rate.0, cfg.channels as usize);
         let mut view = RecView::default();
         view.reset(channels.clamp(1, 2));
-        self.rec = Some(Recording { _stream: stream, shared, map, channels, rate, view });
+        self.rec = Some(Recording { _stream: RecInput::Device(stream), shared, map, channels, rate, view });
+        Ok((rate, channels))
+    }
+
+    /// Record what other apps play (macOS process tap).
+    #[cfg(any(target_os = "macos", audemo_check_tap))]
+    fn start_tap(&mut self) -> Result<(u32, usize), String> {
+        // Chunks are sized for stereo at 48 kHz; a frame split across two
+        // chunks is handled by the reader.
+        let chunk_len = 48_000 * 2;
+        let shared = Arc::new(Mutex::new(RecShared { chunks: vec![Vec::with_capacity(chunk_len)], chunk_len, samples: 0, peaks: [0.0; 2] }));
+        let s = shared.clone();
+        let on_audio = Box::new(move |input: &[f32], n_ch: usize| {
+            let Ok(mut guard) = s.lock() else { return };
+            rec_push(&mut guard, input, n_ch, [0, 1]);
+        });
+        let (tap, rate, channels) = crate::systap::start(&self.config.tap_apps, on_audio)?;
+        let map = [0, 1usize.min(channels - 1)];
+        let mut view = RecView::default();
+        view.reset(channels.clamp(1, 2));
+        self.rec = Some(Recording { _stream: RecInput::Tap(tap), shared, map, channels, rate, view });
         Ok((rate, channels))
     }
 
@@ -1017,7 +1089,7 @@ impl Engine {
     pub fn stop_recording(&mut self) -> Option<(crate::audio::Audio, u32)> {
         let rec = self.rec.as_mut()?;
         // Stop the input first, then collect whatever arrived since the last frame.
-        rec._stream.pause().ok();
+        rec._stream.pause();
         self.poll_recording();
         let rec = self.rec.take()?;
         let rate = rec.rate;
@@ -1228,6 +1300,26 @@ fn free_consumed(chunks: &mut [Vec<f32>], consumed: usize) {
     for c in chunks.iter_mut().take(n) {
         if c.capacity() > 0 {
             *c = Vec::new();
+        }
+    }
+}
+
+/// Append interleaved float frames of `n_ch` channels to the recording.
+#[cfg_attr(not(any(target_os = "macos", audemo_check_tap)), allow(dead_code))]
+fn rec_push(s: &mut RecShared, input: &[f32], n_ch: usize, map: [usize; 2]) {
+    let n_ch = n_ch.max(1);
+    for frame in input.chunks(n_ch) {
+        for c in 0..2 {
+            let v = frame[map[c].min(frame.len() - 1)];
+            s.peaks[c] = s.peaks[c].max(v.abs());
+        }
+        for &v in frame {
+            if s.chunks.last().map(|c| c.len() >= s.chunk_len).unwrap_or(true) {
+                let n = s.chunk_len;
+                s.chunks.push(Vec::with_capacity(n));
+            }
+            s.chunks.last_mut().unwrap().push(v);
+            s.samples += 1;
         }
     }
 }

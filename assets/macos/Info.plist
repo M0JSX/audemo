@@ -24,6 +24,8 @@
     <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>Audemo records audio from your microphone or audio interface when you press Record.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Audemo records the sound other apps play (such as your browser) when you choose Other Apps as the input and press Record.</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.music</string>
 </dict>
