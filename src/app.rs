@@ -3512,7 +3512,9 @@ pub fn rec_follow(hold: &mut bool, last: &mut Option<(u64, f64, f64)>, id: u64, 
     }
     *last = Some((id, a, b));
     if *hold {
-        if head >= a && head <= b - span * 0.05 {
+        // Back in view, including right at its edge: scrolling right during a
+        // recording stops at the head, so that's where you catch up with it.
+        if head >= a && head <= b + span * 0.02 {
             *hold = false;
         } else {
             return None;
@@ -3543,5 +3545,9 @@ mod rec_follow_tests {
         assert_eq!(rec_follow(&mut hold, &mut last, 1, (380.0, 480.0), 401.0, true), None);
         assert!(!hold);
         assert!(rec_follow(&mut hold, &mut last, 1, (380.0, 480.0), 476.0, true).is_some());
+        // Scrolling right stops with the head at the right edge: that catches up too.
+        let (mut hold, mut last) = (true, Some((1, 0.0, 100.0)));
+        assert!(rec_follow(&mut hold, &mut last, 1, (420.0, 520.0), 520.0, true).is_some());
+        assert!(!hold);
     }
 }
