@@ -1356,10 +1356,19 @@ impl App {
         let follow = self.follow;
         let (mut hold, mut last) = (self.rec_hold, self.rec_last);
         if let Some(d) = self.docs.iter_mut().find(|d| d.id == doc_id) {
+            // Zoomed all the way out: the whole recording stays in view, the
+            // start fixed and the end growing with the take.
+            let old_max = d.max_span();
+            let full = d.recording && d.view_start <= 1.0 && d.view_end >= old_max - (old_max * 0.002).max(1.0);
             d.recording = true;
             d.pending = (frames as f64 * d.sample_rate as f64 / rate as f64) as usize;
             let head = (start + d.pending) as f64;
-            if let Some(v) = rec_follow(&mut hold, &mut last, d.id, (d.view_start, d.view_end), head, follow) {
+            if full {
+                d.view_start = 0.0;
+                d.view_end = d.max_span();
+                last = Some((d.id, d.view_start, d.view_end));
+                hold = false;
+            } else if let Some(v) = rec_follow(&mut hold, &mut last, d.id, (d.view_start, d.view_end), head, follow) {
                 d.view_end = d.max_span().min(v.1).max(v.1 - v.0);
                 d.view_start = (d.view_end - (v.1 - v.0)).max(0.0);
                 last = Some((d.id, d.view_start, d.view_end));
