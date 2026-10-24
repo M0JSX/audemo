@@ -2863,7 +2863,11 @@ impl App {
         }
         // Wheel: zoom time; Shift scrolls time; Alt (or over the headers) scrolls tracks.
         if let Some(p) = pointer.filter(|p| body.contains(*p)) {
-            let scroll = ui.input(|i| i.raw_scroll_delta);
+            let (scroll, pinch) = ui.input(|i| (i.raw_scroll_delta, i.zoom_delta()));
+            // Trackpad pinch zooms time around the pointer.
+            if pinch != 1.0 && !mods.command && p.x >= lanes.left() {
+                s.zoom(1.0 / pinch as f64, v.s(p.x));
+            }
             if scroll != egui::Vec2::ZERO {
                 if p.x < lanes.left() || mods.alt {
                     s.scroll_y = (s.scroll_y - scroll.y).clamp(0.0, max_scroll);

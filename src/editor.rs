@@ -876,7 +876,14 @@ impl App {
             }
         }
         if resp.hovered() {
-            let (scroll, hover) = ui.input(|i| (i.raw_scroll_delta, i.pointer.hover_pos()));
+            let (scroll, hover, pinch) = ui.input(|i| (i.raw_scroll_delta, i.pointer.hover_pos(), i.zoom_delta()));
+            // Trackpad pinch zooms time around the pointer (spread to zoom in).
+            // Ctrl/⌘+wheel also arrives as a zoom, but the wheel code below
+            // already handles that.
+            if pinch != 1.0 && !mods.command {
+                let anchor = hover.map(|h| v.s(h.x)).unwrap_or((v.start + v.end) / 2.0);
+                doc.zoom(1.0 / pinch as f64, anchor);
+            }
             if scroll != egui::Vec2::ZERO {
                 if mods.alt {
                     doc.amp_zoom = (doc.amp_zoom * (1.0 + scroll.y * 0.004)).clamp(1.0, 64.0);
