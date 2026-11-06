@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Build dist/Audemo-<version>-arm64.apk (64-bit ARM: the Galaxy Tab S9
-# Ultra and every current Android tablet and phone).
+# Build dist/Audemo-<version>-android.apk: 64-bit ARM and x86-64, for
+# Android tablets, Googlebooks and Chromebooks.
 #
-# Needs: Rust with the aarch64-linux-android target, the Android SDK
+# Needs: Rust with the aarch64-linux-android and x86_64-linux-android targets, the Android SDK
 # (ANDROID_HOME, with build-tools and a platform) and NDK (ANDROID_NDK_HOME),
 # and a JDK for keytool. No Gradle: Audemo is a NativeActivity with no Java.
 #
@@ -32,28 +32,35 @@ version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 IFS=. read -r v_major v_minor v_patch <<< "$version"
 version_code=$((v_major * 10000 + v_minor * 100 + v_patch))
 
-# ------------------------------------------------------------ native library
-TARGET=aarch64-linux-android
-export CC_aarch64_linux_android="$TOOLS/${TARGET}${MIN_SDK}-clang"
-export CXX_aarch64_linux_android="$TOOLS/${TARGET}${MIN_SDK}-clang++"
-export AR_aarch64_linux_android="$TOOLS/llvm-ar"
-export RANLIB_aarch64_linux_android="$TOOLS/llvm-ranlib"
-export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
-# FDK AAC includes AOSP's <log/log.h> on Android; a stand-in is provided.
-export CFLAGS_aarch64_linux_android="-I$PWD/assets/android/include"
-export CXXFLAGS_aarch64_linux_android="-I$PWD/assets/android/include"
-cargo rustc --target "$TARGET" --lib --release --crate-type cdylib
-
-SO="target/$TARGET/release/libaudemo.so"
+# ------------------------------------------------------------ native libraries
+# 64-bit ARM (tablets, phones, most Googlebooks) and x86-64 (Intel/AMD
+# Googlebooks and Chromebooks, the emulator), in one APK.
 STAGE=target/android-apk
 rm -rf "$STAGE"
-mkdir -p "$STAGE/lib/arm64-v8a" dist
-cp "$SO" "$STAGE/lib/arm64-v8a/"
-# The C++ runtime, if Oboe (or anything else) links it dynamically.
-if "$TOOLS/llvm-readelf" -d "$SO" | grep -q 'libc++_shared.so'; then
-    cp "$NDK/toolchains/llvm/prebuilt/$HOST_TAG/sysroot/usr/lib/$TARGET/libc++_shared.so" "$STAGE/lib/arm64-v8a/"
-fi
-"$TOOLS/llvm-readelf" -d "$STAGE/lib/arm64-v8a/libaudemo.so" | grep NEEDED || true
+mkdir -p dist
+# FDK AAC includes AOSP's <log/log.h> on Android; a stand-in is provided.
+for pair in aarch64-linux-android:arm64-v8a x86_64-linux-android:x86_64; do
+    TARGET=${pair%%:*}
+    ABI=${pair##*:}
+    T=${TARGET//-/_}
+    TU=$(echo "$T" | tr a-z A-Z)
+    export "CC_$T=$TOOLS/${TARGET}${MIN_SDK}-clang"
+    export "CXX_$T=$TOOLS/${TARGET}${MIN_SDK}-clang++"
+    export "AR_$T=$TOOLS/llvm-ar"
+    export "RANLIB_$T=$TOOLS/llvm-ranlib"
+    export "CARGO_TARGET_${TU}_LINKER=$TOOLS/${TARGET}${MIN_SDK}-clang"
+    export "CFLAGS_$T=-I$PWD/assets/android/include"
+    export "CXXFLAGS_$T=-I$PWD/assets/android/include"
+    cargo rustc --target "$TARGET" --lib --release --crate-type cdylib
+    SO="target/$TARGET/release/libaudemo.so"
+    mkdir -p "$STAGE/lib/$ABI"
+    cp "$SO" "$STAGE/lib/$ABI/"
+    # The C++ runtime, if Oboe (or anything else) links it dynamically.
+    if "$TOOLS/llvm-readelf" -d "$SO" | grep -q 'libc++_shared.so'; then
+        cp "$NDK/toolchains/llvm/prebuilt/$HOST_TAG/sysroot/usr/lib/$TARGET/libc++_shared.so" "$STAGE/lib/$ABI/"
+    fi
+    "$TOOLS/llvm-readelf" -d "$STAGE/lib/$ABI/libaudemo.so" | grep NEEDED || true
+done
 
 # ------------------------------------------------------------ APK
 "$BT/aapt2" compile --dir assets/android/res -o "$STAGE/res.zip"
@@ -72,7 +79,7 @@ if [ ! -f "$KS" ]; then
     keytool -genkeypair -keystore "$KS" -storepass "$PASS" -keypass "$PASS" -alias audemo \
         -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Audemo,O=M0JSX,C=GB"
 fi
-OUT="dist/Audemo-$version-arm64.apk"
+OUT="dist/Audemo-$version-android.apk"
 "$BT/apksigner" sign --ks "$KS" --ks-pass "pass:$PASS" --key-pass "pass:$PASS" --ks-key-alias audemo --out "$OUT" "$STAGE/aligned.apk"
 "$BT/apksigner" verify "$OUT"
 ls -l "$OUT"

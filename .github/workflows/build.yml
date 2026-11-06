@@ -117,14 +117,14 @@ jobs:
           if-no-files-found: error
 
   android:
-    name: Android arm64
+    name: Android
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android
+          targets: aarch64-linux-android,x86_64-linux-android
 
       - uses: Swatinem/rust-cache@v2
         with:
