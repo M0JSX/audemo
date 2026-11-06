@@ -84,6 +84,19 @@ pub fn open_storage_settings() {
     });
 }
 
+/// Open a web page (or file) with the app Android picks for it.
+pub fn open_url(url: &str) -> bool {
+    with_activity(|env, act| {
+        let action = env.new_string("android.intent.action.VIEW")?;
+        let text = env.new_string(url)?;
+        let uri = env.call_static_method("android/net/Uri", "parse", "(Ljava/lang/String;)Landroid/net/Uri;", &[JValue::Object(&text)])?.l()?;
+        let intent = env.new_object("android/content/Intent", "(Ljava/lang/String;Landroid/net/Uri;)V", &[JValue::Object(&action), JValue::Object(&uri)])?;
+        env.call_method(act, "startActivity", "(Landroid/content/Intent;)V", &[JValue::Object(&intent)])?;
+        Ok(())
+    })
+    .is_some()
+}
+
 static KEYBOARD_SHOWN: AtomicBool = AtomicBool::new(false);
 static STORAGE_OK: AtomicBool = AtomicBool::new(false);
 static STORAGE_DISMISSED: AtomicBool = AtomicBool::new(false);

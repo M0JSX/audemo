@@ -282,14 +282,25 @@ fn fetch() -> Outcome {
 
 /// Open a web page (or a file) with the system's default app.
 pub fn open_url(url: &str) -> Result<(), String> {
-    use std::process::Command;
-    #[cfg(target_os = "macos")]
-    let r = Command::new("open").arg(url).spawn();
-    #[cfg(windows)]
-    let r = Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
-    #[cfg(not(any(target_os = "macos", windows)))]
-    let r = Command::new("xdg-open").arg(url).spawn();
-    r.map(|_| ()).map_err(|e| format!("Couldn't open {url}: {e}"))
+    #[cfg(target_os = "android")]
+    {
+        if crate::android::open_url(url) {
+            Ok(())
+        } else {
+            Err(format!("Couldn't open {url}"))
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        use std::process::Command;
+        #[cfg(target_os = "macos")]
+        let r = Command::new("open").arg(url).spawn();
+        #[cfg(windows)]
+        let r = Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
+        #[cfg(not(any(target_os = "macos", windows)))]
+        let r = Command::new("xdg-open").arg(url).spawn();
+        r.map(|_| ()).map_err(|e| format!("Couldn't open {url}: {e}"))
+    }
 }
 
 // ------------------------------------------------------------------ SHA-256
@@ -392,6 +403,10 @@ pub enum InstallKind {
 }
 
 pub fn install_kind() -> Option<InstallKind> {
+    // Android installs updates through the downloaded APK, not in place.
+    if cfg!(target_os = "android") {
+        return None;
+    }
     let exe = std::env::current_exe().ok()?;
     let exe = exe.canonicalize().unwrap_or(exe);
     if cfg!(windows) {
