@@ -16,8 +16,22 @@ use winit::platform::android::activity::AndroidApp;
 
 static APP: OnceLock<AndroidApp> = OnceLock::new();
 
+#[link(name = "log")]
+extern "C" {
+    fn __android_log_write(prio: i32, tag: *const std::ffi::c_char, text: *const std::ffi::c_char) -> i32;
+}
+
+/// Write a line to the system log (`adb logcat -s Audemo`): Rust's own
+/// output goes nowhere on Android.
+pub fn log(msg: &str) {
+    let text = std::ffi::CString::new(msg.replace('\0', " ")).unwrap_or_default();
+    // 6 = ANDROID_LOG_ERROR, so it shows with the default filters.
+    unsafe { __android_log_write(6, b"Audemo\0".as_ptr() as *const std::ffi::c_char, text.as_ptr()) };
+}
+
 #[no_mangle]
 fn android_main(app: AndroidApp) {
+    log(&format!("Audemo {} starting", env!("CARGO_PKG_VERSION")));
     let _ = APP.set(app.clone());
     // Preferences, autosave and temporary files live in the app's private
     // storage. (Before other threads read the environment.)
@@ -29,16 +43,20 @@ fn android_main(app: AndroidApp) {
         std::env::set_var("TMPDIR", &tmp);
     }
     crate::install_crash_log();
+    log("settings");
     crate::prefs::apply_temp_dir(&crate::prefs::Prefs::load());
+    log("microphone permission");
     request_microphone();
+    log("opening the window");
     let mut options = crate::native_options();
     options.event_loop_builder = Some(Box::new(move |b| {
         use winit::platform::android::EventLoopBuilderExtAndroid;
         b.with_android_app(app);
     }));
     if let Err(e) = crate::run(options, Vec::new()) {
-        eprintln!("Audemo: {e}");
+        log(&format!("Audemo couldn't start: {e}"));
     }
+    log("Audemo closed");
 }
 
 /// Run `f` with the JNI environment and the activity.

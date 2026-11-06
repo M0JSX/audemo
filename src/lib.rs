@@ -92,6 +92,8 @@ fn install_crash_log() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let bt = std::backtrace::Backtrace::force_capture();
+        #[cfg(target_os = "android")]
+        android::log(&format!("PANIC: {info}\n{bt}"));
         if let Some(dir) = crash_dir() {
             let _ = std::fs::create_dir_all(&dir);
             let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -147,7 +149,18 @@ fn native_options() -> eframe::NativeOptions {
 }
 
 fn run(options: eframe::NativeOptions, files: Vec<PathBuf>) -> eframe::Result<()> {
-    eframe::run_native("Audemo", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, files)))))
+    eframe::run_native(
+        "Audemo",
+        options,
+        Box::new(move |cc| {
+            #[cfg(target_os = "android")]
+            android::log("window ready, starting Audemo");
+            let app = app::App::new(cc, files);
+            #[cfg(target_os = "android")]
+            android::log("Audemo started");
+            Ok(Box::new(app))
+        }),
+    )
 }
 
 /// The desktop program: `audemo [files…]`, or `audemo --scan-vst3 <bundle>`
