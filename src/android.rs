@@ -32,7 +32,10 @@ fn android_main(app: AndroidApp) {
     crate::prefs::apply_temp_dir(&crate::prefs::Prefs::load());
     request_microphone();
     let mut options = crate::native_options();
-    options.android_app = Some(app);
+    options.event_loop_builder = Some(Box::new(move |b| {
+        use winit::platform::android::EventLoopBuilderExtAndroid;
+        b.with_android_app(app);
+    }));
     if let Err(e) = crate::run(options, Vec::new()) {
         eprintln!("Audemo: {e}");
     }
